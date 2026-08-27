@@ -1,6 +1,6 @@
 项目名称：Mini Coder Agent
 
-Git 仓库地址：TODO（创建题目发布后的公开仓库后填写）
+Git 仓库地址：https://github.com/Sammy0520/mini-coder-agent
 
 运行方法：安装 Python 3.11+，在项目目录执行“python -m pip install -e .”。复制不含密钥的 agent.toml.example，使用 provider TOML 配置模型、base URL、Responses/Chat Completions 协议、推理强度和输出详细度；API key 通过环境变量或已被 Git 忽略的本地 auth.json 提供。然后运行“mini-coder --config agent.toml --workspace <项目目录> <任务>”。默认情况下，写文件和执行命令需人工确认；在可丢弃的演示目录可添加 --auto。
 
