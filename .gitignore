@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+dist/
+build/
+agent-events.jsonl
+auth.json
+tmp/

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-coder-agent"
+version = "0.1.0"
+description = "A small, inspectable coding agent built without an agent framework."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.82",
+]
+
+[project.scripts]
+mini-coder = "mini_coder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
