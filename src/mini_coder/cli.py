@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent import AgentRunner
+from .changes import ChangeTracker
 from .config import AgentConfig, ApprovalPolicy
 from .exceptions import ConfigurationError, MiniCoderError, SessionError
 from .model import OpenAICompatibleClient
@@ -63,6 +64,16 @@ def build_parser() -> argparse.ArgumentParser:
             "may be repeated and requires --resume"
         ),
     )
+    parser.add_argument(
+        "--show-changes",
+        action="store_true",
+        help="Show tracked Session changes and exit; requires --resume",
+    )
+    parser.add_argument(
+        "--undo-last",
+        action="store_true",
+        help="Safely undo the last active tracked file change and exit; requires --resume",
+    )
     return parser
 
 
@@ -77,8 +88,38 @@ def main(argv: list[str] | None = None) -> int:
         resumed_session, session_store = _load_resume_session(args.resume, args.workspace)
         if args.resolve_uncertain and resumed_session is None:
             raise ConfigurationError("--resolve-uncertain requires --resume")
+        if (args.show_changes or args.undo_last) and resumed_session is None:
+            raise ConfigurationError("--show-changes and --undo-last require --resume")
+        if args.show_changes and args.undo_last:
+            raise ConfigurationError("Use only one of --show-changes or --undo-last")
+        if args.resolve_uncertain and (args.show_changes or args.undo_last):
+            raise ConfigurationError(
+                "Do not combine --resolve-uncertain with --show-changes or --undo-last"
+            )
         if resumed_session is not None and args.task:
             raise ConfigurationError("Do not provide a new task together with --resume")
+        if resumed_session is not None and (args.show_changes or args.undo_last):
+            event_callback = _event_handler(args.log)
+            if args.undo_last:
+                tracker = ChangeTracker(resumed_session.workspace)
+                change, undo = tracker.undo_last(resumed_session.changes)
+                resumed_session.undo_history.append(undo)
+                resumed_session.touch()
+                session_store.save(resumed_session)
+                event_callback(
+                    "change_undone",
+                    {
+                        "session_id": resumed_session.session_id,
+                        "undo_id": undo.undo_id,
+                        "change_id": change.change_id,
+                        "path": change.path,
+                        "restored_hash": undo.restored_hash,
+                    },
+                )
+                print(f"Undid tracked change {change.change_id} for {change.path}.")
+            else:
+                _print_changes(resumed_session)
+            return 0
         if resumed_session is None:
             task = " ".join(args.task).strip()
             if not task:
@@ -210,6 +251,8 @@ def _print_resume_summary(session: AgentSession) -> None:
         f"  Saved status: {session.status.value}\n"
         f"  Last completed model step: {session.current_step}\n"
         f"  Pending/uncertain tools: {len(pending)}\n"
+        f"  Tracked changes: {len(session.changes)} "
+        f"({len([item for item in session.changes if item.undo_status == 'active'])} active)\n"
         f"  Task: {task_preview}"
     )
     for item in pending:
@@ -217,6 +260,27 @@ def _print_resume_summary(session: AgentSession) -> None:
         print(
             f"  - {item.execution_id}: {item.name} [{item.status.value}] "
             f"{arguments[:200]}"
+        )
+
+
+def _print_changes(session: AgentSession) -> None:
+    print(
+        f"Session {session.session_id} tracked changes: {len(session.changes)}; "
+        f"undo operations: {len(session.undo_history)}"
+    )
+    if not session.changes:
+        print("No tracked file changes.")
+        return
+    for index, change in enumerate(session.changes, start=1):
+        truncated = " [truncated]" if change.diff_truncated else ""
+        print(
+            f"\n[{index}] {change.path} [{change.undo_status}] "
+            f"+{change.additions}/-{change.deletions}{truncated}\n"
+            f"change_id={change.change_id}\n"
+            f"tool_execution_id={change.tool_execution_id}\n"
+            f"before={change.before_hash or '<missing>'}\n"
+            f"after={change.after_hash}\n"
+            f"{change.unified_diff}"
         )
 
 
@@ -340,6 +404,22 @@ def _event_handler(log_path: Path | None):
                 f"Resolved uncertain tool {payload['execution_id']} as "
                 f"{payload['resolution']}."
             )
+        elif name == "change_preview":
+            truncated = " [truncated]" if payload["diff_truncated"] else ""
+            print(
+                f"\nChange preview: {payload['path']} "
+                f"+{payload['additions']}/-{payload['deletions']}{truncated}\n"
+                f"before: {payload['before_hash'] or '<missing>'}\n"
+                f"after:  {payload['after_hash']}\n"
+                f"{payload['diff']}"
+            )
+        elif name == "change_applied":
+            print(
+                f"[change] {payload['path']}: "
+                f"+{payload['additions']}/-{payload['deletions']}"
+            )
+        elif name == "change_undone":
+            print(f"[undo] restored {payload['path']}")
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as stream:

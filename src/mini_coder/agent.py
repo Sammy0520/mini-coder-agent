@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .changes import ChangeTracker, PreparedChange
 from .config import AgentConfig, ApprovalPolicy
 from .context import ContextManager
-from .exceptions import ModelError, SessionError
+from .exceptions import ChangeError, ModelError, SessionError, ToolError
 from .messages import ModelResponse, ToolCall
 from .model import ModelClient
 from .prompts import build_system_prompt
@@ -59,6 +60,7 @@ class AgentRunner:
         self.event_callback = event_callback
         self.session_store = session_store
         self.context = ContextManager(config.max_context_chars)
+        self.change_tracker = ChangeTracker(config.workspace)
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
@@ -412,6 +414,50 @@ class AgentRunner:
             )
             return result
 
+        try:
+            self.registry.validate_arguments(call.name, call.arguments)
+        except ToolError as exc:
+            result = ToolResult(False, str(exc))
+            self._record_tool_result(
+                call,
+                record,
+                result,
+                messages,
+                usage,
+                session,
+                status=ToolExecutionStatus.FAILED,
+            )
+            return result
+
+        prepared_change: PreparedChange | None = None
+        if call.name in {"write_file", "edit_file"}:
+            try:
+                if record is not None and record.prepared_change is not None:
+                    prepared_change = record.prepared_change
+                else:
+                    prepared_change = self.change_tracker.prepare(
+                        call.name,
+                        call.arguments,
+                        record.execution_id if record is not None else uuid.uuid4().hex,
+                    )
+                    if record is not None:
+                        record.prepared_change = prepared_change
+                        if session is not None:
+                            self._persist(session, messages, usage)
+                self._emit_change_preview(prepared_change)
+            except ChangeError as exc:
+                result = ToolResult(False, str(exc))
+                self._record_tool_result(
+                    call,
+                    record,
+                    result,
+                    messages,
+                    usage,
+                    session,
+                    status=ToolExecutionStatus.FAILED,
+                )
+                return result
+
         tool = self.registry.get(call.name)
         if tool is None:
             result = ToolResult(False, f"Unknown tool: {call.name}")
@@ -461,7 +507,45 @@ class AgentRunner:
             if session is not None:
                 self._persist(session, messages, usage)
 
-        result = self.registry.execute(call.name, call.arguments, self.tool_context)
+        if prepared_change is not None:
+            try:
+                change = self.change_tracker.apply(prepared_change)
+                if session is not None:
+                    session.changes.append(change)
+                if record is not None:
+                    record.change_id = change.change_id
+                    record.prepared_change = None
+                result = ToolResult(
+                    True,
+                    (
+                        f"Tracked {prepared_change.tool_name} change for "
+                        f"{prepared_change.path}"
+                    ),
+                    {
+                        "change_id": change.change_id,
+                        "path": change.path,
+                        "additions": change.additions,
+                        "deletions": change.deletions,
+                        "diff_truncated": change.diff_truncated,
+                        "before_hash": change.before_hash,
+                        "after_hash": change.after_hash,
+                    },
+                )
+                self._emit(
+                    "change_applied",
+                    {
+                        "session_id": session.session_id if session is not None else None,
+                        "change_id": change.change_id,
+                        "tool_execution_id": change.tool_execution_id,
+                        "path": change.path,
+                        "additions": change.additions,
+                        "deletions": change.deletions,
+                    },
+                )
+            except ChangeError as exc:
+                result = ToolResult(False, str(exc))
+        else:
+            result = self.registry.execute(call.name, call.arguments, self.tool_context)
         self._record_tool_result(
             call,
             record,
@@ -601,6 +685,7 @@ class AgentRunner:
         stop_reason: str,
         last_error: str | None = None,
     ) -> AgentRunResult:
+        final_text = self._with_change_summary(final_text, session)
         if session is not None:
             session.set_status(
                 session_status,
@@ -617,6 +702,11 @@ class AgentRunner:
                 "session_status": session.status.value if session is not None else None,
                 "steps": steps,
                 "stop_reason": stop_reason,
+                "active_changes": (
+                    len([item for item in session.changes if item.undo_status == "active"])
+                    if session is not None
+                    else 0
+                ),
             },
         )
         return AgentRunResult(
@@ -641,6 +731,55 @@ class AgentRunner:
     def _emit(self, name: str, payload: dict[str, Any]) -> None:
         if self.event_callback is not None:
             self.event_callback(name, payload)
+
+    def _emit_change_preview(self, prepared: PreparedChange) -> None:
+        self._emit(
+            "change_preview",
+            {
+                "path": prepared.path,
+                "tool_execution_id": prepared.tool_execution_id,
+                "tool": prepared.tool_name,
+                "before_hash": prepared.before_hash,
+                "after_hash": prepared.after_hash,
+                "additions": prepared.additions,
+                "deletions": prepared.deletions,
+                "diff": prepared.unified_diff,
+                "diff_truncated": prepared.diff_truncated,
+            },
+        )
+
+    def _with_change_summary(
+        self,
+        final_text: str,
+        session: AgentSession | None,
+    ) -> str:
+        if session is None:
+            return final_text
+        active = [item for item in session.changes if item.undo_status == "active"]
+        if not active:
+            return final_text
+        by_path: dict[str, tuple[int, int, int]] = {}
+        latest_by_path = {}
+        for item in active:
+            count, additions, deletions = by_path.get(item.path, (0, 0, 0))
+            by_path[item.path] = (
+                count + 1,
+                additions + item.additions,
+                deletions + item.deletions,
+            )
+            latest_by_path[item.path] = item
+        lines = ["Local change summary:"]
+        for path, (count, additions, deletions) in sorted(by_path.items()):
+            latest = latest_by_path[path]
+            try:
+                current = self.change_tracker.current_hash(path)
+                state = "current hash matches" if current == latest.after_hash else "CONFLICT: current file differs"
+            except ChangeError:
+                state = "CONFLICT: current path is unavailable"
+            lines.append(
+                f"- {path}: {count} change(s), +{additions}/-{deletions}; {state}"
+            )
+        return final_text.rstrip() + "\n\n" + "\n".join(lines)
 
     def _redact_configured_api_key(self, text: str) -> str:
         api_key = self.config.api_key

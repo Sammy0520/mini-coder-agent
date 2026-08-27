@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mini_coder.agent import AgentRunner
+from mini_coder.changes import ChangeTracker
 from mini_coder.config import AgentConfig, ApprovalPolicy
 from mini_coder.exceptions import ModelError, SessionError
 from mini_coder.messages import ModelResponse, ToolCall
@@ -143,6 +144,22 @@ class SessionModelTests(unittest.TestCase):
             with self.assertRaisesRegex(SessionError, "unsupported session schema"):
                 AgentSession.from_dict(data)
 
+    def test_migrates_schema_v1_session_without_change_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 1
+            data.pop("changes")
+            data.pop("undo_history")
+            for execution in data["tool_executions"]:
+                execution.pop("prepared_change", None)
+                execution.pop("change_id", None)
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.changes, [])
+            self.assertEqual(restored.undo_history, [])
+
     def test_rejects_invalid_tool_execution_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data = make_session(Path(directory)).to_dict()
@@ -243,6 +260,79 @@ class SessionStoreTests(unittest.TestCase):
 
 
 class SessionRunnerTests(unittest.TestCase):
+    def test_resume_uses_persisted_approved_change_and_detects_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            path = workspace / "approved.txt"
+            path.write_text("before\n", encoding="utf-8")
+            store = SessionStore.for_workspace(workspace)
+            session = AgentSession.create(
+                task="Edit approved.txt",
+                workspace=workspace,
+                model={"model": "fake"},
+                messages=[
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "Edit approved.txt"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-approved",
+                                "type": "function",
+                                "function": {
+                                    "name": "edit_file",
+                                    "arguments": (
+                                        '{"path":"approved.txt","old_text":"before",'
+                                        '"new_text":"agent"}'
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                ],
+            )
+            session.set_status(SessionStatus.RUNNING)
+            session.current_step = 1
+            execution = ToolExecutionRecord.create(
+                execution_id="execution-approved",
+                tool_call_id="call-approved",
+                step=1,
+                name="edit_file",
+                arguments={"path": "approved.txt", "old_text": "before", "new_text": "agent"},
+                raw_arguments=(
+                    '{"path":"approved.txt","old_text":"before","new_text":"agent"}'
+                ),
+                risk="write",
+            )
+            execution.prepared_change = ChangeTracker(workspace).prepare(
+                "edit_file",
+                execution.arguments or {},
+                execution.execution_id,
+            )
+            execution.approval_granted = True
+            execution.set_status(ToolExecutionStatus.APPROVED)
+            session.tool_executions.append(execution)
+            session.set_status(SessionStatus.INTERRUPTED, stop_reason="process_ended")
+            store.save(session)
+            path.write_text("user change\n", encoding="utf-8")
+            restored = store.load(session.session_id)
+            model = SequenceModel([ModelResponse(content="The saved edit conflicted.")])
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("", session=restored)
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(path.read_text(encoding="utf-8"), "user change\n")
+            self.assertEqual(restored.tool_executions[0].status, ToolExecutionStatus.FAILED)
+            self.assertIn("changed after approval", restored.tool_executions[0].error or "")
+            self.assertEqual(restored.changes, [])
+
     def test_model_error_redacts_configured_api_key_from_session_and_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

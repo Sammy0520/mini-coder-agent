@@ -24,3 +24,11 @@ class PathSafetyError(ToolError):
 
 class SessionError(MiniCoderError):
     """Raised when a persisted agent session cannot be stored or restored safely."""
+
+
+class ChangeError(MiniCoderError):
+    """Raised when a tracked file change cannot be prepared or applied safely."""
+
+
+class ChangeConflictError(ChangeError):
+    """Raised when a file changed after a tracked operation was prepared."""

@@ -8,6 +8,7 @@ from mini_coder.agent import AgentRunner
 from mini_coder.config import AgentConfig, ApprovalPolicy
 from mini_coder.messages import ModelResponse, ToolCall
 from mini_coder.model import ModelClient
+from mini_coder.session import SessionStore
 from mini_coder.tools import create_default_registry
 
 
@@ -39,6 +40,162 @@ def make_config(workspace: Path, **overrides) -> AgentConfig:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_safe_write_shows_diff_before_approval_and_denial_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            events: list[tuple[str, dict]] = []
+            approval_observations: list[str] = []
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-preview",
+                                name="write_file",
+                                arguments={"path": "new.txt", "content": "alpha\n"},
+                                raw_arguments='{"path":"new.txt","content":"alpha\\n"}',
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="The write was denied."),
+                ]
+            )
+
+            def approve(tool, arguments) -> bool:
+                approval_observations.append(events[-1][0])
+                return False
+
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace, approval_policy=ApprovalPolicy.SAFE),
+                approval_callback=approve,
+                event_callback=lambda name, payload: events.append((name, payload)),
+                session_store=store,
+            )
+
+            result = runner.run("Create new.txt")
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(approval_observations, ["change_preview"])
+            preview = next(payload for name, payload in events if name == "change_preview")
+            self.assertEqual(preview["path"], "new.txt")
+            self.assertEqual(preview["additions"], 1)
+            self.assertIn("+++ b/new.txt", preview["diff"])
+            self.assertFalse((workspace / "new.txt").exists())
+            session = store.load(result.session_id or "")
+            self.assertEqual(session.changes, [])
+            self.assertIsNotNone(session.tool_executions[0].prepared_change)
+
+    def test_multiple_agent_writes_are_ordered_and_summarized_in_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-create",
+                                name="write_file",
+                                arguments={"path": "tracked.txt", "content": "one\n"},
+                                raw_arguments='{"path":"tracked.txt","content":"one\\n"}',
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-edit",
+                                name="edit_file",
+                                arguments={
+                                    "path": "tracked.txt",
+                                    "old_text": "one",
+                                    "new_text": "two",
+                                },
+                                raw_arguments=(
+                                    '{"path":"tracked.txt","old_text":"one","new_text":"two"}'
+                                ),
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Created and updated the file."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Create tracked.txt and change one to two")
+
+            self.assertEqual(result.status, "completed")
+            self.assertIn("Local change summary:", result.final_text)
+            self.assertIn(
+                "tracked.txt: 2 change(s), +2/-1; current hash matches",
+                result.final_text,
+            )
+            session = store.load(result.session_id or "")
+            self.assertEqual(len(session.changes), 2)
+            self.assertEqual(session.changes[0].after_hash, session.changes[1].before_hash)
+            self.assertEqual(
+                [item.change_id for item in session.tool_executions],
+                [item.change_id for item in session.changes],
+            )
+            self.assertEqual((workspace / "tracked.txt").read_text(encoding="utf-8"), "two\n")
+
+    def test_external_change_during_approval_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            path = workspace / "conflict.txt"
+            path.write_text("before\n", encoding="utf-8")
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-conflict",
+                                name="edit_file",
+                                arguments={
+                                    "path": "conflict.txt",
+                                    "old_text": "before",
+                                    "new_text": "agent",
+                                },
+                                raw_arguments=(
+                                    '{"path":"conflict.txt","old_text":"before","new_text":"agent"}'
+                                ),
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="A conflict prevented the edit."),
+                ]
+            )
+
+            def approve(tool, arguments) -> bool:
+                path.write_text("user change\n", encoding="utf-8")
+                return True
+
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace, approval_policy=ApprovalPolicy.SAFE),
+                approval_callback=approve,
+                session_store=store,
+            )
+
+            result = runner.run("Change before to agent")
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(path.read_text(encoding="utf-8"), "user change\n")
+            self.assertIn("changed after approval", model.requests[1][0][-1]["content"])
+            session = store.load(result.session_id or "")
+            self.assertEqual(session.changes, [])
+            self.assertFalse(session.tool_executions[0].ok)
+
     def test_tool_result_is_returned_to_model_before_final_answer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -131,4 +288,3 @@ class AgentLoopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

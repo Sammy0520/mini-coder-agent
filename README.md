@@ -11,6 +11,7 @@
 - 跨平台执行：向模型说明实际操作系统与默认 shell，文件搜索和修改优先使用内置工具；子命令中的 `python`/`pip` 默认跟随启动 Agent 的虚拟环境。
 - 运行控制：最大步骤数、连续重复调用检测、工具参数校验、上下文压缩、Ctrl+C 中断。
 - Session：每次 CLI 运行原子保存版本化 Session；支持 `--resume`，保留 Responses provider items、工具执行状态、审批结果和累计 usage，并阻止不确定副作用被自动重放。
+- ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
 - 权限模式：默认 `safe`，写文件和执行命令需要确认；`--auto` 只适合受控或可丢弃的演示目录。
 
 ## 架构
@@ -21,6 +22,7 @@ CLI
      ├─ ModelClient             可替换的模型抽象
      │   └─ OpenAICompatibleClient
      ├─ ContextManager          本地限制发送给模型的上下文
+     ├─ ChangeTracker           Diff、hash、原子写入、冲突检测与 Undo
      └─ ToolRegistry            本地校验和分发工具
          ├─ filesystem/search   本地读写和检索
          └─ command             本地进程执行
@@ -162,6 +164,43 @@ mini-coder --config agent.toml --resume "<session-file>" `
 
 一次真实 Responses 跨进程恢复的脱敏验收结果见 [`docs/runs/session-resume-run.md`](docs/runs/session-resume-run.md)。
 
+当前 Session schema 为 v2，增加变更与 Undo 历史。v1 Session 会在内存中自动迁移并在下一次保存时写成 v2，不会丢失原有消息和工具执行记录。
+
+## Diff、变更历史与 Undo
+
+在 Agent 执行 `write_file` 或 `edit_file` 之前，ChangeTracker 会读取当前文件并生成：
+
+- 工作区相对路径。
+- 修改前和修改后的 SHA-256。
+- unified diff。
+- 新增和删除行数。
+- 修改前快照。
+- 与工具执行 ID 关联的变更 ID。
+
+默认安全模式会先在审批提示之前打印 Diff。过大的 Diff 会截断并明确显示 `[truncated]`，但增删统计仍基于完整 Diff。`--auto` 模式也会生成并记录同样的预览，只是不等待人工批准。
+
+准备修改时的 `before_hash` 会和审批内容一起保存。实际写入前 ChangeTracker 会再次计算文件 hash；如果用户、编辑器或其他进程在准备或审批期间改变了文件，操作会作为冲突失败，不会覆盖新内容。写入使用同目录临时文件、磁盘刷新和原子替换，并尽量保留原文件权限、UTF-8 BOM 和 CRLF/LF 换行风格。
+
+当前追踪策略只处理不超过 2,000,000 字节的 UTF-8 文本文件。二进制文件、超过限制的文件、目录和符号链接写入会被明确拒绝。
+
+查看某个 Session 的完整变更历史和 Diff 不需要 API Key，也不会调用模型：
+
+```powershell
+mini-coder --resume "<session-file>" --show-changes
+```
+
+检查当前文件仍与 Agent 写入后的 hash 一致后，可以撤销最后一项仍有效的修改：
+
+```powershell
+mini-coder --resume "<session-file>" --undo-last
+```
+
+Undo 会把已有文件原子恢复到修改前快照；如果原操作创建了新文件，则恢复为“不存在”。同一文件多次修改时，可以多次运行 `--undo-last` 按逆序恢复。文件在 Agent 修改后又被用户改动时，Undo 会报告冲突并保留用户内容。Undo 状态与 `change_undone` 事件会写回 Session。
+
+Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修改，不会尝试撤销 `run_command` 产生的任意文件、Git、网络或其他外部副作用。
+
+一次真实 Responses 修改、Diff 展示、Session 追踪和离线 Undo 的脱敏验收结果见 [`docs/runs/change-tracker-run.md`](docs/runs/change-tracker-run.md)。
+
 ## 测试
 
 核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用：
@@ -171,7 +210,7 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 Agent 工具循环、用户拒绝写入、重复调用停止、路径逃逸、敏感文件、精确编辑、搜索、命令执行、上下文压缩、provider TOML、Responses 历史重放、两种兼容响应解析，以及 Session 原子保存、损坏文件拒绝、状态转换、Ctrl+C 恢复和不确定副作用阻断。
+测试覆盖 Agent 工具循环、用户拒绝写入、重复调用停止、路径逃逸、敏感文件、精确编辑、搜索、命令执行、上下文压缩、provider TOML、Responses 历史重放、两种兼容响应解析、Session 原子保存与恢复，以及 ChangeTracker 的 Diff、hash 冲突、原子写入、换行与 BOM、多次 Undo 和 Undo 冲突。
 
 ## 安全边界
 
@@ -179,7 +218,6 @@ python -m unittest discover -s tests -v
 
 ## 下一步
 
-- 实现 ChangeTracker、统一 Diff、原子文件修改和安全 Undo。
 - 增加任务验证状态、错误重试、运行预算和日志脱敏。
 - 建立 Eval、跨平台 CI 和多文件演示项目。
 

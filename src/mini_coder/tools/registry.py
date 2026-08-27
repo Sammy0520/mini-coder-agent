@@ -29,10 +29,16 @@ class ToolRegistry:
         if tool is None:
             return ToolResult(False, f"Unknown tool: {name}")
         try:
-            _validate_arguments(arguments, tool.parameters)
+            self.validate_arguments(name, arguments)
             return tool.execute(arguments, context)
         except (ToolError, OSError, UnicodeError, ValueError) as exc:
             return ToolResult(False, str(exc))
+
+    def validate_arguments(self, name: str, arguments: dict[str, Any]) -> None:
+        tool = self.get(name)
+        if tool is None:
+            raise ToolError(f"Unknown tool: {name}")
+        _validate_arguments(arguments, tool.parameters)
 
 
 def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> None:
@@ -67,4 +73,3 @@ def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> No
             valid = isinstance(value, expected)
         if not valid:
             raise ToolError(f"Argument '{name}' must be of type {expected_name}")
-

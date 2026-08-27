@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from mini_coder.changes import ChangeTracker
 from mini_coder.cli import (
     _load_resume_session,
     _resolve_uncertain_tools,
@@ -34,6 +35,89 @@ class FinalModel(ModelClient):
 
 
 class CliSessionTests(unittest.TestCase):
+    def test_cli_undo_last_is_local_persisted_and_does_not_require_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            tracker = ChangeTracker(workspace)
+            path = workspace / "undo.txt"
+            path.write_text("before\n", encoding="utf-8")
+            change = tracker.apply(
+                tracker.prepare(
+                    "edit_file",
+                    {"path": "undo.txt", "old_text": "before", "new_text": "after"},
+                    "execution-cli-undo",
+                )
+            )
+            session = AgentSession.create(
+                task="Edit undo.txt",
+                workspace=workspace,
+                model={"model": "fake"},
+                messages=[
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "Edit undo.txt"},
+                ],
+            )
+            session.changes.append(change)
+            store = SessionStore.for_workspace(workspace)
+            session_path = store.save(session)
+            log_path = root / "undo-events.jsonl"
+            output = io.StringIO()
+
+            with patch.dict("os.environ", {}, clear=True), redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--resume",
+                        str(session_path),
+                        "--undo-last",
+                        "--log",
+                        str(log_path),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(path.read_text(encoding="utf-8"), "before\n")
+            restored = store.load(session.session_id)
+            self.assertEqual(restored.changes[0].undo_status, "undone")
+            self.assertEqual(len(restored.undo_history), 1)
+            event = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(event["event"], "change_undone")
+            self.assertIn("Undid tracked change", output.getvalue())
+
+    def test_cli_show_changes_prints_diff_without_loading_model_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tracker = ChangeTracker(workspace)
+            change = tracker.apply(
+                tracker.prepare(
+                    "write_file",
+                    {"path": "shown.txt", "content": "shown\n"},
+                    "execution-show",
+                )
+            )
+            session = AgentSession.create(
+                task="Create shown.txt",
+                workspace=workspace,
+                model={"model": "fake"},
+                messages=[
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "Create shown.txt"},
+                ],
+            )
+            session.changes.append(change)
+            store = SessionStore.for_workspace(workspace)
+            session_path = store.save(session)
+            output = io.StringIO()
+
+            with patch.dict("os.environ", {}, clear=True), redirect_stdout(output):
+                exit_code = main(["--resume", str(session_path), "--show-changes"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("shown.txt [active] +1/-0", rendered)
+            self.assertIn("+++ b/shown.txt", rendered)
+
     def test_resolves_uncertain_tool_only_after_explicit_user_choice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

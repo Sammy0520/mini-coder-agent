@@ -9,9 +9,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..changes.models import ChangeRecord, PreparedChange, UndoRecord
 from ..exceptions import SessionError
 
-CURRENT_SESSION_SCHEMA = 1
+CURRENT_SESSION_SCHEMA = 2
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -142,6 +143,8 @@ class ToolExecutionRecord:
     result_content: str | None = None
     ok: bool | None = None
     error: str | None = None
+    prepared_change: PreparedChange | None = None
+    change_id: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -155,6 +158,13 @@ class ToolExecutionRecord:
             raise SessionError("tool execution name must not be empty")
         if not isinstance(self.raw_arguments, str):
             raise SessionError("tool execution raw_arguments must be a string")
+        if (
+            self.prepared_change is not None
+            and self.prepared_change.tool_execution_id != self.execution_id
+        ):
+            raise SessionError("prepared change does not belong to its tool execution")
+        if self.change_id is not None:
+            validate_session_id(self.change_id)
 
     @classmethod
     def create(
@@ -204,6 +214,10 @@ class ToolExecutionRecord:
             "result_content": self.result_content,
             "ok": self.ok,
             "error": self.error,
+            "prepared_change": (
+                self.prepared_change.to_dict() if self.prepared_change is not None else None
+            ),
+            "change_id": self.change_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -233,6 +247,12 @@ class ToolExecutionRecord:
             result_content=_optional_string(data, "result_content"),
             ok=_optional_bool(data, "ok"),
             error=_optional_string(data, "error"),
+            prepared_change=(
+                PreparedChange.from_dict(data["prepared_change"])
+                if data.get("prepared_change") is not None
+                else None
+            ),
+            change_id=_optional_string(data, "change_id"),
             created_at=_required_string(data, "created_at"),
             updated_at=_required_string(data, "updated_at"),
         )
@@ -252,6 +272,8 @@ class AgentSession:
     total_usage: dict[str, int] = field(default_factory=dict)
     model: dict[str, Any] = field(default_factory=dict)
     tool_executions: list[ToolExecutionRecord] = field(default_factory=list)
+    changes: list[ChangeRecord] = field(default_factory=list)
+    undo_history: list[UndoRecord] = field(default_factory=list)
     stop_reason: str | None = None
     final_text: str = ""
     last_error: str | None = None
@@ -285,6 +307,10 @@ class AgentSession:
             for name, value in self.total_usage.items()
         ):
             raise SessionError("session total_usage must contain non-negative integers")
+        if not all(isinstance(item, ChangeRecord) for item in self.changes):
+            raise SessionError("session changes must contain ChangeRecord values")
+        if not all(isinstance(item, UndoRecord) for item in self.undo_history):
+            raise SessionError("session undo_history must contain UndoRecord values")
         _validate_model_summary(self.model)
 
     @classmethod
@@ -350,6 +376,8 @@ class AgentSession:
             "total_usage": dict(self.total_usage),
             "model": copy.deepcopy(self.model),
             "tool_executions": [item.to_dict() for item in self.tool_executions],
+            "changes": [item.to_dict() for item in self.changes],
+            "undo_history": [item.to_dict() for item in self.undo_history],
             "stop_reason": self.stop_reason,
             "final_text": self.final_text,
             "last_error": self.last_error,
@@ -361,6 +389,7 @@ class AgentSession:
     def from_dict(cls, data: Any) -> "AgentSession":
         if not isinstance(data, dict):
             raise SessionError("session root must be a JSON object")
+        data = _migrate_session_data(data)
         version = _required_int(data, "schema_version", minimum=1)
         if version != CURRENT_SESSION_SCHEMA:
             raise SessionError(
@@ -383,6 +412,12 @@ class AgentSession:
         executions = data.get("tool_executions")
         if not isinstance(executions, list):
             raise SessionError("session tool_executions must be a list")
+        changes = data.get("changes")
+        if not isinstance(changes, list):
+            raise SessionError("session changes must be a list")
+        undo_history = data.get("undo_history")
+        if not isinstance(undo_history, list):
+            raise SessionError("session undo_history must be a list")
         return cls(
             schema_version=version,
             session_id=_required_string(data, "session_id"),
@@ -396,12 +431,29 @@ class AgentSession:
             total_usage=dict(usage),
             model=copy.deepcopy(model),
             tool_executions=[ToolExecutionRecord.from_dict(item) for item in executions],
+            changes=[ChangeRecord.from_dict(item) for item in changes],
+            undo_history=[UndoRecord.from_dict(item) for item in undo_history],
             stop_reason=_optional_string(data, "stop_reason"),
             final_text=_required_string(data, "final_text", allow_empty=True),
             last_error=_optional_string(data, "last_error"),
             previous_call_signature=_optional_string(data, "previous_call_signature"),
             repeated_call_count=_required_int(data, "repeated_call_count", minimum=0),
         )
+
+
+def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
+    version = data.get("schema_version")
+    if version != 1:
+        return data
+    migrated = copy.deepcopy(data)
+    migrated["schema_version"] = 2
+    migrated.setdefault("changes", [])
+    migrated.setdefault("undo_history", [])
+    for execution in migrated.get("tool_executions", []):
+        if isinstance(execution, dict):
+            execution.setdefault("prepared_change", None)
+            execution.setdefault("change_id", None)
+    return migrated
 
 
 def _validate_model_summary(model: Any) -> None:
