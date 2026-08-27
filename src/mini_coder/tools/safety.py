@@ -8,7 +8,16 @@ from ..exceptions import PathSafetyError
 class WorkspacePolicy:
     """Confines file operations to one workspace and hides common secret locations."""
 
-    _DENIED_PARTS = {".git", ".ssh", ".gnupg", "node_modules", ".venv", "venv"}
+    _DENIED_PARTS = {
+        ".git",
+        ".mini-coder",
+        ".ssh",
+        ".gnupg",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+    }
     _DENIED_NAMES = {
         ".env",
         ".env.local",
@@ -62,4 +71,3 @@ class WorkspacePolicy:
     def display(self, path: Path) -> str:
         relative = path.resolve().relative_to(self.root)
         return relative.as_posix() or "."
-

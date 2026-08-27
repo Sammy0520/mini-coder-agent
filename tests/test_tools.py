@@ -38,6 +38,26 @@ class ToolTests(unittest.TestCase):
             self.context.policy.resolve(".env")
         with self.assertRaises(PathSafetyError):
             self.context.policy.resolve("keys/private.pem")
+        with self.assertRaises(PathSafetyError):
+            self.context.policy.resolve(".mini-coder/sessions/session.json")
+        with self.assertRaises(PathSafetyError):
+            self.context.policy.resolve("__pycache__/module.pyc")
+
+    def test_list_files_hides_agent_state_and_python_cache(self) -> None:
+        (self.workspace / ".mini-coder" / "sessions").mkdir(parents=True)
+        (self.workspace / ".mini-coder" / "sessions" / "session.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        (self.workspace / "__pycache__").mkdir()
+        (self.workspace / "__pycache__" / "module.pyc").write_bytes(b"cache")
+        (self.workspace / "visible.py").write_text("value = 1\n", encoding="utf-8")
+
+        result = self.execute("list_files", {"path": "."})
+
+        self.assertTrue(result.ok)
+        self.assertIn("visible.py", result.data["entries"])
+        self.assertFalse(any(".mini-coder" in item for item in result.data["entries"]))
+        self.assertFalse(any("__pycache__" in item for item in result.data["entries"]))
 
     def test_write_read_edit_search_and_list(self) -> None:
         written = self.execute(

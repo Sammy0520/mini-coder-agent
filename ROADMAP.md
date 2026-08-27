@@ -735,4 +735,4 @@ docs: add architecture, evaluation, and demo results
 1. 阶段 B 已完成两次真实模型基线验收，并保存脱敏记录。
 2. 阶段 C 的 Session 持久化、安全恢复和真实跨进程验收已经完成。
 3. 阶段 D 的 ChangeTracker、Diff、冲突检测、快照和 Session 级 Undo 已完成离线与真实模型验收。
-4. 下一阶段进入任务状态、验证闭环与准确最终报告。
+4. 多文件综合演练已经完成，确认 Undo 会使真实测试重新失败；下一阶段进入任务状态、验证闭环与准确最终报告。

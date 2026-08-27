@@ -201,6 +201,8 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 一次真实 Responses 修改、Diff 展示、Session 追踪和离线 Undo 的脱敏验收结果见 [`docs/runs/change-tracker-run.md`](docs/runs/change-tracker-run.md)。
 
+更完整的多文件失败基线、真实修复、4/4 测试通过、两次逆序 Undo 和行为复测见 [`docs/runs/multifile-workflow-run.md`](docs/runs/multifile-workflow-run.md)。
+
 ## 测试
 
 核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用：
@@ -215,6 +217,8 @@ python -m unittest discover -s tests -v
 ## 安全边界
 
 文件工具会解析真实路径并拒绝工作区之外的访问，也会隐藏 `.env`、`.git`、私钥等常见敏感位置。`run_command` 是普通本地 shell 进程，不是完整操作系统沙箱；命令理论上可以访问当前用户有权限访问的其他资源。因此默认采用人工确认，`--auto` 只能在隔离、受控、可恢复的工作区使用。
+
+Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从文件列表隐藏，并拒绝通过文件工具直接读取，避免运行状态或缓存污染模型上下文。
 
 ## 下一步
 
