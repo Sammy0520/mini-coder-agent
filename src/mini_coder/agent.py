@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,10 +22,13 @@ from .session import (
     SessionStore,
     ToolExecutionRecord,
     ToolExecutionStatus,
+    TaskPhase,
+    VerificationStatus,
 )
 from .tools.base import RiskLevel, Tool, ToolContext, ToolResult
 from .tools.registry import ToolRegistry
 from .tools.safety import WorkspacePolicy
+from .verification import VerificationTracker
 
 EventCallback = Callable[[str, dict[str, Any]], None]
 ApprovalCallback = Callable[[Tool, dict[str, Any]], bool]
@@ -61,6 +65,8 @@ class AgentRunner:
         self.session_store = session_store
         self.context = ContextManager(config.max_context_chars)
         self.change_tracker = ChangeTracker(config.workspace)
+        self.verification_tracker = VerificationTracker()
+        self._run_started_at = 0.0
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
@@ -73,6 +79,7 @@ class AgentRunner:
         *,
         session: AgentSession | None = None,
     ) -> AgentRunResult:
+        self._run_started_at = time.monotonic()
         task = task.strip()
         if session is None and not task:
             return AgentRunResult("invalid_task", "Task must not be empty.", 0)
@@ -109,6 +116,8 @@ class AgentRunner:
             usage = dict(session.total_usage)
             previous_signature = session.previous_call_signature
             repeated_count = session.repeated_call_count
+
+            self._reconcile_workspace_state(session, messages, usage)
 
             if session.status in {
                 SessionStatus.COMPLETED_VERIFIED,
@@ -242,15 +251,19 @@ class AgentRunner:
                 if not response.tool_calls:
                     final = response.content.strip()
                     if final:
+                        outcome = self._completion_outcome(session)
+                        if session is not None:
+                            self._set_phase(session, TaskPhase.SUMMARIZE)
                         return self._finish(
-                            "completed",
+                            outcome[0],
                             final,
                             step,
                             messages,
                             usage,
                             session,
-                            session_status=SessionStatus.COMPLETED_UNVERIFIED,
-                            stop_reason="model_completed",
+                            session_status=outcome[1],
+                            stop_reason=outcome[2],
+                            last_error=outcome[3],
                         )
                     return self._finish(
                         "empty_response",
@@ -313,6 +326,7 @@ class AgentRunner:
             )
         except KeyboardInterrupt:
             if session is not None:
+                session.run_duration_seconds += self._current_run_duration()
                 session.set_status(
                     SessionStatus.INTERRUPTED,
                     stop_reason="keyboard_interrupt",
@@ -348,6 +362,70 @@ class AgentRunner:
             raise SessionError("session has no conversation messages to resume")
         if session.status == SessionStatus.CANCELLED:
             raise SessionError("cancelled sessions cannot be resumed")
+
+    def _reconcile_workspace_state(
+        self,
+        session: AgentSession,
+        messages: list[dict[str, Any]],
+        usage: dict[str, int],
+    ) -> None:
+        latest_by_path = {}
+        for change in session.changes:
+            if change.undo_status == "active":
+                latest_by_path[change.path] = change
+        mismatched = []
+        for path, change in latest_by_path.items():
+            try:
+                if self.change_tracker.current_hash(path) != change.after_hash:
+                    mismatched.append(path)
+            except ChangeError:
+                mismatched.append(path)
+        if not mismatched:
+            return
+
+        rendered_paths = ", ".join(sorted(mismatched))
+        invalidated = session.invalidate_verification(
+            f"workspace changed outside the session: {rendered_paths}"
+        )
+        self._set_phase(session, TaskPhase.IMPLEMENT)
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Local runtime notice: files changed outside this saved Session after "
+                    f"the last tracked result ({rendered_paths}). Earlier verification is "
+                    "stale. Re-inspect the current files and run relevant verification "
+                    "before claiming completion."
+                ),
+            }
+        )
+        if session.status in {
+            SessionStatus.COMPLETED_VERIFIED,
+            SessionStatus.COMPLETED_UNVERIFIED,
+        }:
+            session.set_status(
+                SessionStatus.INTERRUPTED,
+                stop_reason="external_workspace_change",
+            )
+        self._persist(session, messages, usage)
+        for verification in invalidated:
+            self._emit(
+                "verification_invalidated",
+                {
+                    "session_id": session.session_id,
+                    "verification_id": verification.verification_id,
+                    "reason": verification.invalidation_reason,
+                    "change_revision": session.change_revision,
+                },
+            )
+        self._emit(
+            "workspace_changed",
+            {
+                "session_id": session.session_id,
+                "paths": sorted(mismatched),
+                "change_revision": session.change_revision,
+            },
+        )
 
     def _model_summary(self) -> dict[str, Any]:
         return {
@@ -512,6 +590,20 @@ class AgentRunner:
                 change = self.change_tracker.apply(prepared_change)
                 if session is not None:
                     session.changes.append(change)
+                    self._set_phase(session, TaskPhase.IMPLEMENT)
+                    invalidated = session.invalidate_verification(
+                        f"file changed: {change.path}"
+                    )
+                    for verification in invalidated:
+                        self._emit(
+                            "verification_invalidated",
+                            {
+                                "session_id": session.session_id,
+                                "verification_id": verification.verification_id,
+                                "reason": verification.invalidation_reason,
+                                "change_revision": session.change_revision,
+                            },
+                        )
                 if record is not None:
                     record.change_id = change.change_id
                     record.prepared_change = None
@@ -581,6 +673,38 @@ class AgentRunner:
             record.ok = result.ok
             record.error = None if result.ok else result.message
             record.set_status(status)
+        if (
+            session is not None
+            and record is not None
+            and call.name == "run_command"
+            and call.arguments is not None
+            and status != ToolExecutionStatus.DENIED
+            and ("exit_code" in result.data or result.data.get("timed_out") is True)
+            and self.verification_tracker.is_verification_command(call.arguments)
+        ):
+            verification = self.verification_tracker.record(
+                tool_execution_id=record.execution_id,
+                arguments=call.arguments,
+                result_data=result.data,
+                result_ok=result.ok,
+                change_revision=session.change_revision,
+            )
+            session.verification_records.append(verification)
+            session.refresh_verification_status()
+            self._set_phase(session, TaskPhase.VERIFY)
+            self._emit(
+                "verification_recorded",
+                {
+                    "session_id": session.session_id,
+                    "verification_id": verification.verification_id,
+                    "command": verification.command,
+                    "exit_code": verification.exit_code,
+                    "duration_seconds": verification.duration_seconds,
+                    "passed": verification.passed,
+                    "change_revision": verification.change_revision,
+                    "verification_status": session.verification_status.value,
+                },
+            )
         if session is not None:
             self._persist(session, messages, usage)
         self._emit(
@@ -685,8 +809,18 @@ class AgentRunner:
         stop_reason: str,
         last_error: str | None = None,
     ) -> AgentRunResult:
-        final_text = self._with_change_summary(final_text, session)
         if session is not None:
+            session.run_duration_seconds += self._current_run_duration()
+            session.refresh_verification_status()
+            final_text = self._with_local_report(
+                final_text,
+                session,
+                session_status=session_status,
+                stop_reason=stop_reason,
+                messages=messages,
+                usage=usage,
+                last_error=last_error,
+            )
             session.set_status(
                 session_status,
                 stop_reason=stop_reason,
@@ -706,6 +840,10 @@ class AgentRunner:
                     len([item for item in session.changes if item.undo_status == "active"])
                     if session is not None
                     else 0
+                ),
+                "phase": session.phase.value if session is not None else None,
+                "verification_status": (
+                    session.verification_status.value if session is not None else None
                 ),
             },
         )
@@ -748,16 +886,78 @@ class AgentRunner:
             },
         )
 
-    def _with_change_summary(
+    def _completion_outcome(
+        self,
+        session: AgentSession | None,
+    ) -> tuple[str, SessionStatus, str, str | None]:
+        if session is None:
+            return (
+                "completed",
+                SessionStatus.COMPLETED_UNVERIFIED,
+                "model_completed",
+                None,
+            )
+        verification = session.refresh_verification_status()
+        if verification == VerificationStatus.FAILED:
+            return (
+                "verification_failed",
+                SessionStatus.FAILED,
+                "verification_failed",
+                "The latest real verification command failed.",
+            )
+        denied = [
+            item
+            for item in session.tool_executions
+            if item.status == ToolExecutionStatus.DENIED
+        ]
+        active_changes = [item for item in session.changes if item.undo_status == "active"]
+        if denied and not active_changes and verification == VerificationStatus.NOT_REQUIRED:
+            return (
+                "denied",
+                SessionStatus.DENIED,
+                "required_operation_denied",
+                "The requested operation was denied by the user.",
+            )
+        if verification == VerificationStatus.PASSED:
+            return (
+                "completed",
+                SessionStatus.COMPLETED_VERIFIED,
+                "model_completed_verified",
+                None,
+            )
+        return (
+            "completed",
+            SessionStatus.COMPLETED_UNVERIFIED,
+            "model_completed_unverified",
+            None,
+        )
+
+    def _set_phase(self, session: AgentSession, phase: TaskPhase) -> None:
+        if session.phase == phase:
+            return
+        previous = session.phase
+        session.set_phase(phase)
+        self._emit(
+            "phase_changed",
+            {
+                "session_id": session.session_id,
+                "previous": previous.value,
+                "phase": phase.value,
+            },
+        )
+
+    def _with_local_report(
         self,
         final_text: str,
-        session: AgentSession | None,
+        session: AgentSession,
+        *,
+        session_status: SessionStatus,
+        stop_reason: str,
+        messages: list[dict[str, Any]],
+        usage: dict[str, int],
+        last_error: str | None,
     ) -> str:
-        if session is None:
-            return final_text
         active = [item for item in session.changes if item.undo_status == "active"]
-        if not active:
-            return final_text
         by_path: dict[str, tuple[int, int, int]] = {}
         latest_by_path = {}
         for item in active:
@@ -768,7 +968,7 @@ class AgentRunner:
                 deletions + item.deletions,
             )
             latest_by_path[item.path] = item
-        lines = ["Local change summary:"]
+        change_lines = ["Local change summary:"]
         for path, (count, additions, deletions) in sorted(by_path.items()):
             latest = latest_by_path[path]
             try:
@@ -776,10 +976,96 @@ class AgentRunner:
                 state = "current hash matches" if current == latest.after_hash else "CONFLICT: current file differs"
             except ChangeError:
                 state = "CONFLICT: current path is unavailable"
-            lines.append(
+            change_lines.append(
                 f"- {path}: {count} change(s), +{additions}/-{deletions}; {state}"
             )
-        return final_text.rstrip() + "\n\n" + "\n".join(lines)
+        if not active:
+            change_lines.append("- None.")
+
+        validation_lines = ["Validation:"]
+        if session.verification_records:
+            for record in session.verification_records:
+                state = "passed" if record.passed else "failed"
+                if not record.is_current:
+                    state += f", stale ({record.invalidation_reason})"
+                code = "timeout" if record.timed_out else f"exit {record.exit_code}"
+                validation_lines.append(
+                    f"- `{record.command}` ({record.cwd}): {state}, {code}, "
+                    f"{record.duration_seconds:.2f}s"
+                )
+                output_summary = record.stderr_summary or record.stdout_summary
+                if output_summary:
+                    first_line = output_summary.replace("\r", "").split("\n", 1)[0]
+                    validation_lines.append(f"  output: {first_line[:200]}")
+        else:
+            validation_lines.append("- No verification command was recorded.")
+
+        unresolved = ["Unresolved items:"]
+        if session.verification_status == VerificationStatus.FAILED:
+            unresolved.append("- The latest verification command failed.")
+        elif session.verification_status == VerificationStatus.STALE:
+            unresolved.append("- Earlier verification is stale because files changed afterward.")
+        elif (
+            session.verification_status == VerificationStatus.UNVERIFIED
+            and (session.changes or session.undo_history)
+        ):
+            unresolved.append("- Current file changes have not been verified.")
+        denied = [
+            item
+            for item in session.tool_executions
+            if item.status == ToolExecutionStatus.DENIED
+        ]
+        for item in denied:
+            unresolved.append(f"- User denied {item.name} at step {item.step}.")
+        if last_error and not any(last_error in item for item in unresolved):
+            unresolved.append(f"- {last_error}")
+        if session_status in {
+            SessionStatus.FAILED,
+            SessionStatus.INTERRUPTED,
+            SessionStatus.CANCELLED,
+            SessionStatus.DENIED,
+        } and len(unresolved) == 1:
+            unresolved.append(f"- Run did not complete normally: {stop_reason}.")
+        if len(unresolved) == 1:
+            unresolved.append("- None known.")
+
+        model_calls = sum(1 for item in messages if item.get("role") == "assistant")
+        usage_text = ", ".join(f"{name}={value}" for name, value in sorted(usage.items()))
+        statistics = [
+            "Run statistics:",
+            f"- model calls: {model_calls}",
+            f"- tool calls: {len(session.tool_executions)}",
+            f"- retries: {session.retry_count}",
+            f"- total duration: {session.run_duration_seconds:.2f}s",
+            f"- usage: {usage_text or 'unknown'}",
+        ]
+        outcome = [
+            "Outcome:",
+            f"- session status: {session_status.value}",
+            f"- stop reason: {stop_reason}",
+            f"- verification status: {session.verification_status.value}",
+        ]
+        report = "\n".join(
+            [
+                *outcome,
+                "",
+                *change_lines,
+                "",
+                *validation_lines,
+                "",
+                *unresolved,
+                "",
+                *statistics,
+            ]
+        )
+        return final_text.rstrip() + "\n\n" + report
+
+    def _current_run_duration(self) -> float:
+        if self._run_started_at <= 0:
+            return 0.0
+        duration = max(0.0, time.monotonic() - self._run_started_at)
+        self._run_started_at = 0.0
+        return duration
 
     def _redact_configured_api_key(self, text: str) -> str:
         api_key = self.config.api_key

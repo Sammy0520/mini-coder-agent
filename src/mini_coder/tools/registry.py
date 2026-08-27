@@ -63,7 +63,8 @@ def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> No
         "array": list,
     }
     for name, value in arguments.items():
-        expected_name = properties.get(name, {}).get("type")
+        property_schema = properties.get(name, {})
+        expected_name = property_schema.get("type")
         expected = type_map.get(expected_name)
         if expected is None:
             continue
@@ -73,3 +74,7 @@ def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> No
             valid = isinstance(value, expected)
         if not valid:
             raise ToolError(f"Argument '{name}' must be of type {expected_name}")
+        allowed = property_schema.get("enum")
+        if allowed is not None and value not in allowed:
+            rendered = ", ".join(repr(item) for item in allowed)
+            raise ToolError(f"Argument '{name}' must be one of: {rendered}")

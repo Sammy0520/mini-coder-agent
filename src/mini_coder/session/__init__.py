@@ -6,6 +6,7 @@ from .models import (
     ToolExecutionStatus,
 )
 from .store import SessionStore
+from ..verification import TaskPhase, VerificationRecord, VerificationStatus
 
 __all__ = [
     "CURRENT_SESSION_SCHEMA",
@@ -14,4 +15,7 @@ __all__ = [
     "SessionStore",
     "ToolExecutionRecord",
     "ToolExecutionStatus",
+    "TaskPhase",
+    "VerificationRecord",
+    "VerificationStatus",
 ]

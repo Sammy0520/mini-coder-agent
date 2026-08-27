@@ -11,7 +11,13 @@ from .changes import ChangeTracker
 from .config import AgentConfig, ApprovalPolicy
 from .exceptions import ConfigurationError, MiniCoderError, SessionError
 from .model import OpenAICompatibleClient
-from .session import AgentSession, SessionStore, ToolExecutionStatus
+from .session import (
+    AgentSession,
+    SessionStatus,
+    SessionStore,
+    TaskPhase,
+    ToolExecutionStatus,
+)
 from .tools import create_default_registry
 from .tools.base import Tool
 
@@ -104,8 +110,29 @@ def main(argv: list[str] | None = None) -> int:
                 tracker = ChangeTracker(resumed_session.workspace)
                 change, undo = tracker.undo_last(resumed_session.changes)
                 resumed_session.undo_history.append(undo)
-                resumed_session.touch()
+                resumed_session.set_phase(TaskPhase.IMPLEMENT)
+                invalidated = resumed_session.invalidate_verification(
+                    f"tracked change undone: {change.path}"
+                )
+                if resumed_session.status in {
+                    SessionStatus.COMPLETED_VERIFIED,
+                    SessionStatus.COMPLETED_UNVERIFIED,
+                }:
+                    resumed_session.set_status(
+                        SessionStatus.INTERRUPTED,
+                        stop_reason="change_undone",
+                    )
                 session_store.save(resumed_session)
+                for verification in invalidated:
+                    event_callback(
+                        "verification_invalidated",
+                        {
+                            "session_id": resumed_session.session_id,
+                            "verification_id": verification.verification_id,
+                            "reason": verification.invalidation_reason,
+                            "change_revision": resumed_session.change_revision,
+                        },
+                    )
                 event_callback(
                     "change_undone",
                     {
@@ -249,6 +276,9 @@ def _print_resume_summary(session: AgentSession) -> None:
         f"  Session: {session.session_id}\n"
         f"  Workspace: {session.workspace}\n"
         f"  Saved status: {session.status.value}\n"
+        f"  Task phase: {session.phase.value}\n"
+        f"  Verification: {session.verification_status.value} "
+        f"({len(session.verification_records)} command(s))\n"
         f"  Last completed model step: {session.current_step}\n"
         f"  Pending/uncertain tools: {len(pending)}\n"
         f"  Tracked changes: {len(session.changes)} "
@@ -266,7 +296,8 @@ def _print_resume_summary(session: AgentSession) -> None:
 def _print_changes(session: AgentSession) -> None:
     print(
         f"Session {session.session_id} tracked changes: {len(session.changes)}; "
-        f"undo operations: {len(session.undo_history)}"
+        f"undo operations: {len(session.undo_history)}; "
+        f"verification: {session.verification_status.value}"
     )
     if not session.changes:
         print("No tracked file changes.")
@@ -420,6 +451,21 @@ def _event_handler(log_path: Path | None):
             )
         elif name == "change_undone":
             print(f"[undo] restored {payload['path']}")
+        elif name == "phase_changed":
+            print(f"[phase] {payload['previous']} -> {payload['phase']}")
+        elif name == "verification_recorded":
+            state = "passed" if payload["passed"] else "failed"
+            print(
+                f"[verification] {state}, exit {payload['exit_code']}, "
+                f"{payload['duration_seconds']:.2f}s"
+            )
+        elif name == "verification_invalidated":
+            print(f"[verification] stale: {payload['reason']}")
+        elif name == "workspace_changed":
+            print(
+                "[workspace] changed outside the saved Session: "
+                + ", ".join(payload["paths"])
+            )
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as stream:

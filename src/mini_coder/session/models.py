@@ -11,8 +11,14 @@ from typing import Any
 
 from ..changes.models import ChangeRecord, PreparedChange, UndoRecord
 from ..exceptions import SessionError
+from ..verification import (
+    TaskPhase,
+    VerificationRecord,
+    VerificationStatus,
+    VerificationTracker,
+)
 
-CURRENT_SESSION_SCHEMA = 2
+CURRENT_SESSION_SCHEMA = 3
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -33,6 +39,7 @@ class SessionStatus(str, Enum):
     FAILED = "failed"
     COMPLETED_VERIFIED = "completed_verified"
     COMPLETED_UNVERIFIED = "completed_unverified"
+    DENIED = "denied"
     CANCELLED = "cancelled"
 
 
@@ -85,12 +92,14 @@ _SESSION_TRANSITIONS = {
         SessionStatus.FAILED,
         SessionStatus.COMPLETED_VERIFIED,
         SessionStatus.COMPLETED_UNVERIFIED,
+        SessionStatus.DENIED,
         SessionStatus.CANCELLED,
     },
     SessionStatus.WAITING_FOR_APPROVAL: {
         SessionStatus.RUNNING,
         SessionStatus.INTERRUPTED,
         SessionStatus.FAILED,
+        SessionStatus.DENIED,
         SessionStatus.CANCELLED,
     },
     SessionStatus.INTERRUPTED: {
@@ -102,8 +111,20 @@ _SESSION_TRANSITIONS = {
         SessionStatus.RUNNING,
         SessionStatus.CANCELLED,
     },
-    SessionStatus.COMPLETED_VERIFIED: set(),
-    SessionStatus.COMPLETED_UNVERIFIED: set(),
+    SessionStatus.COMPLETED_VERIFIED: {
+        SessionStatus.RUNNING,
+        SessionStatus.INTERRUPTED,
+        SessionStatus.CANCELLED,
+    },
+    SessionStatus.COMPLETED_UNVERIFIED: {
+        SessionStatus.RUNNING,
+        SessionStatus.INTERRUPTED,
+        SessionStatus.CANCELLED,
+    },
+    SessionStatus.DENIED: {
+        SessionStatus.RUNNING,
+        SessionStatus.CANCELLED,
+    },
     SessionStatus.CANCELLED: set(),
 }
 
@@ -274,6 +295,12 @@ class AgentSession:
     tool_executions: list[ToolExecutionRecord] = field(default_factory=list)
     changes: list[ChangeRecord] = field(default_factory=list)
     undo_history: list[UndoRecord] = field(default_factory=list)
+    phase: TaskPhase = TaskPhase.ANALYZE
+    verification_status: VerificationStatus = VerificationStatus.NOT_REQUIRED
+    verification_records: list[VerificationRecord] = field(default_factory=list)
+    change_revision: int = 0
+    run_duration_seconds: float = 0.0
+    retry_count: int = 0
     stop_reason: str | None = None
     final_text: str = ""
     last_error: str | None = None
@@ -295,6 +322,12 @@ class AgentSession:
             raise SessionError("session current_step must not be negative")
         if self.repeated_call_count < 0:
             raise SessionError("session repeated_call_count must not be negative")
+        if self.change_revision < 0:
+            raise SessionError("session change_revision must not be negative")
+        if self.run_duration_seconds < 0:
+            raise SessionError("session run_duration_seconds must not be negative")
+        if self.retry_count < 0:
+            raise SessionError("session retry_count must not be negative")
         if not isinstance(self.messages, list) or not all(
             isinstance(item, dict) for item in self.messages
         ):
@@ -311,6 +344,10 @@ class AgentSession:
             raise SessionError("session changes must contain ChangeRecord values")
         if not all(isinstance(item, UndoRecord) for item in self.undo_history):
             raise SessionError("session undo_history must contain UndoRecord values")
+        if not all(isinstance(item, VerificationRecord) for item in self.verification_records):
+            raise SessionError(
+                "session verification_records must contain VerificationRecord values"
+            )
         _validate_model_summary(self.model)
 
     @classmethod
@@ -341,6 +378,13 @@ class AgentSession:
         final_text: str | None = None,
         last_error: str | None = None,
     ) -> None:
+        if (
+            status == SessionStatus.COMPLETED_VERIFIED
+            and self.refresh_verification_status() != VerificationStatus.PASSED
+        ):
+            raise SessionError(
+                "completed_verified requires a current successful verification record"
+            )
         if status != self.status and status not in _SESSION_TRANSITIONS[self.status]:
             raise SessionError(
                 f"invalid session status transition: {self.status.value} -> {status.value}"
@@ -361,6 +405,28 @@ class AgentSession:
     def touch(self) -> None:
         self.updated_at = utc_now()
 
+    def set_phase(self, phase: TaskPhase) -> None:
+        self.phase = phase
+        self.touch()
+
+    def invalidate_verification(self, reason: str) -> list[VerificationRecord]:
+        self.change_revision += 1
+        invalidated = VerificationTracker.invalidate(
+            self.verification_records,
+            reason=reason,
+        )
+        self.refresh_verification_status()
+        self.touch()
+        return invalidated
+
+    def refresh_verification_status(self) -> VerificationStatus:
+        self.verification_status = VerificationTracker.evaluate(
+            self.verification_records,
+            change_revision=self.change_revision,
+            had_file_modification=bool(self.changes or self.undo_history),
+        )
+        return self.verification_status
+
     def to_dict(self) -> dict[str, Any]:
         _validate_model_summary(self.model)
         return {
@@ -378,6 +444,14 @@ class AgentSession:
             "tool_executions": [item.to_dict() for item in self.tool_executions],
             "changes": [item.to_dict() for item in self.changes],
             "undo_history": [item.to_dict() for item in self.undo_history],
+            "phase": self.phase.value,
+            "verification_status": self.verification_status.value,
+            "verification_records": [
+                item.to_dict() for item in self.verification_records
+            ],
+            "change_revision": self.change_revision,
+            "run_duration_seconds": self.run_duration_seconds,
+            "retry_count": self.retry_count,
             "stop_reason": self.stop_reason,
             "final_text": self.final_text,
             "last_error": self.last_error,
@@ -418,7 +492,18 @@ class AgentSession:
         undo_history = data.get("undo_history")
         if not isinstance(undo_history, list):
             raise SessionError("session undo_history must be a list")
-        return cls(
+        verification_records = data.get("verification_records")
+        if not isinstance(verification_records, list):
+            raise SessionError("session verification_records must be a list")
+        try:
+            phase = TaskPhase(data.get("phase"))
+            verification_status = VerificationStatus(data.get("verification_status"))
+            parsed_verifications = [
+                VerificationRecord.from_dict(item) for item in verification_records
+            ]
+        except ValueError as exc:
+            raise SessionError(f"invalid verification state: {exc}") from exc
+        session = cls(
             schema_version=version,
             session_id=_required_string(data, "session_id"),
             task=_required_string(data, "task"),
@@ -433,26 +518,72 @@ class AgentSession:
             tool_executions=[ToolExecutionRecord.from_dict(item) for item in executions],
             changes=[ChangeRecord.from_dict(item) for item in changes],
             undo_history=[UndoRecord.from_dict(item) for item in undo_history],
+            phase=phase,
+            verification_status=verification_status,
+            verification_records=parsed_verifications,
+            change_revision=_required_int(data, "change_revision", minimum=0),
+            run_duration_seconds=_required_number(
+                data,
+                "run_duration_seconds",
+                minimum=0,
+            ),
+            retry_count=_required_int(data, "retry_count", minimum=0),
             stop_reason=_optional_string(data, "stop_reason"),
             final_text=_required_string(data, "final_text", allow_empty=True),
             last_error=_optional_string(data, "last_error"),
             previous_call_signature=_optional_string(data, "previous_call_signature"),
             repeated_call_count=_required_int(data, "repeated_call_count", minimum=0),
         )
+        derived_verification = VerificationTracker.evaluate(
+            session.verification_records,
+            change_revision=session.change_revision,
+            had_file_modification=bool(session.changes or session.undo_history),
+        )
+        if session.verification_status != derived_verification:
+            raise SessionError(
+                "saved verification_status is inconsistent with verification records"
+            )
+        if (
+            session.status == SessionStatus.COMPLETED_VERIFIED
+            and derived_verification != VerificationStatus.PASSED
+        ):
+            raise SessionError(
+                "completed_verified session has no current successful verification"
+            )
+        return session
 
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version != 1:
+    if version not in {1, 2}:
         return data
     migrated = copy.deepcopy(data)
-    migrated["schema_version"] = 2
-    migrated.setdefault("changes", [])
-    migrated.setdefault("undo_history", [])
-    for execution in migrated.get("tool_executions", []):
-        if isinstance(execution, dict):
-            execution.setdefault("prepared_change", None)
-            execution.setdefault("change_id", None)
+    if version == 1:
+        migrated["schema_version"] = 2
+        migrated.setdefault("changes", [])
+        migrated.setdefault("undo_history", [])
+        for execution in migrated.get("tool_executions", []):
+            if isinstance(execution, dict):
+                execution.setdefault("prepared_change", None)
+                execution.setdefault("change_id", None)
+        version = 2
+    if version == 2:
+        changes = migrated.get("changes", [])
+        undo_history = migrated.get("undo_history", [])
+        status = migrated.get("status")
+        migrated["schema_version"] = 3
+        migrated.setdefault(
+            "phase",
+            "summarize" if str(status).startswith("completed_") else "analyze",
+        )
+        migrated.setdefault("verification_status", "unverified" if changes else "not_required")
+        migrated.setdefault("verification_records", [])
+        migrated.setdefault(
+            "change_revision",
+            len(changes) + len(undo_history),
+        )
+        migrated.setdefault("run_duration_seconds", 0.0)
+        migrated.setdefault("retry_count", 0)
     return migrated
 
 
@@ -488,6 +619,17 @@ def _required_int(data: dict[str, Any], name: str, *, minimum: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
         raise SessionError(f"session field {name!r} must be an integer >= {minimum}")
     return value
+
+
+def _required_number(data: dict[str, Any], name: str, *, minimum: float) -> float:
+    value = data.get(name)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value < minimum
+    ):
+        raise SessionError(f"session field {name!r} must be a number >= {minimum}")
+    return float(value)
 
 
 def _optional_bool(data: dict[str, Any], name: str) -> bool | None:

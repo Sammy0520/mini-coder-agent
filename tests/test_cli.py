@@ -27,6 +27,7 @@ from mini_coder.session import (
     ToolExecutionRecord,
     ToolExecutionStatus,
 )
+from mini_coder.verification import VerificationRecord, VerificationStatus
 
 
 class FinalModel(ModelClient):
@@ -60,6 +61,24 @@ class CliSessionTests(unittest.TestCase):
                 ],
             )
             session.changes.append(change)
+            session.change_revision = 1
+            session.verification_records.append(
+                VerificationRecord.create(
+                    tool_execution_id="execution-cli-verify",
+                    command="python -m unittest",
+                    cwd=".",
+                    exit_code=0,
+                    duration_seconds=0.25,
+                    stdout_summary="",
+                    stderr_summary="OK",
+                    change_revision=1,
+                    passed=True,
+                    timed_out=False,
+                )
+            )
+            session.refresh_verification_status()
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(SessionStatus.COMPLETED_VERIFIED)
             store = SessionStore.for_workspace(workspace)
             session_path = store.save(session)
             log_path = root / "undo-events.jsonl"
@@ -81,6 +100,9 @@ class CliSessionTests(unittest.TestCase):
             restored = store.load(session.session_id)
             self.assertEqual(restored.changes[0].undo_status, "undone")
             self.assertEqual(len(restored.undo_history), 1)
+            self.assertEqual(restored.status, SessionStatus.INTERRUPTED)
+            self.assertEqual(restored.verification_status, VerificationStatus.STALE)
+            self.assertIsNotNone(restored.verification_records[0].invalidated_at)
             event = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
             self.assertEqual(event["event"], "change_undone")
             self.assertIn("Undid tracked change", output.getvalue())
@@ -106,6 +128,7 @@ class CliSessionTests(unittest.TestCase):
                 ],
             )
             session.changes.append(change)
+            session.invalidate_verification("file changed: shown.txt")
             store = SessionStore.for_workspace(workspace)
             session_path = store.save(session)
             output = io.StringIO()

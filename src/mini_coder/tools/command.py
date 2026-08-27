@@ -4,6 +4,7 @@ import locale
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,11 @@ class RunCommandTool(Tool):
             "command": {"type": "string"},
             "cwd": {"type": "string", "description": "Workspace-relative directory, default '.'"},
             "timeout_seconds": {"type": "integer", "description": "May reduce but not exceed configured timeout"},
+            "purpose": {
+                "type": "string",
+                "enum": ["inspect", "verify", "other"],
+                "description": "Use 'verify' for tests, builds, linters, and other acceptance checks",
+            },
         },
         "required": ["command"],
         "additionalProperties": False,
@@ -44,6 +50,7 @@ class RunCommandTool(Tool):
             context.command_timeout_seconds,
         )
         encoding = locale.getpreferredencoding(False) or "utf-8"
+        started_at = time.monotonic()
         try:
             completed = subprocess.run(
                 command,
@@ -58,6 +65,7 @@ class RunCommandTool(Tool):
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            duration_seconds = time.monotonic() - started_at
             stdout = _as_text(exc.stdout, encoding)
             stderr = _as_text(exc.stderr, encoding)
             return ToolResult(
@@ -65,12 +73,15 @@ class RunCommandTool(Tool):
                 f"Command timed out after {timeout} second(s)",
                 {
                     "timed_out": True,
+                    "exit_code": None,
+                    "duration_seconds": duration_seconds,
                     "stdout": truncate_text(stdout, context.max_output_chars // 2),
                     "stderr": truncate_text(stderr, context.max_output_chars // 2),
                 },
             )
 
         per_stream = max(500, context.max_output_chars // 2)
+        duration_seconds = time.monotonic() - started_at
         return ToolResult(
             completed.returncode == 0,
             f"Command exited with code {completed.returncode}",
@@ -79,6 +90,7 @@ class RunCommandTool(Tool):
                 "stdout": truncate_text(completed.stdout, per_stream),
                 "stderr": truncate_text(completed.stderr, per_stream),
                 "timed_out": False,
+                "duration_seconds": duration_seconds,
             },
         )
 

@@ -12,6 +12,7 @@
 - 运行控制：最大步骤数、连续重复调用检测、工具参数校验、上下文压缩、Ctrl+C 中断。
 - Session：每次 CLI 运行原子保存版本化 Session；支持 `--resume`，保留 Responses provider items、工具执行状态、审批结果和累计 usage，并阻止不确定副作用被自动重放。
 - ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
+- 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、退出码、耗时和输出摘要；最终状态由本地事实决定。
 - 权限模式：默认 `safe`，写文件和执行命令需要确认；`--auto` 只适合受控或可丢弃的演示目录。
 
 ## 架构
@@ -23,6 +24,7 @@ CLI
      │   └─ OpenAICompatibleClient
      ├─ ContextManager          本地限制发送给模型的上下文
      ├─ ChangeTracker           Diff、hash、原子写入、冲突检测与 Undo
+     ├─ VerificationTracker     验证命令、修改版本、失效规则与完成判定
      └─ ToolRegistry            本地校验和分发工具
          ├─ filesystem/search   本地读写和检索
          └─ command             本地进程执行
@@ -160,11 +162,11 @@ mini-coder --config agent.toml --resume "<session-file>" `
 
 执行 ID 会显示在恢复摘要中。这个选项不会重放原工具；它只记录人工检查结论并为模型补入对应工具结果。`completed` 表示副作用确实已经发生，`failed` 表示确认没有完成。不要在没有检查文件或外部状态时使用它。
 
-在后续验证闭环完成前，正常结束的 Session 暂时标记为 `completed_unverified`；CLI 的原有成功退出行为保持不变。
+没有代码修改的只读或分析任务可以正常完成，而不会被要求运行无意义测试。发生文件修改后，只有针对当前修改版本的真实验证命令成功，Session 才会标记为 `completed_verified`；未运行验证或验证后又发生修改时为 `completed_unverified`，最近一次验证失败时为 `failed`。恢复 Session 时还会核对最后一次受追踪修改的文件 hash；文件被外部编辑后，旧验证会自动失效，已完成任务会转为可继续恢复的 `interrupted`。用户拒绝完成任务所需的写入或命令时会记录为 `denied`。CLI 对 verified 和 unverified 的正常完成返回成功退出码，对失败、拒绝和中断返回非零退出码。
 
 一次真实 Responses 跨进程恢复的脱敏验收结果见 [`docs/runs/session-resume-run.md`](docs/runs/session-resume-run.md)。
 
-当前 Session schema 为 v2，增加变更与 Undo 历史。v1 Session 会在内存中自动迁移并在下一次保存时写成 v2，不会丢失原有消息和工具执行记录。
+当前 Session schema 为 v3，增加任务阶段、修改版本、验证记录、验证状态、运行耗时和重试计数。v1/v2 Session 会在内存中自动迁移并在下一次保存时写成 v3，不会丢失原有消息、工具执行或变更记录。
 
 ## Diff、变更历史与 Undo
 
@@ -197,11 +199,15 @@ mini-coder --resume "<session-file>" --undo-last
 
 Undo 会把已有文件原子恢复到修改前快照；如果原操作创建了新文件，则恢复为“不存在”。同一文件多次修改时，可以多次运行 `--undo-last` 按逆序恢复。文件在 Agent 修改后又被用户改动时，Undo 会报告冲突并保留用户内容。Undo 状态与 `change_undone` 事件会写回 Session。
 
+文件写入和 Undo 都会推进 Session 的修改版本，并把此前验证标记为 stale。Undo 一个已经完成的 Session 后，状态会回到可恢复的 `interrupted`，防止旧测试结果继续冒充当前代码的验证证据。
+
 Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修改，不会尝试撤销 `run_command` 产生的任意文件、Git、网络或其他外部副作用。
 
 一次真实 Responses 修改、Diff 展示、Session 追踪和离线 Undo 的脱敏验收结果见 [`docs/runs/change-tracker-run.md`](docs/runs/change-tracker-run.md)。
 
 更完整的多文件失败基线、真实修复、4/4 测试通过、两次逆序 Undo 和行为复测见 [`docs/runs/multifile-workflow-run.md`](docs/runs/multifile-workflow-run.md)。
+
+阶段 E 的真实失败验证、修改后失效、重新验证通过和 `completed_verified` 本地判定记录见 [`docs/runs/verification-loop-run.md`](docs/runs/verification-loop-run.md)。
 
 ## 测试
 
@@ -212,7 +218,7 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 Agent 工具循环、用户拒绝写入、重复调用停止、路径逃逸、敏感文件、精确编辑、搜索、命令执行、上下文压缩、provider TOML、Responses 历史重放、两种兼容响应解析、Session 原子保存与恢复，以及 ChangeTracker 的 Diff、hash 冲突、原子写入、换行与 BOM、多次 Undo 和 Undo 冲突。
+测试覆盖 Agent 工具循环、用户拒绝写入、重复调用停止、路径逃逸、敏感文件、精确编辑、搜索、命令执行、上下文压缩、provider TOML、Responses 历史重放、两种兼容响应解析、Session 原子保存与恢复、ChangeTracker 的 Diff、hash 冲突、原子写入、换行与 BOM、多次 Undo 和 Undo 冲突，以及未验证/已验证/验证失败/验证失效的本地完成规则。
 
 ## 安全边界
 
@@ -222,7 +228,7 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 
 ## 下一步
 
-- 增加任务验证状态、错误重试、运行预算和日志脱敏。
+- 增加错误重试、运行预算、命令风险分类和统一日志脱敏。
 - 建立 Eval、跨平台 CI 和多文件演示项目。
 
 完整实现顺序、验收标准和可勾选任务见 [`ROADMAP.md`](ROADMAP.md)。

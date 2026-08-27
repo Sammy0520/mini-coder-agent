@@ -8,7 +8,8 @@ from mini_coder.agent import AgentRunner
 from mini_coder.config import AgentConfig, ApprovalPolicy
 from mini_coder.messages import ModelResponse, ToolCall
 from mini_coder.model import ModelClient
-from mini_coder.session import SessionStore
+from mini_coder.session import SessionStatus, SessionStore
+from mini_coder.verification import TaskPhase, VerificationStatus
 from mini_coder.tools import create_default_registry
 
 
@@ -40,6 +41,25 @@ def make_config(workspace: Path, **overrides) -> AgentConfig:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_analysis_only_task_completes_without_meaningless_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            runner = AgentRunner(
+                model=FakeModel([ModelResponse(content="No code change is needed.")]),
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Explain whether this empty project needs changes")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_UNVERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.NOT_REQUIRED)
+            self.assertEqual(session.phase, TaskPhase.SUMMARIZE)
+
     def test_safe_write_shows_diff_before_approval_and_denial_changes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -77,7 +97,7 @@ class AgentLoopTests(unittest.TestCase):
 
             result = runner.run("Create new.txt")
 
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.status, "denied")
             self.assertEqual(approval_observations, ["change_preview"])
             preview = next(payload for name, payload in events if name == "change_preview")
             self.assertEqual(preview["path"], "new.txt")
@@ -86,6 +106,7 @@ class AgentLoopTests(unittest.TestCase):
             self.assertFalse((workspace / "new.txt").exists())
             session = store.load(result.session_id or "")
             self.assertEqual(session.changes, [])
+            self.assertEqual(session.status, SessionStatus.DENIED)
             self.assertIsNotNone(session.tool_executions[0].prepared_change)
 
     def test_multiple_agent_writes_are_ordered_and_summarized_in_session(self) -> None:
@@ -259,6 +280,203 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertFalse((workspace / "new.txt").exists())
             self.assertIn("User denied", model.requests[1][0][-1]["content"])
+
+    def test_modified_task_without_verification_is_completed_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-write-unverified",
+                                name="write_file",
+                                arguments={"path": "result.txt", "content": "data\n"},
+                                raw_arguments=(
+                                    '{"path":"result.txt","content":"data\\n"}'
+                                ),
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Implemented the requested file."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Create result.txt")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_UNVERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.UNVERIFIED)
+            self.assertEqual(session.phase, TaskPhase.SUMMARIZE)
+            self.assertIn("Current file changes have not been verified", result.final_text)
+
+    def test_successful_real_command_marks_current_changes_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-write-verified",
+                                name="write_file",
+                                arguments={"path": "result.txt", "content": "data\n"},
+                                raw_arguments=(
+                                    '{"path":"result.txt","content":"data\\n"}'
+                                ),
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-verify-pass",
+                                name="run_command",
+                                arguments={
+                                    "command": 'python -c "print(\'ok\')"',
+                                    "purpose": "verify",
+                                },
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Implemented and tested."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Create and test result.txt")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_VERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.PASSED)
+            self.assertEqual(len(session.verification_records), 1)
+            self.assertEqual(session.verification_records[0].exit_code, 0)
+            self.assertGreaterEqual(session.verification_records[0].duration_seconds, 0)
+            self.assertIn("completed_verified", result.final_text)
+
+    def test_failed_verification_overrides_model_completion_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-write-before-fail",
+                                name="write_file",
+                                arguments={"path": "result.txt", "content": "bad\n"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-verify-fail",
+                                name="run_command",
+                                arguments={
+                                    "command": 'python -c "raise SystemExit(3)"',
+                                    "purpose": "verify",
+                                },
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Everything passed."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Create a valid result")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(result.status, "verification_failed")
+            self.assertEqual(session.status, SessionStatus.FAILED)
+            self.assertEqual(session.verification_status, VerificationStatus.FAILED)
+            self.assertIn("latest verification command failed", result.final_text)
+
+    def test_change_after_successful_verification_makes_it_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-first-write",
+                                name="write_file",
+                                arguments={"path": "result.txt", "content": "one\n"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-first-verify",
+                                name="run_command",
+                                arguments={
+                                    "command": 'python -c "print(\'ok\')"',
+                                    "purpose": "verify",
+                                },
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-later-edit",
+                                name="edit_file",
+                                arguments={
+                                    "path": "result.txt",
+                                    "old_text": "one",
+                                    "new_text": "two",
+                                },
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Updated after the earlier test."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Create, test, then update result.txt")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_UNVERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.STALE)
+            self.assertIsNotNone(session.verification_records[0].invalidated_at)
+            self.assertIn("verification is stale", result.final_text)
 
     def test_repeated_identical_calls_stop_the_loop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -21,6 +21,7 @@ from mini_coder.session import (
     ToolExecutionStatus,
 )
 from mini_coder.tools import create_default_registry
+from mini_coder.verification import VerificationRecord, VerificationStatus
 
 
 class SequenceModel(ModelClient):
@@ -160,6 +161,27 @@ class SessionModelTests(unittest.TestCase):
             self.assertEqual(restored.changes, [])
             self.assertEqual(restored.undo_history, [])
 
+    def test_migrates_schema_v2_session_to_verification_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 2
+            for name in (
+                "phase",
+                "verification_status",
+                "verification_records",
+                "change_revision",
+                "run_duration_seconds",
+                "retry_count",
+            ):
+                data.pop(name)
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.phase.value, "analyze")
+            self.assertEqual(restored.verification_status.value, "not_required")
+            self.assertEqual(restored.verification_records, [])
+
     def test_rejects_invalid_tool_execution_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data = make_session(Path(directory)).to_dict()
@@ -202,6 +224,19 @@ class SessionModelTests(unittest.TestCase):
             execution.set_status(ToolExecutionStatus.FAILED)
             with self.assertRaisesRegex(SessionError, "invalid tool execution status transition"):
                 execution.set_status(ToolExecutionStatus.RUNNING)
+
+    def test_completed_verified_requires_consistent_local_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = make_session(Path(directory))
+            session.set_status(SessionStatus.RUNNING)
+
+            with self.assertRaisesRegex(SessionError, "current successful verification"):
+                session.set_status(SessionStatus.COMPLETED_VERIFIED)
+
+            data = session.to_dict()
+            data["verification_status"] = "passed"
+            with self.assertRaisesRegex(SessionError, "inconsistent"):
+                AgentSession.from_dict(data)
 
 
 class SessionStoreTests(unittest.TestCase):
@@ -260,6 +295,70 @@ class SessionStoreTests(unittest.TestCase):
 
 
 class SessionRunnerTests(unittest.TestCase):
+    def test_resume_invalidates_verification_after_external_file_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            path = workspace / "tracked.txt"
+            path.write_text("before\n", encoding="utf-8")
+            tracker = ChangeTracker(workspace)
+            change = tracker.apply(
+                tracker.prepare(
+                    "edit_file",
+                    {"path": "tracked.txt", "old_text": "before", "new_text": "agent"},
+                    "execution-external-change",
+                )
+            )
+            session = AgentSession.create(
+                task="Update and test tracked.txt",
+                workspace=workspace,
+                model={"model": "fake"},
+                messages=[
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "Update and test tracked.txt"},
+                    {"role": "assistant", "content": "Completed and tested."},
+                ],
+            )
+            session.changes.append(change)
+            session.change_revision = 1
+            session.verification_records.append(
+                VerificationRecord.create(
+                    tool_execution_id="execution-verify-before-external-change",
+                    command="python -m unittest",
+                    cwd=".",
+                    exit_code=0,
+                    duration_seconds=0.1,
+                    stdout_summary="",
+                    stderr_summary="OK",
+                    change_revision=1,
+                    passed=True,
+                    timed_out=False,
+                )
+            )
+            session.refresh_verification_status()
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(SessionStatus.COMPLETED_VERIFIED)
+            store = SessionStore.for_workspace(workspace)
+            store.save(session)
+            path.write_text("external\n", encoding="utf-8")
+            model = SequenceModel(
+                [ModelResponse(content="The external edit has not been verified.")]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("", session=store.load(session.session_id))
+
+            restored = store.load(session.session_id)
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(restored.status, SessionStatus.COMPLETED_UNVERIFIED)
+            self.assertEqual(restored.verification_status, VerificationStatus.STALE)
+            self.assertEqual(restored.change_revision, 2)
+            self.assertIn("Local runtime notice", model.requests[0][-1]["content"])
+
     def test_resume_uses_persisted_approved_change_and_detects_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -671,8 +770,9 @@ class SessionRunnerTests(unittest.TestCase):
 
             result = runner.run("Write result.txt")
 
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.status, "denied")
             restored = store.load(result.session_id or "")
+            self.assertEqual(restored.status, SessionStatus.DENIED)
             execution = restored.tool_executions[0]
             self.assertEqual(execution.status, ToolExecutionStatus.DENIED)
             self.assertFalse(execution.approval_granted)

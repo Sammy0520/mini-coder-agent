@@ -137,6 +137,12 @@ class ToolTests(unittest.TestCase):
         extra = self.execute("read_file", {"path": "a.txt", "surprise": True})
         self.assertFalse(extra.ok)
         self.assertIn("Unexpected argument", extra.message)
+        invalid_enum = self.execute(
+            "run_command",
+            {"command": "python --version", "purpose": "pretend"},
+        )
+        self.assertFalse(invalid_enum.ok)
+        self.assertIn("must be one of", invalid_enum.message)
 
 
 if __name__ == "__main__":
