@@ -13,3 +13,4 @@ build/
 agent-events.jsonl
 auth.json
 tmp/
+.mini-coder/

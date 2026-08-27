@@ -21,3 +21,6 @@ class ToolError(MiniCoderError):
 class PathSafetyError(ToolError):
     """Raised when a requested path violates the workspace policy."""
 
+
+class SessionError(MiniCoderError):
+    """Raised when a persisted agent session cannot be stored or restored safely."""

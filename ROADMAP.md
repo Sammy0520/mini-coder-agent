@@ -82,7 +82,7 @@ flowchart TD
 ### 基线之后需要补齐
 
 - [x] 已在 `docs/runs/baseline-responses-run.md` 保存经过脱敏的真实模型端到端运行记录。
-- [ ] 任务状态主要存在于进程内，退出后不能可靠恢复。
+- [x] 任务状态已通过版本化 Session 落盘，并具备安全恢复入口。
 - [ ] 写操作没有面向用户的统一 Diff 和 Session 级 Undo。
 - [ ] 本地尚未区分“模型声称完成”和“经过测试验证完成”。
 - [ ] API 错误分类、有限重试和运行预算仍不完整。
@@ -150,13 +150,14 @@ tests/
 
 ### 6.1 Session Schema
 
-- [ ] 为 Session 定义独立、版本化的数据结构。
-- [ ] 增加 `schema_version`，为未来迁移保留接口。
-- [ ] 保存 `session_id`、创建时间、更新时间和工作区。
-- [ ] 保存原始任务、当前状态、步骤编号和停止原因。
-- [ ] 保存必要的 provider/model 配置摘要，但不保存 API Key。
-- [ ] 保存对话消息、Responses output items 和工具结果。
-- [ ] 保存审批决定、修改记录引用和验证状态。
+- [x] 为 Session 定义独立、版本化的数据结构。
+- [x] 增加 `schema_version`，为未来迁移保留接口。
+- [x] 保存 `session_id`、创建时间、更新时间和工作区。
+- [x] 保存原始任务、当前状态、步骤编号和停止原因。
+- [x] 保存必要的 provider/model 配置摘要，但不保存 API Key。
+- [x] 保存对话消息、Responses output items 和工具结果。
+- [x] 保存审批决定。
+- [ ] 保存修改记录引用和验证状态。
 - [ ] 保存最后一个可诊断错误的脱敏摘要。
 
 建议的逻辑结构：
@@ -185,18 +186,18 @@ Session
 
 ### 6.2 SessionStore
 
-- [ ] 新建职责单一的 `SessionStore`。
-- [ ] 使用临时文件加原子替换保存 Session。
-- [ ] 保存前完成 JSON 序列化和 schema 校验。
-- [ ] 加载时识别文件损坏、缺字段和不支持的版本。
-- [ ] Session 文件默认放在工作区内被 Git 忽略的位置，例如 `.mini-coder/sessions/`。
-- [ ] 限制 Session 文件权限的最佳实践，并在文档中说明其可能包含代码和命令输出。
-- [ ] 对写入失败、磁盘空间不足和目标目录不可用给出清晰错误。
+- [x] 新建职责单一的 `SessionStore`。
+- [x] 使用临时文件加原子替换保存 Session。
+- [x] 保存前完成 JSON 序列化和 schema 校验。
+- [x] 加载时识别文件损坏、缺字段和不支持的版本。
+- [x] Session 文件默认放在工作区内被 Git 忽略的位置，例如 `.mini-coder/sessions/`。
+- [x] 限制 Session 文件权限的最佳实践，并在文档中说明其可能包含代码和命令输出。
+- [x] 对写入失败、磁盘空间不足和目标目录不可用给出清晰错误。
 
 ### 6.3 运行状态机
 
-- [ ] 定义集中管理的状态枚举，避免散落字符串。
-- [ ] 至少支持以下状态：
+- [x] 定义集中管理的状态枚举，避免散落字符串。
+- [x] 至少支持以下状态：
 
 ```text
 created
@@ -209,50 +210,50 @@ completed_unverified
 cancelled
 ```
 
-- [ ] 约束合法状态转换。
-- [ ] 在模型请求、工具请求、审批、工具完成和最终结束后保存关键检查点。
-- [ ] Ctrl+C 时将 Session 标记为 `interrupted` 或 `cancelled`，而不是留下 `running`。
+- [x] 约束合法状态转换。
+- [x] 在模型请求、工具请求、审批、工具完成和最终结束后保存关键检查点。
+- [x] Ctrl+C 时将 Session 标记为 `interrupted` 或 `cancelled`，而不是留下 `running`。
 
 ### 6.4 工具执行状态与幂等恢复
 
-- [ ] 为每个工具调用分配稳定的 `tool_execution_id`。
-- [ ] 记录工具状态：`requested`、`approved`、`running`、`completed`、`failed`、`uncertain`。
-- [ ] 已完成工具调用恢复后不得自动重复执行。
-- [ ] 对崩溃时处于 `running` 的有副作用工具标记为 `uncertain`。
-- [ ] 对 `uncertain` 写操作检查文件状态或要求用户确认。
-- [ ] 对 `uncertain` 外部副作用命令默认不自动重放。
-- [ ] 只读、可安全重复的工具可以在明确规则下重试。
+- [x] 为每个工具调用分配稳定的 `tool_execution_id`。
+- [x] 记录工具状态：`requested`、`approved`、`running`、`completed`、`failed`、`uncertain`。
+- [x] 已完成工具调用恢复后不得自动重复执行。
+- [x] 对崩溃时处于 `running` 的有副作用工具标记为 `uncertain`。
+- [x] 对 `uncertain` 写操作检查文件状态或要求用户确认。
+- [x] 对 `uncertain` 外部副作用命令默认不自动重放。
+- [x] 只读、可安全重复的工具可以在明确规则下重试。
 
 ### 6.5 CLI 恢复入口
 
-- [ ] 增加 `--resume <session-id-or-path>`。
-- [ ] 恢复前显示任务、工作区、最后状态和未完成操作摘要。
-- [ ] 工作区不存在或路径不一致时停止并提示用户。
-- [ ] 恢复时重新校验当前配置和 API Key 来源。
-- [ ] 不允许通过 Session 内容覆盖当前安全策略。
+- [x] 增加 `--resume <session-id-or-path>`。
+- [x] 恢复前显示任务、工作区、最后状态和未完成操作摘要。
+- [x] 工作区不存在或路径不一致时停止并提示用户。
+- [x] 恢复时重新校验当前配置和 API Key 来源。
+- [x] 不允许通过 Session 内容覆盖当前安全策略。
 - [ ] 可选：增加 `--list-sessions` 和 Session 摘要列表。
 
 ### 测试要求
 
-- [ ] 正常保存和加载。
-- [ ] 多轮工具调用恢复。
-- [ ] Responses output 与 function result 配对恢复。
-- [ ] Ctrl+C 状态保存。
-- [ ] 损坏 JSON。
-- [ ] 不支持的 schema 版本。
-- [ ] 工作区丢失。
-- [ ] 已完成写操作不重复执行。
-- [ ] 不确定副作用需要重新确认。
-- [ ] Session 序列化结果不包含测试用 API Key。
+- [x] 正常保存和加载。
+- [x] 多轮工具调用恢复。
+- [x] Responses output 与 function result 配对恢复。
+- [x] Ctrl+C 状态保存。
+- [x] 损坏 JSON。
+- [x] 不支持的 schema 版本。
+- [x] 工作区丢失。
+- [x] 已完成写操作不重复执行。
+- [x] 不确定副作用需要重新确认。
+- [x] Session 序列化结果不包含测试用 API Key。
 
 ### 验收标准
 
-- [ ] 一个进行到一半的真实任务可以中断并恢复。
-- [ ] 恢复后模型获得合法且足够的上下文。
-- [ ] 不会无条件重复已经完成或结果不确定的副作用。
-- [ ] Session 文件损坏时安全失败，不覆盖原文件。
-- [ ] Session 文件不包含任何模型服务凭据。
-- [ ] CLI、事件日志和 Session 最终状态保持一致。
+- [x] 一个进行到一半的真实任务可以中断并恢复。
+- [x] 恢复后模型获得合法且足够的上下文。
+- [x] 不会无条件重复已经完成或结果不确定的副作用。
+- [x] Session 文件损坏时安全失败，不覆盖原文件。
+- [x] Session 文件不包含任何模型服务凭据。
+- [x] CLI、事件日志和 Session 最终状态保持一致。
 
 ---
 
@@ -672,8 +673,8 @@ run_cancelled
 
 ### P0：考核提交前必须完成
 
-- [ ] 真实模型基线验收。
-- [ ] Session 持久化和安全恢复。
+- [x] 真实模型基线验收。
+- [x] Session 持久化和安全恢复。
 - [ ] Diff、修改追踪和冲突检测。
 - [ ] 任务验证状态和准确最终报告。
 - [ ] API 有限重试、运行预算和统一脱敏。
@@ -731,6 +732,6 @@ docs: add architecture, evaluation, and demo results
 ## 16. 当前下一步
 
 1. 阶段 B 已完成两次真实模型基线验收，并保存脱敏记录。
-2. 进入阶段 C，设计 Session schema、状态机和原子 `SessionStore`。
-3. 在编写 `--resume` 之前，先确定工具执行的 `completed` 与 `uncertain` 恢复语义。
-4. Session 的正常保存、崩溃恢复和敏感信息测试全部通过后，再进入 ChangeTracker 与 Diff。
+2. 阶段 C 的 Session schema、状态机、原子存储、`--resume`、人工解决 `uncertain` 工具和真实跨进程恢复验收已经完成。
+3. 下一阶段进入 ChangeTracker、统一 Diff、冲突检测与 Undo。
+4. 实现文件变更追踪后，再把修改引用和验证状态接入 Session schema。
