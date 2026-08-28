@@ -7,13 +7,14 @@
 - `ModelClient`：与厂商无关的模型边界。
 - `OpenAICompatibleClient`：首个实现，可按 provider 配置选择 Responses 或 Chat Completions，可连接 OpenAI 或兼容服务。
 - 本地工具：`list_files`、`read_file`、`search_text`、`write_file`、`edit_file`、`run_command`。
-- 安全控制：工作区路径限制、常见敏感文件过滤、写入防误覆盖、精确文本替换、命令超时、输出截断。
+- 安全控制：工作区路径限制、常见敏感文件过滤、写入防误覆盖、精确文本替换、命令风险分级、子进程树清理和统一脱敏。
 - 跨平台执行：向模型说明实际操作系统与默认 shell，文件搜索和修改优先使用内置工具；子命令中的 `python`/`pip` 默认跟随启动 Agent 的虚拟环境。
-- 运行控制：最大步骤数、连续重复调用检测、工具参数校验、上下文压缩、Ctrl+C 中断。
+- 运行控制：最大步骤、总时间、模型/工具调用、单次/累计工具输出和 provider token 预算；连续重复调用检测、上下文压缩与可恢复中断。
 - Session：每次 CLI 运行原子保存版本化 Session；支持 `--resume`，保留 Responses provider items、工具执行状态、审批结果和累计 usage，并阻止不确定副作用被自动重放。
 - ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
 - 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、退出码、耗时和输出摘要；最终状态由本地事实决定。
-- 权限模式：默认 `safe`，写文件和执行命令需要确认；`--auto` 只适合受控或可丢弃的演示目录。
+- 错误恢复：认证、权限、限流、超时、网络、服务端、请求和响应解析错误分类；只对可恢复错误做带抖动和硬上限的有限重试。
+- 权限模式：默认 `safe`；命令按 `read_only`、`workspace_write`、`external_effect`、`dangerous`、`unknown` 分级，`--auto` 也不会自动批准后三类。
 
 ## 架构
 
@@ -114,9 +115,28 @@ mini-coder --config agent.toml --workspace D:\path\to\project "修复失败的�
 mini-coder --config agent.toml --auto --workspace examples\demo_project "修复折扣计算的边界错误并运行测试"
 ```
 
-可通过 `--log agent-events.jsonl` 保存可选的本地事件日志。日志可能含有代码或命令输出，因此默认关闭，也不应提交。
+可通过 `--log agent-events.jsonl` 保存可选的本地 JSONL 事件日志。每项事件包含 schema 版本、UTC 时间、run/session ID、step 和运行时长。日志写入失败只产生可见警告，不会中断主任务。事件内容会经过统一凭据脱敏，但仍可能含有代码或命令输出，因此默认关闭，也不应提交。
 
-`run_command` 会把启动 `mini-coder` 的 Python 环境放在子进程 `PATH` 最前面。因此从 `.venv` 启动时，模型执行普通的 `python` 或 `python -m pip` 也会使用同一个 `.venv`，而不是意外落到系统 Python 或 Anaconda。模型服务所用的 `OPENAI_API_KEY` 与 `CODING_AGENT_API_KEY` 不会自动传给项目子进程。
+`run_command` 会把启动 `mini-coder` 的 Python 环境放在子进程 `PATH` 最前面。因此从 `.venv` 启动时，模型执行普通的 `python` 或 `python -m pip` 也会使用同一个 `.venv`，而不是意外落到系统 Python 或 Anaconda。模型服务所用的 `OPENAI_API_KEY` 与 `CODING_AGENT_API_KEY` 不会自动传给项目子进程。命令超时或用户按下 Ctrl+C 时，Runner 会终止它启动的进程组/进程树，并把退出码、超时、耗时和输出截断状态保存到 Session。
+
+## 错误恢复与运行预算
+
+客户端关闭 SDK 内部的隐式重试，由 Runner 统一决定是否恢复：网络连接、超时、HTTP 429 和 500/502/503/504 可以有限重试；HTTP 400/401/403 不重试；响应解析错误最多重试一次。429 的 `Retry-After` 支持秒数和 HTTP 日期，指数退避带随机抖动，最终等待时间受硬上限约束。错误分类和诊断写入前会先脱敏。
+
+下面的上限都可以通过 CLI 覆盖：
+
+```powershell
+mini-coder --config agent.toml --workspace D:\path\to\project `
+  --max-steps 20 --max-seconds 900 `
+  --max-model-calls 40 --max-tool-calls 100 `
+  --max-tool-output 12000 --max-total-tool-output 200000 `
+  --max-total-tokens 500000 --max-retries 2 `
+  "修复失败的测试并验证"
+```
+
+`--max-tool-output` 限制单次送回模型的工具结果，`--max-total-tool-output` 限制整个 Session 累计工具结果。`--max-total-tokens` 只使用 provider 明确返回的 usage；缺少 usage 时报告 `unknown` 或 `partial`，不会自行估算成精确数字。达到任一预算后 Session 进入 `interrupted`，保存停止原因和待执行工具，用户可以用更高上限 `--resume` 继续。
+
+命令风险分类是保守的本地策略，不是通用 shell 静态分析或操作系统沙箱。已知只读命令可直接执行；`safe` 模式仍会确认写工作区的命令；`--auto` 仅可自动批准已知 `read_only` 和 `workspace_write`。安装依赖、联网、Git 远端操作等 `external_effect`，删除/覆盖等 `dangerous`，以及无法理解的 `unknown` 命令始终要求人工确认。审批提示会显示命令、工作目录、风险等级和预期副作用。
 
 ## Session 持久化与恢复
 
@@ -166,7 +186,7 @@ mini-coder --config agent.toml --resume "<session-file>" `
 
 一次真实 Responses 跨进程恢复的脱敏验收结果见 [`docs/runs/session-resume-run.md`](docs/runs/session-resume-run.md)。
 
-当前 Session schema 为 v3，增加任务阶段、修改版本、验证记录、验证状态、运行耗时和重试计数。v1/v2 Session 会在内存中自动迁移并在下一次保存时写成 v3，不会丢失原有消息、工具执行或变更记录。
+当前 Session schema 为 v4，增加模型调用数、缺失 usage 次数、累计工具输出，以及命令退出码、超时、截断和耗时。v1/v2/v3 Session 会逐级在内存中迁移并在下一次保存时写成 v4，不会丢失原有消息、工具执行或变更记录。
 
 ## Diff、变更历史与 Undo
 
@@ -209,6 +229,8 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 阶段 E 的真实失败验证、修改后失效、重新验证通过和 `completed_verified` 本地判定记录见 [`docs/runs/verification-loop-run.md`](docs/runs/verification-loop-run.md)。
 
+阶段 F 的真实 Responses 修复、v4 预算统计、命令风险、结构化事件和离线故障注入验收见 [`docs/runs/resilience-budget-run.md`](docs/runs/resilience-budget-run.md)。
+
 ## 测试
 
 核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用：
@@ -218,18 +240,18 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 Agent 工具循环、用户拒绝写入、重复调用停止、路径逃逸、敏感文件、精确编辑、搜索、命令执行、上下文压缩、provider TOML、Responses 历史重放、两种兼容响应解析、Session 原子保存与恢复、ChangeTracker 的 Diff、hash 冲突、原子写入、换行与 BOM、多次 Undo 和 Undo 冲突，以及未验证/已验证/验证失败/验证失效的本地完成规则。
+测试覆盖 Agent 工具循环、审批与风险分类、有限重试和 `Retry-After`、运行预算、集中脱敏、事件 envelope、日志故障隔离、进程树超时/Ctrl+C 清理、路径逃逸、敏感文件、命令执行、上下文压缩、Responses 历史重放、Session 原子保存/迁移/恢复、ChangeTracker、Undo，以及本地验证完成规则。
 
 ## 安全边界
 
-文件工具会解析真实路径并拒绝工作区之外的访问，也会隐藏 `.env`、`.git`、私钥等常见敏感位置。`run_command` 是普通本地 shell 进程，不是完整操作系统沙箱；命令理论上可以访问当前用户有权限访问的其他资源。因此默认采用人工确认，`--auto` 只能在隔离、受控、可恢复的工作区使用。
+文件工具会解析真实路径并拒绝工作区之外的访问，也会隐藏 `.env`、`.git`、私钥等常见敏感位置。`run_command` 是普通本地 shell 进程，不是完整操作系统沙箱；命令理论上可以访问当前用户有权限访问的其他资源。风险分类和人工确认降低误操作概率，但不能替代容器、低权限账号或虚拟机。因此 `--auto` 只能在隔离、受控、可恢复的工作区使用。
 
 Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从文件列表隐藏，并拒绝通过文件工具直接读取，避免运行状态或缓存污染模型上下文。
 
 ## 下一步
 
-- 增加错误重试、运行预算、命令风险分类和统一日志脱敏。
-- 建立 Eval、跨平台 CI 和多文件演示项目。
+- 增强项目结构理解、忽略规则、搜索体验和失败诊断。
+- 建立独立 Eval、跨平台 CI 和提交演示。
 
 完整实现顺序、验收标准和可勾选任务见 [`ROADMAP.md`](ROADMAP.md)。
 

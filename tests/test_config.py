@@ -11,6 +11,33 @@ from mini_coder.exceptions import ConfigurationError
 
 
 class ConfigTests(unittest.TestCase):
+    def test_loads_stage_f_budget_and_retry_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "CODING_AGENT_MAX_SECONDS": "123",
+                "CODING_AGENT_MAX_MODEL_CALLS": "7",
+                "CODING_AGENT_MAX_TOOL_CALLS": "9",
+                "CODING_AGENT_MAX_TOOL_OUTPUT": "1111",
+                "CODING_AGENT_MAX_TOTAL_TOOL_OUTPUT": "2222",
+                "CODING_AGENT_MAX_TOTAL_TOKENS": "3333",
+                "CODING_AGENT_MAX_RETRIES": "4",
+                "CODING_AGENT_RETRY_BASE_SECONDS": "0.25",
+                "CODING_AGENT_RETRY_MAX_SECONDS": "3.5",
+            },
+            clear=True,
+        ):
+            config = AgentConfig.from_env(directory)
+
+        self.assertEqual(config.max_seconds, 123)
+        self.assertEqual(config.max_model_calls, 7)
+        self.assertEqual(config.max_tool_calls, 9)
+        self.assertEqual(config.max_tool_output_chars, 1111)
+        self.assertEqual(config.max_total_tool_output_chars, 2222)
+        self.assertEqual(config.max_total_tokens, 3333)
+        self.assertEqual(config.max_model_retries, 4)
+        self.assertEqual(config.retry_base_seconds, 0.25)
+        self.assertEqual(config.retry_max_seconds, 3.5)
     def test_loads_provider_toml_and_keeps_key_in_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

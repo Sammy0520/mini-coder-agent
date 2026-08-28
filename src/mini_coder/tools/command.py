@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import locale
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -9,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from ..exceptions import ToolError
+from ..redaction import redact_sensitive_text
 from .base import RiskLevel, Tool, ToolContext, ToolResult, truncate_text
+from .command_risk import assess_command
 
 
 class RunCommandTool(Tool):
@@ -50,47 +53,89 @@ class RunCommandTool(Tool):
             context.command_timeout_seconds,
         )
         encoding = locale.getpreferredencoding(False) or "utf-8"
+        assessment = assess_command(command)
         started_at = time.monotonic()
+        process: subprocess.Popen[str] | None = None
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        )
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=cwd,
                 env=_command_environment(),
                 shell=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding=encoding,
                 errors="replace",
-                timeout=timeout,
-                check=False,
+                start_new_session=os.name != "nt",
+                creationflags=creationflags,
             )
-        except subprocess.TimeoutExpired as exc:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
             duration_seconds = time.monotonic() - started_at
-            stdout = _as_text(exc.stdout, encoding)
-            stderr = _as_text(exc.stderr, encoding)
+            if process is None:
+                raise
+            terminated = _terminate_process_tree(process)
+            stdout, stderr = _collect_after_termination(process)
+            stdout_text, stdout_truncated = _truncate_stream(
+                redact_sensitive_text(_as_text(stdout, encoding)),
+                context.max_output_chars // 2,
+            )
+            stderr_text, stderr_truncated = _truncate_stream(
+                redact_sensitive_text(_as_text(stderr, encoding)),
+                context.max_output_chars // 2,
+            )
             return ToolResult(
                 False,
                 f"Command timed out after {timeout} second(s)",
                 {
                     "timed_out": True,
-                    "exit_code": None,
+                    "exit_code": process.returncode,
                     "duration_seconds": duration_seconds,
-                    "stdout": truncate_text(stdout, context.max_output_chars // 2),
-                    "stderr": truncate_text(stderr, context.max_output_chars // 2),
+                    "stdout": stdout_text,
+                    "stderr": stderr_text,
+                    "stdout_truncated": stdout_truncated,
+                    "stderr_truncated": stderr_truncated,
+                    "output_truncated": stdout_truncated or stderr_truncated,
+                    "process_tree_terminated": terminated,
+                    "command_risk": assessment.level.value,
+                    "expected_side_effects": assessment.expected_side_effects,
                 },
             )
+        except KeyboardInterrupt:
+            if process is not None:
+                _terminate_process_tree(process)
+                _collect_after_termination(process)
+            raise
 
         per_stream = max(500, context.max_output_chars // 2)
+        if process is None:
+            raise ToolError("command process did not start")
         duration_seconds = time.monotonic() - started_at
+        stdout_text, stdout_truncated = _truncate_stream(
+            redact_sensitive_text(stdout), per_stream
+        )
+        stderr_text, stderr_truncated = _truncate_stream(
+            redact_sensitive_text(stderr), per_stream
+        )
         return ToolResult(
-            completed.returncode == 0,
-            f"Command exited with code {completed.returncode}",
+            process.returncode == 0,
+            f"Command exited with code {process.returncode}",
             {
-                "exit_code": completed.returncode,
-                "stdout": truncate_text(completed.stdout, per_stream),
-                "stderr": truncate_text(completed.stderr, per_stream),
+                "exit_code": process.returncode,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
                 "timed_out": False,
                 "duration_seconds": duration_seconds,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
+                "output_truncated": stdout_truncated or stderr_truncated,
+                "process_tree_terminated": False,
+                "command_risk": assessment.level.value,
+                "expected_side_effects": assessment.expected_side_effects,
             },
         )
 
@@ -128,3 +173,48 @@ def _as_text(value: str | bytes | None, encoding: str) -> str:
     if isinstance(value, bytes):
         return value.decode(encoding, errors="replace")
     return value
+
+
+def _truncate_stream(text: str, limit: int) -> tuple[str, bool]:
+    return truncate_text(text, limit), len(text) > limit
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> bool:
+    if process.poll() is not None:
+        return True
+    try:
+        if os.name == "nt":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+                creationflags=flags,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+        if process.poll() is None:
+            process.kill()
+        return True
+    except (OSError, subprocess.SubprocessError):
+        try:
+            process.kill()
+            return True
+        except OSError:
+            return False
+
+
+def _collect_after_termination(
+    process: subprocess.Popen[str],
+) -> tuple[str | bytes | None, str | bytes | None]:
+    try:
+        return process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.communicate()

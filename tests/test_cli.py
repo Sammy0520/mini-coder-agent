@@ -4,13 +4,14 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from mini_coder.changes import ChangeTracker
 from mini_coder.cli import (
     _load_resume_session,
+    _event_handler,
     _resolve_uncertain_tools,
     _validate_resume_model,
     build_parser,
@@ -36,6 +37,21 @@ class FinalModel(ModelClient):
 
 
 class CliSessionTests(unittest.TestCase):
+    def test_event_log_failure_warns_once_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blocking_parent = root / "not-a-directory"
+            blocking_parent.write_text("file", encoding="utf-8")
+            handler = _event_handler(blocking_parent / "events.jsonl")
+            errors = io.StringIO()
+
+            with redirect_stderr(errors):
+                handler("run_started", {"session_id": "session-log"})
+                handler("run_completed", {"session_id": "session-log"})
+
+            rendered = errors.getvalue()
+            self.assertEqual(rendered.count("event log could not be written"), 1)
+
     def test_cli_undo_last_is_local_persisted_and_does_not_require_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -356,7 +372,10 @@ class CliSessionTests(unittest.TestCase):
                 json.loads(line)
                 for line in log_path.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual(events[-1]["event"], "run_finished")
+            self.assertEqual(events[-1]["event"], "run_completed")
+            self.assertEqual(events[-1]["event_schema_version"], 1)
+            self.assertIn("run_id", events[-1])
+            self.assertIn("timestamp", events[-1])
             self.assertEqual(events[-1]["result_status"], "completed")
             self.assertEqual(events[-1]["session_status"], restored.status.value)
             self.assertEqual(events[-1]["session_id"], restored.session_id)

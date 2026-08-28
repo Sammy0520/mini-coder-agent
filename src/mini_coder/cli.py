@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from .changes import ChangeTracker
 from .config import AgentConfig, ApprovalPolicy
 from .exceptions import ConfigurationError, MiniCoderError, SessionError
 from .model import OpenAICompatibleClient
+from .redaction import redact_sensitive_text, redact_sensitive_value
 from .session import (
     AgentSession,
     SessionStatus,
@@ -20,6 +22,7 @@ from .session import (
 )
 from .tools import create_default_registry
 from .tools.base import Tool
+from .tools.command_risk import assess_command
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,6 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--verbosity", choices=["low", "medium", "high"])
     parser.add_argument("--max-steps", type=int, help="Maximum model turns")
+    parser.add_argument("--max-seconds", type=int, help="Maximum cumulative run time")
+    parser.add_argument("--max-model-calls", type=int, help="Maximum model request attempts")
+    parser.add_argument("--max-tool-calls", type=int, help="Maximum requested tool calls")
+    parser.add_argument("--max-tool-output", type=int, help="Maximum characters per tool result")
+    parser.add_argument(
+        "--max-total-tool-output",
+        type=int,
+        help="Maximum cumulative characters returned by tools",
+    )
+    parser.add_argument("--max-total-tokens", type=int, help="Maximum reported total tokens")
+    parser.add_argument("--max-retries", type=int, help="Maximum retries per model turn")
     parser.add_argument(
         "--auto",
         action="store_true",
@@ -169,6 +183,13 @@ def main(argv: list[str] | None = None) -> int:
             reasoning_effort=args.reasoning_effort,
             verbosity=args.verbosity,
             max_steps=args.max_steps,
+            max_seconds=args.max_seconds,
+            max_model_calls=args.max_model_calls,
+            max_tool_calls=args.max_tool_calls,
+            max_tool_output_chars=args.max_tool_output,
+            max_total_tool_output_chars=args.max_total_tool_output,
+            max_total_tokens=args.max_total_tokens,
+            max_model_retries=args.max_retries,
         )
         config.validate_for_model()
         if resumed_session is not None:
@@ -182,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
             wire_api=config.wire_api,
             reasoning_effort=config.model_reasoning_effort,
             verbosity=config.model_verbosity,
+            timeout_seconds=config.model_timeout_seconds,
         )
         provider_label = config.model_provider or "environment/default"
         print(
@@ -208,7 +230,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         result = runner.run(task, session=resumed_session)
     except MiniCoderError as exc:
-        print(f"Configuration/runtime error: {exc}", file=sys.stderr)
+        configured_key = getattr(locals().get("config"), "api_key", None)
+        safe_error = redact_sensitive_text(str(exc), secrets=(configured_key,))
+        print(f"Configuration/runtime error: {safe_error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("\nInterrupted by user.", file=sys.stderr)
@@ -280,6 +304,11 @@ def _print_resume_summary(session: AgentSession) -> None:
         f"  Verification: {session.verification_status.value} "
         f"({len(session.verification_records)} command(s))\n"
         f"  Last completed model step: {session.current_step}\n"
+        f"  Model calls/retries: {session.model_call_count}/{session.retry_count}\n"
+        f"  Tool calls/output: {len(session.tool_executions)}/"
+        f"{session.tool_output_chars} characters\n"
+        f"  Provider usage: "
+        f"{'partial or unknown' if session.usage_missing_count else 'complete'}\n"
         f"  Pending/uncertain tools: {len(pending)}\n"
         f"  Tracked changes: {len(session.changes)} "
         f"({len([item for item in session.changes if item.undo_status == 'active'])} active)\n"
@@ -289,7 +318,7 @@ def _print_resume_summary(session: AgentSession) -> None:
         arguments = json.dumps(item.arguments, ensure_ascii=False, default=str)
         print(
             f"  - {item.execution_id}: {item.name} [{item.status.value}] "
-            f"{arguments[:200]}"
+            f"risk={item.risk} {arguments[:200]}"
         )
 
 
@@ -399,8 +428,18 @@ def _resolve_uncertain_tools(
 
 
 def _ask_approval(tool: Tool, arguments: dict[str, Any]) -> bool:
-    rendered = json.dumps(arguments, ensure_ascii=False, default=str)
-    print(f"\nApproval required [{tool.risk.value}] {tool.name}: {rendered}")
+    safe_arguments = redact_sensitive_value(arguments)
+    rendered = json.dumps(safe_arguments, ensure_ascii=False, default=str)
+    if tool.name == "run_command":
+        assessment = assess_command(str(arguments.get("command", "")))
+        print(
+            f"\nApproval required [command:{assessment.level.value}] {tool.name}\n"
+            f"  command/cwd: {rendered}\n"
+            f"  assessment: {assessment.summary}\n"
+            f"  expected side effects: {assessment.expected_side_effects}"
+        )
+    else:
+        print(f"\nApproval required [{tool.risk.value}] {tool.name}: {rendered}")
     try:
         answer = input("Allow? [y/N] ").strip().casefold()
     except EOFError:
@@ -412,64 +451,99 @@ def _event_handler(log_path: Path | None):
     if log_path is not None:
         log_path = log_path.expanduser().resolve()
 
+    log_warning_emitted = False
+
     def handle(name: str, payload: dict[str, Any]) -> None:
+        nonlocal log_warning_emitted
+        safe_value = redact_sensitive_value(payload)
+        safe_payload = safe_value if isinstance(safe_value, dict) else {}
+        safe_payload.setdefault("event_schema_version", 1)
+        safe_payload.setdefault(
+            "timestamp",
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
         if name == "session_created":
-            print(f"Session: {payload['session_id']}\nSaved at: {payload['path']}")
+            print(f"Session: {safe_payload['session_id']}\nSaved at: {safe_payload['path']}")
         elif name == "session_resumed":
             print(
-                f"Resuming session {payload['session_id']} from step "
-                f"{payload['current_step']}"
+                f"Resuming session {safe_payload['session_id']} from step "
+                f"{safe_payload['current_step']}"
             )
-        elif name == "model_request":
-            print(f"\n[step {payload['step']}] asking model...")
-        elif name == "tool_request":
-            print(f"[tool] {payload['tool']} {json.dumps(payload['arguments'], ensure_ascii=False)}")
-        elif name == "tool_result":
-            state = "ok" if payload["ok"] else "error"
-            preview = str(payload["content"]).replace("\n", " ")[:240]
-            print(f"[{state}] {payload['tool']}: {preview}")
+        elif name == "model_request_started":
+            print(f"\n[step {safe_payload['step']}] asking model...")
+        elif name == "retry_scheduled":
+            print(
+                f"[retry] {safe_payload['category']} in "
+                f"{safe_payload['delay_seconds']:.2f}s "
+                f"({safe_payload['retry']}/{safe_payload.get('max_retries', '?')})"
+            )
+        elif name == "tool_call_requested":
+            print(
+                f"[tool] {safe_payload['tool']} "
+                f"{json.dumps(safe_payload['arguments'], ensure_ascii=False)}"
+            )
+        elif name == "tool_call_completed":
+            state = "ok" if safe_payload["ok"] else "error"
+            preview = str(safe_payload["content"]).replace("\n", " ")[:240]
+            print(f"[{state}] {safe_payload['tool']}: {preview}")
         elif name == "model_error":
-            print(f"[model error] {payload['error']}", file=sys.stderr)
+            print(f"[model error] {safe_payload['error']}", file=sys.stderr)
         elif name == "uncertain_resolved":
             print(
-                f"Resolved uncertain tool {payload['execution_id']} as "
-                f"{payload['resolution']}."
+                f"Resolved uncertain tool {safe_payload['execution_id']} as "
+                f"{safe_payload['resolution']}."
             )
         elif name == "change_preview":
-            truncated = " [truncated]" if payload["diff_truncated"] else ""
+            truncated = " [truncated]" if safe_payload["diff_truncated"] else ""
             print(
-                f"\nChange preview: {payload['path']} "
-                f"+{payload['additions']}/-{payload['deletions']}{truncated}\n"
-                f"before: {payload['before_hash'] or '<missing>'}\n"
-                f"after:  {payload['after_hash']}\n"
-                f"{payload['diff']}"
+                f"\nChange preview: {safe_payload['path']} "
+                f"+{safe_payload['additions']}/-{safe_payload['deletions']}{truncated}\n"
+                f"before: {safe_payload['before_hash'] or '<missing>'}\n"
+                f"after:  {safe_payload['after_hash']}\n"
+                f"{safe_payload['diff']}"
             )
         elif name == "change_applied":
             print(
-                f"[change] {payload['path']}: "
-                f"+{payload['additions']}/-{payload['deletions']}"
+                f"[change] {safe_payload['path']}: "
+                f"+{safe_payload['additions']}/-{safe_payload['deletions']}"
             )
         elif name == "change_undone":
-            print(f"[undo] restored {payload['path']}")
+            print(f"[undo] restored {safe_payload['path']}")
         elif name == "phase_changed":
-            print(f"[phase] {payload['previous']} -> {payload['phase']}")
-        elif name == "verification_recorded":
-            state = "passed" if payload["passed"] else "failed"
+            print(f"[phase] {safe_payload['previous']} -> {safe_payload['phase']}")
+        elif name == "verification_completed":
+            state = "passed" if safe_payload["passed"] else "failed"
             print(
-                f"[verification] {state}, exit {payload['exit_code']}, "
-                f"{payload['duration_seconds']:.2f}s"
+                f"[verification] {state}, exit {safe_payload['exit_code']}, "
+                f"{safe_payload['duration_seconds']:.2f}s"
             )
         elif name == "verification_invalidated":
-            print(f"[verification] stale: {payload['reason']}")
+            print(f"[verification] stale: {safe_payload['reason']}")
         elif name == "workspace_changed":
             print(
                 "[workspace] changed outside the saved Session: "
-                + ", ".join(payload["paths"])
+                + ", ".join(safe_payload["paths"])
             )
         if log_path is not None:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps({"event": name, **payload}, ensure_ascii=False, default=str) + "\n")
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        json.dumps(
+                            {"event": name, **safe_payload},
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                        + "\n"
+                    )
+            except OSError as exc:
+                if not log_warning_emitted:
+                    print(
+                        f"Warning: event log could not be written: "
+                        f"{redact_sensitive_text(exc)}",
+                        file=sys.stderr,
+                    )
+                    log_warning_emitted = True
 
     return handle
 

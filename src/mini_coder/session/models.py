@@ -18,7 +18,7 @@ from ..verification import (
     VerificationTracker,
 )
 
-CURRENT_SESSION_SCHEMA = 3
+CURRENT_SESSION_SCHEMA = 4
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -28,6 +28,12 @@ _SAFE_MODEL_FIELDS = {
     "verbosity",
     "approval_policy",
     "max_steps",
+    "max_seconds",
+    "max_model_calls",
+    "max_tool_calls",
+    "max_tool_output_chars",
+    "max_total_tool_output_chars",
+    "max_total_tokens",
 }
 
 
@@ -166,6 +172,10 @@ class ToolExecutionRecord:
     error: str | None = None
     prepared_change: PreparedChange | None = None
     change_id: str | None = None
+    exit_code: int | None = None
+    timed_out: bool | None = None
+    output_truncated: bool | None = None
+    duration_seconds: float | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -239,6 +249,10 @@ class ToolExecutionRecord:
                 self.prepared_change.to_dict() if self.prepared_change is not None else None
             ),
             "change_id": self.change_id,
+            "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
+            "output_truncated": self.output_truncated,
+            "duration_seconds": self.duration_seconds,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -274,6 +288,10 @@ class ToolExecutionRecord:
                 else None
             ),
             change_id=_optional_string(data, "change_id"),
+            exit_code=_optional_int(data, "exit_code"),
+            timed_out=_optional_bool(data, "timed_out"),
+            output_truncated=_optional_bool(data, "output_truncated"),
+            duration_seconds=_optional_number(data, "duration_seconds", minimum=0),
             created_at=_required_string(data, "created_at"),
             updated_at=_required_string(data, "updated_at"),
         )
@@ -301,6 +319,9 @@ class AgentSession:
     change_revision: int = 0
     run_duration_seconds: float = 0.0
     retry_count: int = 0
+    model_call_count: int = 0
+    usage_missing_count: int = 0
+    tool_output_chars: int = 0
     stop_reason: str | None = None
     final_text: str = ""
     last_error: str | None = None
@@ -328,6 +349,14 @@ class AgentSession:
             raise SessionError("session run_duration_seconds must not be negative")
         if self.retry_count < 0:
             raise SessionError("session retry_count must not be negative")
+        if self.model_call_count < 0:
+            raise SessionError("session model_call_count must not be negative")
+        if self.usage_missing_count < 0:
+            raise SessionError("session usage_missing_count must not be negative")
+        if self.usage_missing_count > self.model_call_count:
+            raise SessionError("usage_missing_count cannot exceed model_call_count")
+        if self.tool_output_chars < 0:
+            raise SessionError("session tool_output_chars must not be negative")
         if not isinstance(self.messages, list) or not all(
             isinstance(item, dict) for item in self.messages
         ):
@@ -452,6 +481,9 @@ class AgentSession:
             "change_revision": self.change_revision,
             "run_duration_seconds": self.run_duration_seconds,
             "retry_count": self.retry_count,
+            "model_call_count": self.model_call_count,
+            "usage_missing_count": self.usage_missing_count,
+            "tool_output_chars": self.tool_output_chars,
             "stop_reason": self.stop_reason,
             "final_text": self.final_text,
             "last_error": self.last_error,
@@ -528,6 +560,9 @@ class AgentSession:
                 minimum=0,
             ),
             retry_count=_required_int(data, "retry_count", minimum=0),
+            model_call_count=_required_int(data, "model_call_count", minimum=0),
+            usage_missing_count=_required_int(data, "usage_missing_count", minimum=0),
+            tool_output_chars=_required_int(data, "tool_output_chars", minimum=0),
             stop_reason=_optional_string(data, "stop_reason"),
             final_text=_required_string(data, "final_text", allow_empty=True),
             last_error=_optional_string(data, "last_error"),
@@ -555,7 +590,7 @@ class AgentSession:
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version not in {1, 2}:
+    if version not in {1, 2, 3}:
         return data
     migrated = copy.deepcopy(data)
     if version == 1:
@@ -584,6 +619,39 @@ def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
         )
         migrated.setdefault("run_duration_seconds", 0.0)
         migrated.setdefault("retry_count", 0)
+        version = 3
+    if version == 3:
+        migrated["schema_version"] = 4
+        inferred_model_calls = sum(
+            1
+            for message in migrated.get("messages", [])
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        )
+        migrated.setdefault("model_call_count", inferred_model_calls)
+        previous_usage = migrated.get("total_usage")
+        has_exact_total = (
+            isinstance(previous_usage, dict)
+            and isinstance(previous_usage.get("total_tokens"), int)
+            and not isinstance(previous_usage.get("total_tokens"), bool)
+        )
+        migrated.setdefault(
+            "usage_missing_count",
+            0 if has_exact_total else inferred_model_calls,
+        )
+        for execution in migrated.get("tool_executions", []):
+            if isinstance(execution, dict):
+                execution.setdefault("exit_code", None)
+                execution.setdefault("timed_out", None)
+                execution.setdefault("output_truncated", None)
+                execution.setdefault("duration_seconds", None)
+        migrated.setdefault(
+            "tool_output_chars",
+            sum(
+                len(str(execution.get("result_content") or ""))
+                for execution in migrated.get("tool_executions", [])
+                if isinstance(execution, dict)
+            ),
+        )
     return migrated
 
 
@@ -639,3 +707,30 @@ def _optional_bool(data: dict[str, Any], name: str) -> bool | None:
     if not isinstance(value, bool):
         raise SessionError(f"session field {name!r} must be a boolean or null")
     return value
+
+
+def _optional_int(data: dict[str, Any], name: str) -> int | None:
+    value = data.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise SessionError(f"session field {name!r} must be an integer or null")
+    return value
+
+
+def _optional_number(
+    data: dict[str, Any],
+    name: str,
+    *,
+    minimum: float,
+) -> float | None:
+    value = data.get(name)
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value < minimum
+    ):
+        raise SessionError(f"session field {name!r} must be a number >= {minimum} or null")
+    return float(value)

@@ -8,6 +8,7 @@ from typing import Any
 from ..config import WireAPI
 from ..exceptions import ConfigurationError, ModelError, ModelProtocolError
 from ..messages import ModelResponse, ToolCall
+from .errors import classify_model_exception
 from .base import ModelClient
 
 
@@ -42,11 +43,14 @@ class OpenAICompatibleClient(ModelClient):
         kwargs: dict[str, Any] = {
             "api_key": api_key,
             "timeout": timeout_seconds,
-            "max_retries": 2,
+            # Retry policy belongs to AgentRunner so attempts, budgets, events,
+            # and Session state remain observable and deterministic.
+            "max_retries": 0,
         }
         if base_url:
             kwargs["base_url"] = base_url
         self._client = OpenAI(**kwargs)
+        self._redaction_secrets = (api_key,)
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._verbosity = verbosity
@@ -63,7 +67,10 @@ class OpenAICompatibleClient(ModelClient):
         except ModelProtocolError:
             raise
         except Exception as exc:  # SDK/provider exceptions vary across compatible services.
-            raise ModelError(f"Model request failed: {exc}") from exc
+            raise classify_model_exception(
+                exc,
+                secrets=self._redaction_secrets,
+            ) from exc
 
     def _complete_chat_completions(
         self,

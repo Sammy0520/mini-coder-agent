@@ -1,4 +1,5 @@
 from .command import RunCommandTool
+from .command_risk import CommandAssessment, CommandRisk, assess_command
 from .filesystem import EditFileTool, ListFilesTool, ReadFileTool, WriteFileTool
 from .registry import ToolRegistry
 from .search import SearchTextTool
@@ -11,6 +12,9 @@ __all__ = [
     "SearchTextTool",
     "ToolRegistry",
     "WriteFileTool",
+    "CommandAssessment",
+    "CommandRisk",
+    "assess_command",
 ]
 
 
@@ -23,4 +27,3 @@ def create_default_registry() -> ToolRegistry:
     registry.register(EditFileTool())
     registry.register(RunCommandTool())
     return registry
-

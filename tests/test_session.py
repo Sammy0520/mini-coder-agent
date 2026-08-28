@@ -182,6 +182,25 @@ class SessionModelTests(unittest.TestCase):
             self.assertEqual(restored.verification_status.value, "not_required")
             self.assertEqual(restored.verification_records, [])
 
+    def test_migrates_schema_v3_session_to_budget_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 3
+            data["total_usage"] = {"input_tokens": 12}
+            for name in (
+                "model_call_count",
+                "usage_missing_count",
+                "tool_output_chars",
+            ):
+                data.pop(name)
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.model_call_count, 1)
+            self.assertEqual(restored.usage_missing_count, 1)
+            self.assertEqual(restored.tool_output_chars, 0)
+
     def test_rejects_invalid_tool_execution_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data = make_session(Path(directory)).to_dict()

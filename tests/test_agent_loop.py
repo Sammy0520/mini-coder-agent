@@ -356,6 +356,7 @@ class AgentLoopTests(unittest.TestCase):
                 model=model,
                 registry=create_default_registry(),
                 config=make_config(workspace),
+                approval_callback=lambda tool, arguments: True,
                 session_store=store,
             )
 
@@ -368,6 +369,11 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(len(session.verification_records), 1)
             self.assertEqual(session.verification_records[0].exit_code, 0)
             self.assertGreaterEqual(session.verification_records[0].duration_seconds, 0)
+            command_record = session.tool_executions[-1]
+            self.assertEqual(command_record.exit_code, 0)
+            self.assertFalse(command_record.timed_out)
+            self.assertFalse(command_record.output_truncated)
+            self.assertIsNotNone(command_record.duration_seconds)
             self.assertIn("completed_verified", result.final_text)
 
     def test_failed_verification_overrides_model_completion_claim(self) -> None:
@@ -406,6 +412,7 @@ class AgentLoopTests(unittest.TestCase):
                 model=model,
                 registry=create_default_registry(),
                 config=make_config(workspace),
+                approval_callback=lambda tool, arguments: True,
                 session_store=store,
             )
 
@@ -467,6 +474,7 @@ class AgentLoopTests(unittest.TestCase):
                 model=model,
                 registry=create_default_registry(),
                 config=make_config(workspace),
+                approval_callback=lambda tool, arguments: True,
                 session_store=store,
             )
 

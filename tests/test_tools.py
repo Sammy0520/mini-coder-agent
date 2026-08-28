@@ -7,9 +7,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import MagicMock
 
 from mini_coder.exceptions import PathSafetyError
 from mini_coder.tools import create_default_registry
+from mini_coder.tools.command_risk import CommandRisk, assess_command
 from mini_coder.tools.base import ToolContext
 from mini_coder.tools.safety import WorkspacePolicy
 
@@ -101,7 +103,63 @@ class ToolTests(unittest.TestCase):
         result = self.execute("run_command", {"command": command})
         self.assertTrue(result.ok, result.message)
         self.assertEqual(result.data["exit_code"], 0)
+        self.assertFalse(result.data["output_truncated"])
+        self.assertEqual(result.data["command_risk"], "unknown")
         self.assertIn("12345", result.data["stdout"])
+
+    def test_command_risk_classifier_is_conservative(self) -> None:
+        self.assertEqual(assess_command("git status").level, CommandRisk.READ_ONLY)
+        self.assertEqual(
+            assess_command("python -m unittest").level,
+            CommandRisk.WORKSPACE_WRITE,
+        )
+        self.assertEqual(assess_command("git push origin main").level, CommandRisk.EXTERNAL_EFFECT)
+        self.assertEqual(assess_command("rm -rf build").level, CommandRisk.DANGEROUS)
+        self.assertEqual(assess_command("mv old.txt new.txt").level, CommandRisk.DANGEROUS)
+        self.assertEqual(assess_command("copy old.txt new.txt").level, CommandRisk.DANGEROUS)
+        self.assertEqual(assess_command("python script.py").level, CommandRisk.UNKNOWN)
+        self.assertEqual(
+            assess_command("git status && git log -1").level,
+            CommandRisk.UNKNOWN,
+        )
+
+    def test_command_timeout_terminates_process_tree_and_records_truncation(self) -> None:
+        command = f'"{sys.executable}" -c "import time; time.sleep(5)"'
+
+        result = self.execute(
+            "run_command",
+            {"command": command, "timeout_seconds": 1},
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.data["timed_out"])
+        self.assertTrue(result.data["process_tree_terminated"])
+        self.assertIn("output_truncated", result.data)
+        self.assertLess(result.data["duration_seconds"], 4)
+
+    def test_keyboard_interrupt_requests_process_tree_cleanup(self) -> None:
+        process = MagicMock()
+        process.pid = 12345
+        process.poll.return_value = None
+        process.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
+        with patch("mini_coder.tools.command.subprocess.Popen", return_value=process), patch(
+            "mini_coder.tools.command._terminate_process_tree",
+            return_value=True,
+        ) as terminate:
+            with self.assertRaises(KeyboardInterrupt):
+                self.execute("run_command", {"command": "python script.py"})
+
+        terminate.assert_called_once_with(process)
+
+    def test_command_output_redacts_key_shaped_values(self) -> None:
+        fake_key = "sk-command-secret-123456"
+        command = f'"{sys.executable}" -c "print(\'{fake_key}\')"'
+
+        result = self.execute("run_command", {"command": command})
+
+        self.assertTrue(result.ok)
+        self.assertNotIn(fake_key, result.data["stdout"])
+        self.assertIn("[REDACTED]", result.data["stdout"])
 
     def test_command_prefers_agent_python_on_path(self) -> None:
         result = self.execute(

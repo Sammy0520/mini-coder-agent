@@ -34,6 +34,19 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return value
 
 
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number") from exc
+    if value < minimum:
+        raise ConfigurationError(f"{name} must be at least {minimum}")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     workspace: Path
@@ -47,16 +60,30 @@ class AgentConfig:
     requires_openai_auth: bool = True
     approval_policy: ApprovalPolicy = ApprovalPolicy.SAFE
     max_steps: int = 20
+    max_seconds: int = 900
+    max_model_calls: int = 40
+    max_tool_calls: int = 100
     command_timeout_seconds: int = 60
     max_tool_output_chars: int = 12_000
+    max_total_tool_output_chars: int = 200_000
+    max_total_tokens: int = 500_000
     max_context_chars: int = 80_000
     repeated_call_limit: int = 3
+    max_model_retries: int = 2
+    retry_base_seconds: float = 0.5
+    retry_max_seconds: float = 8.0
+    model_timeout_seconds: float = 120.0
 
     def __post_init__(self) -> None:
         positive_fields = {
             "max_steps": self.max_steps,
+            "max_seconds": self.max_seconds,
+            "max_model_calls": self.max_model_calls,
+            "max_tool_calls": self.max_tool_calls,
             "command_timeout_seconds": self.command_timeout_seconds,
             "max_tool_output_chars": self.max_tool_output_chars,
+            "max_total_tool_output_chars": self.max_total_tool_output_chars,
+            "max_total_tokens": self.max_total_tokens,
             "max_context_chars": self.max_context_chars,
         }
         for name, value in positive_fields.items():
@@ -66,6 +93,14 @@ class AgentConfig:
             raise ConfigurationError("max_context_chars must be at least 2000")
         if self.repeated_call_limit < 2:
             raise ConfigurationError("repeated_call_limit must be at least 2")
+        if self.max_model_retries < 0:
+            raise ConfigurationError("max_model_retries must not be negative")
+        if self.retry_base_seconds < 0 or self.retry_max_seconds < 0:
+            raise ConfigurationError("retry delays must not be negative")
+        if self.retry_max_seconds < self.retry_base_seconds:
+            raise ConfigurationError("retry_max_seconds must be >= retry_base_seconds")
+        if self.model_timeout_seconds <= 0:
+            raise ConfigurationError("model_timeout_seconds must be positive")
         if self.model_reasoning_effort not in {None, "none", "low", "medium", "high", "xhigh", "max"}:
             raise ConfigurationError(
                 "model_reasoning_effort must be one of: none, low, medium, high, xhigh, max"
@@ -90,6 +125,13 @@ class AgentConfig:
         reasoning_effort: str | None = None,
         verbosity: str | None = None,
         max_steps: int | None = None,
+        max_seconds: int | None = None,
+        max_model_calls: int | None = None,
+        max_tool_calls: int | None = None,
+        max_tool_output_chars: int | None = None,
+        max_total_tool_output_chars: int | None = None,
+        max_total_tokens: int | None = None,
+        max_model_retries: int | None = None,
     ) -> "AgentConfig":
         file_data = _load_toml(config_path)
         provider_name = file_data.get("model_provider")
@@ -142,10 +184,51 @@ class AgentConfig:
                 if max_steps is not None
                 else _env_int("CODING_AGENT_MAX_STEPS", 20)
             ),
+            max_seconds=(
+                max_seconds
+                if max_seconds is not None
+                else _env_int("CODING_AGENT_MAX_SECONDS", 900)
+            ),
+            max_model_calls=(
+                max_model_calls
+                if max_model_calls is not None
+                else _env_int("CODING_AGENT_MAX_MODEL_CALLS", 40)
+            ),
+            max_tool_calls=(
+                max_tool_calls
+                if max_tool_calls is not None
+                else _env_int("CODING_AGENT_MAX_TOOL_CALLS", 100)
+            ),
             command_timeout_seconds=_env_int("CODING_AGENT_COMMAND_TIMEOUT", 60),
-            max_tool_output_chars=_env_int("CODING_AGENT_MAX_TOOL_OUTPUT", 12_000),
+            max_tool_output_chars=(
+                max_tool_output_chars
+                if max_tool_output_chars is not None
+                else _env_int("CODING_AGENT_MAX_TOOL_OUTPUT", 12_000)
+            ),
+            max_total_tool_output_chars=(
+                max_total_tool_output_chars
+                if max_total_tool_output_chars is not None
+                else _env_int("CODING_AGENT_MAX_TOTAL_TOOL_OUTPUT", 200_000)
+            ),
+            max_total_tokens=(
+                max_total_tokens
+                if max_total_tokens is not None
+                else _env_int("CODING_AGENT_MAX_TOTAL_TOKENS", 500_000)
+            ),
             max_context_chars=_env_int("CODING_AGENT_CONTEXT_CHARS", 80_000),
             repeated_call_limit=_env_int("CODING_AGENT_REPEATED_CALL_LIMIT", 3, minimum=2),
+            max_model_retries=(
+                max_model_retries
+                if max_model_retries is not None
+                else _env_int("CODING_AGENT_MAX_RETRIES", 2, minimum=0)
+            ),
+            retry_base_seconds=_env_float("CODING_AGENT_RETRY_BASE_SECONDS", 0.5),
+            retry_max_seconds=_env_float("CODING_AGENT_RETRY_MAX_SECONDS", 8.0),
+            model_timeout_seconds=_env_float(
+                "CODING_AGENT_MODEL_TIMEOUT_SECONDS",
+                120.0,
+                minimum=0.001,
+            ),
         )
 
     def validate_for_model(self) -> None:
