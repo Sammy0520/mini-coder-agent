@@ -22,7 +22,7 @@
 | GitHub Actions | Windows/Ubuntu × Python 3.11/3.12 全部通过 |
 | 公开仓库全新环境复现 | 克隆、安装、CLI、测试、Eval 和演示 baseline 全部通过 |
 
-最新跨平台结果见 [GitHub Actions run 33156464072](https://github.com/Sammy0520/mini-coder-agent/actions/runs/33156464072)，完整的公开仓库复现过程和发布元数据检查见 [`docs/runs/release-candidate-audit.md`](docs/runs/release-candidate-audit.md)。
+持续集成状态见 [GitHub Actions CI](https://github.com/Sammy0520/mini-coder-agent/actions/workflows/ci.yml)，完整的公开仓库复现过程、对应运行编号和发布元数据检查见 [`docs/runs/release-candidate-audit.md`](docs/runs/release-candidate-audit.md)。
 
 ## 当前能力
 
