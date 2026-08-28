@@ -33,7 +33,7 @@ jobs:
         run: python -m pip check
 
       - name: Run offline unit tests
-        run: python -m unittest discover -s tests
+        run: python scripts/run-unit-tests.py
 
       - name: Run deterministic end-to-end evals
         run: mini-coder-eval --output eval-results/ci
