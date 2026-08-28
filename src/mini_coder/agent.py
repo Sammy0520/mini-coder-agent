@@ -37,6 +37,13 @@ from .session import (
 )
 from .tools.base import RiskLevel, Tool, ToolContext, ToolResult
 from .tools.command_risk import CommandRisk, assess_command
+from .tools.diagnostics import tool_error_data
+from .workspace import (
+    capture_git_snapshot,
+    compare_git_snapshots,
+    inspect_workspace,
+    render_workspace_overview,
+)
 from .tools.registry import ToolRegistry
 from .tools.safety import WorkspacePolicy
 from .verification import VerificationTracker
@@ -108,8 +115,16 @@ class AgentRunner:
             return AgentRunResult("invalid_task", "Task must not be empty.", 0)
 
         if session is None:
+            workspace_overview = inspect_workspace(
+                self.config.workspace,
+                self.tool_context.policy,
+            )
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": self.system_prompt},
+                {
+                    "role": "developer",
+                    "content": render_workspace_overview(workspace_overview),
+                },
                 {"role": "user", "content": task},
             ]
             usage: dict[str, int] = {}
@@ -121,6 +136,7 @@ class AgentRunner:
                     workspace=self.config.workspace,
                     model=self._model_summary(),
                     messages=messages,
+                    workspace_baseline=workspace_overview,
                 )
                 session.set_status(SessionStatus.RUNNING)
                 self._active_session_id = session.session_id
@@ -133,6 +149,23 @@ class AgentRunner:
                         "status": session.status.value,
                     },
                 )
+            self._emit(
+                "workspace_overview_generated",
+                {
+                    "manifests": workspace_overview.get("manifests", []),
+                    "test_paths": workspace_overview.get("test_paths", []),
+                    "entry_points": workspace_overview.get("entry_points", []),
+                    "verification_candidates": workspace_overview.get(
+                        "verification_candidates",
+                        [],
+                    ),
+                    "instruction_files": workspace_overview.get(
+                        "instruction_files",
+                        [],
+                    ),
+                    "scan": workspace_overview.get("scan", {}),
+                },
+            )
         else:
             self._active_session_id = session.session_id
             self._validate_resume(session, task)
@@ -826,7 +859,17 @@ class AgentRunner:
             },
         )
         if call.parse_error or call.arguments is None:
-            result = ToolResult(False, f"Tool arguments were not valid JSON: {call.parse_error}")
+            message = f"Tool arguments were not valid JSON: {call.parse_error}"
+            result = ToolResult(
+                False,
+                message,
+                {
+                    "error_code": "invalid_json_arguments",
+                    "suggestion": "Retry once with one valid JSON object matching the schema.",
+                },
+            )
+            if session is not None:
+                session.invalid_tool_call_count += 1
             self._record_tool_result(
                 call,
                 record,
@@ -841,7 +884,10 @@ class AgentRunner:
         try:
             self.registry.validate_arguments(call.name, call.arguments)
         except ToolError as exc:
-            result = ToolResult(False, str(exc))
+            message = str(exc)
+            result = ToolResult(False, message, tool_error_data(message, tool=call.name))
+            if session is not None:
+                session.invalid_tool_call_count += 1
             self._record_tool_result(
                 call,
                 record,
@@ -870,7 +916,12 @@ class AgentRunner:
                             self._persist(session, messages, usage)
                 self._emit_change_preview(prepared_change)
             except ChangeError as exc:
-                result = ToolResult(False, str(exc))
+                message = str(exc)
+                result = ToolResult(
+                    False,
+                    message,
+                    tool_error_data(message, tool=call.name),
+                )
                 self._record_tool_result(
                     call,
                     record,
@@ -884,7 +935,12 @@ class AgentRunner:
 
         tool = self.registry.get(call.name)
         if tool is None:
-            result = ToolResult(False, f"Unknown tool: {call.name}")
+            message = f"Unknown tool: {call.name}"
+            result = ToolResult(
+                False,
+                message,
+                tool_error_data(message, tool=call.name),
+            )
             self._record_tool_result(
                 call,
                 record,
@@ -1025,6 +1081,15 @@ class AgentRunner:
                 result = ToolResult(False, str(exc))
         else:
             result = self.registry.execute(call.name, call.arguments, self.tool_context)
+        if result.ok and call.name == "read_file" and session is not None:
+            hint = self._repeated_read_hint(call, record, result, session)
+            if hint is not None:
+                result.data["efficiency_hint"] = hint
+                session.repeated_read_hint_count += 1
+                self._emit(
+                    "tool_efficiency_hint",
+                    {"tool": call.name, "path": call.arguments.get("path"), "hint": hint},
+                )
         self._record_tool_result(
             call,
             record,
@@ -1119,6 +1184,8 @@ class AgentRunner:
                 },
             )
         if session is not None:
+            if status == ToolExecutionStatus.FAILED:
+                session.failed_tool_call_count += 1
             session.tool_output_chars += len(content)
             self._persist(session, messages, usage)
         self._emit(
@@ -1176,6 +1243,51 @@ class AgentRunner:
             if budget_reason is not None:
                 return stop_for_repetition, budget_reason
         return stop_for_repetition, None
+
+    @staticmethod
+    def _repeated_read_hint(
+        call: ToolCall,
+        current_record: ToolExecutionRecord | None,
+        result: ToolResult,
+        session: AgentSession,
+    ) -> str | None:
+        if call.arguments is None:
+            return None
+        path = str(call.arguments.get("path", ""))
+        start = int(result.data.get("start_line", call.arguments.get("start_line", 1)))
+        end = int(result.data.get("end_line", start - 1))
+        if end < start:
+            return None
+        length = end - start + 1
+        for previous in reversed(session.tool_executions):
+            if previous is current_record or previous.name != "read_file" or not previous.ok:
+                continue
+            arguments = previous.arguments or {}
+            if str(arguments.get("path", "")) != path:
+                continue
+            try:
+                previous_data = json.loads(previous.result_content or "{}")
+            except json.JSONDecodeError:
+                previous_data = {}
+            previous_start = int(
+                previous_data.get("start_line", arguments.get("start_line", 1))
+            )
+            previous_end = int(
+                previous_data.get(
+                    "end_line",
+                    previous_start + min(max(int(arguments.get("max_lines", 400)), 1), 1000) - 1,
+                )
+            )
+            overlap = max(
+                0,
+                min(end, previous_end) - max(start, previous_start) + 1,
+            )
+            if overlap >= max(1, length // 2):
+                return (
+                    f"This request overlaps {overlap} requested line(s) with an earlier "
+                    f"read of {path}; use next_start_line or a narrower unseen range."
+                )
+        return None
 
     def _mark_interrupted_tools_uncertain(
         self,
@@ -1448,6 +1560,40 @@ class AgentRunner:
         if not active:
             change_lines.append("- None.")
 
+        git_lines = ["Workspace/Git context:"]
+        baseline_git = session.workspace_baseline.get("git", {})
+        if isinstance(baseline_git, dict) and baseline_git.get("available"):
+            baseline_entries = baseline_git.get("entries", [])
+            original_paths = [
+                str(item.get("path"))
+                for item in baseline_entries
+                if isinstance(item, dict) and item.get("path")
+            ]
+            git_lines.append(
+                f"- Task started with {len(original_paths)} pre-existing Git change(s)."
+            )
+            if original_paths:
+                git_lines.append("- Pre-existing: " + ", ".join(original_paths[:20]))
+            current_git = capture_git_snapshot(Path(session.workspace))
+            external_paths = compare_git_snapshots(
+                baseline_git,
+                current_git,
+                agent_paths={item.path for item in session.changes},
+            )
+            if external_paths:
+                git_lines.append(
+                    "- Additional Git changes outside ChangeTracker were observed during "
+                    "the task (user/process/command effects): "
+                    + ", ".join(external_paths[:20])
+                )
+            else:
+                git_lines.append(
+                    "- No additional Git changes outside ChangeTracker were detected."
+                )
+            git_lines.append("- Agent attribution uses only ChangeTracker-managed writes.")
+        else:
+            git_lines.append("- No Git repository was detected for this workspace.")
+
         validation_lines = ["Validation:"]
         if session.verification_records:
             for record in session.verification_records:
@@ -1511,6 +1657,9 @@ class AgentRunner:
             f"- tool calls: {len(session.tool_executions)}",
             f"- retries: {session.retry_count}",
             f"- tool output: {session.tool_output_chars} characters",
+            f"- failed tool calls: {session.failed_tool_call_count}",
+            f"- invalid tool calls: {session.invalid_tool_call_count}",
+            f"- repeated-read hints: {session.repeated_read_hint_count}",
             f"- total duration: {session.run_duration_seconds:.2f}s",
             f"- usage status: {usage_state}",
             f"- usage: {usage_text or 'unknown'}",
@@ -1526,6 +1675,8 @@ class AgentRunner:
                 *outcome,
                 "",
                 *change_lines,
+                "",
+                *git_lines,
                 "",
                 *validation_lines,
                 "",

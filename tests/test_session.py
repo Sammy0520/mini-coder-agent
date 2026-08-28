@@ -200,6 +200,30 @@ class SessionModelTests(unittest.TestCase):
             self.assertEqual(restored.model_call_count, 1)
             self.assertEqual(restored.usage_missing_count, 1)
             self.assertEqual(restored.tool_output_chars, 0)
+            self.assertEqual(restored.workspace_baseline, {})
+            self.assertEqual(restored.failed_tool_call_count, 0)
+            self.assertEqual(restored.invalid_tool_call_count, 0)
+            self.assertEqual(restored.repeated_read_hint_count, 0)
+
+    def test_migrates_schema_v4_session_to_workspace_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 4
+            for name in (
+                "workspace_baseline",
+                "failed_tool_call_count",
+                "invalid_tool_call_count",
+                "repeated_read_hint_count",
+            ):
+                data.pop(name)
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.workspace_baseline, {})
+            self.assertEqual(restored.failed_tool_call_count, 0)
+            self.assertEqual(restored.invalid_tool_call_count, 0)
+            self.assertEqual(restored.repeated_read_hint_count, 0)
 
     def test_rejects_invalid_tool_execution_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

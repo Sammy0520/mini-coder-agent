@@ -511,6 +511,73 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(result.status, "repeated_call")
             self.assertEqual(result.steps, 3)
 
+    def test_workspace_overview_and_tool_efficiency_metrics_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "sample.txt").write_text(
+                "\n".join(f"line {index}" for index in range(1, 11)),
+                encoding="utf-8",
+            )
+            (workspace / "pyproject.toml").write_text(
+                '[project]\nname="sample"\n',
+                encoding="utf-8",
+            )
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read-first",
+                                name="read_file",
+                                arguments={"path": "sample.txt", "start_line": 1, "max_lines": 5},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read-overlap",
+                                name="read_file",
+                                arguments={"path": "sample.txt", "start_line": 3, "max_lines": 5},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-read-invalid",
+                                name="read_file",
+                                arguments={"path": "sample.txt", "surprise": True},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Inspection complete."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Inspect sample.txt efficiently")
+
+            session = store.load(result.session_id or "")
+            first_request = model.requests[0][0]
+            overview = next(item for item in first_request if item.get("role") == "developer")
+            self.assertIn("pyproject.toml", overview["content"])
+            self.assertEqual(session.repeated_read_hint_count, 1)
+            self.assertEqual(session.invalid_tool_call_count, 1)
+            self.assertEqual(session.failed_tool_call_count, 1)
+            self.assertIn("efficiency_hint", session.tool_executions[1].result_content or "")
+            self.assertIn("invalid_arguments", session.tool_executions[2].result_content or "")
+            self.assertIn("repeated-read hints: 1", result.final_text)
+
 
 if __name__ == "__main__":
     unittest.main()

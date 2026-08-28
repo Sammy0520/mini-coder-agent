@@ -18,7 +18,7 @@ from ..verification import (
     VerificationTracker,
 )
 
-CURRENT_SESSION_SCHEMA = 4
+CURRENT_SESSION_SCHEMA = 5
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -322,6 +322,10 @@ class AgentSession:
     model_call_count: int = 0
     usage_missing_count: int = 0
     tool_output_chars: int = 0
+    workspace_baseline: dict[str, Any] = field(default_factory=dict)
+    failed_tool_call_count: int = 0
+    invalid_tool_call_count: int = 0
+    repeated_read_hint_count: int = 0
     stop_reason: str | None = None
     final_text: str = ""
     last_error: str | None = None
@@ -357,6 +361,15 @@ class AgentSession:
             raise SessionError("usage_missing_count cannot exceed model_call_count")
         if self.tool_output_chars < 0:
             raise SessionError("session tool_output_chars must not be negative")
+        for name, value in {
+            "failed_tool_call_count": self.failed_tool_call_count,
+            "invalid_tool_call_count": self.invalid_tool_call_count,
+            "repeated_read_hint_count": self.repeated_read_hint_count,
+        }.items():
+            if value < 0:
+                raise SessionError(f"session {name} must not be negative")
+        if not isinstance(self.workspace_baseline, dict):
+            raise SessionError("session workspace_baseline must be an object")
         if not isinstance(self.messages, list) or not all(
             isinstance(item, dict) for item in self.messages
         ):
@@ -387,6 +400,7 @@ class AgentSession:
         workspace: str | Path,
         model: dict[str, Any] | None = None,
         messages: list[dict[str, Any]] | None = None,
+        workspace_baseline: dict[str, Any] | None = None,
     ) -> "AgentSession":
         now = utc_now()
         return cls(
@@ -397,6 +411,7 @@ class AgentSession:
             updated_at=now,
             model=copy.deepcopy(model or {}),
             messages=copy.deepcopy(messages or []),
+            workspace_baseline=copy.deepcopy(workspace_baseline or {}),
         )
 
     def set_status(
@@ -484,6 +499,10 @@ class AgentSession:
             "model_call_count": self.model_call_count,
             "usage_missing_count": self.usage_missing_count,
             "tool_output_chars": self.tool_output_chars,
+            "workspace_baseline": copy.deepcopy(self.workspace_baseline),
+            "failed_tool_call_count": self.failed_tool_call_count,
+            "invalid_tool_call_count": self.invalid_tool_call_count,
+            "repeated_read_hint_count": self.repeated_read_hint_count,
             "stop_reason": self.stop_reason,
             "final_text": self.final_text,
             "last_error": self.last_error,
@@ -527,6 +546,9 @@ class AgentSession:
         verification_records = data.get("verification_records")
         if not isinstance(verification_records, list):
             raise SessionError("session verification_records must be a list")
+        workspace_baseline = data.get("workspace_baseline")
+        if not isinstance(workspace_baseline, dict):
+            raise SessionError("session workspace_baseline must be an object")
         try:
             phase = TaskPhase(data.get("phase"))
             verification_status = VerificationStatus(data.get("verification_status"))
@@ -563,6 +585,22 @@ class AgentSession:
             model_call_count=_required_int(data, "model_call_count", minimum=0),
             usage_missing_count=_required_int(data, "usage_missing_count", minimum=0),
             tool_output_chars=_required_int(data, "tool_output_chars", minimum=0),
+            workspace_baseline=copy.deepcopy(workspace_baseline),
+            failed_tool_call_count=_required_int(
+                data,
+                "failed_tool_call_count",
+                minimum=0,
+            ),
+            invalid_tool_call_count=_required_int(
+                data,
+                "invalid_tool_call_count",
+                minimum=0,
+            ),
+            repeated_read_hint_count=_required_int(
+                data,
+                "repeated_read_hint_count",
+                minimum=0,
+            ),
             stop_reason=_optional_string(data, "stop_reason"),
             final_text=_required_string(data, "final_text", allow_empty=True),
             last_error=_optional_string(data, "last_error"),
@@ -590,7 +628,7 @@ class AgentSession:
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version not in {1, 2, 3}:
+    if version not in {1, 2, 3, 4}:
         return data
     migrated = copy.deepcopy(data)
     if version == 1:
@@ -652,6 +690,20 @@ def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(execution, dict)
             ),
         )
+        version = 4
+    if version == 4:
+        migrated["schema_version"] = 5
+        migrated.setdefault("workspace_baseline", {})
+        migrated.setdefault(
+            "failed_tool_call_count",
+            sum(
+                1
+                for execution in migrated.get("tool_executions", [])
+                if isinstance(execution, dict) and execution.get("status") == "failed"
+            ),
+        )
+        migrated.setdefault("invalid_tool_call_count", 0)
+        migrated.setdefault("repeated_read_hint_count", 0)
     return migrated
 
 

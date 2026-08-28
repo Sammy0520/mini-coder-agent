@@ -17,6 +17,21 @@ class WorkspacePolicy:
         "node_modules",
         ".venv",
         "venv",
+        ".tox",
+        ".nox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".coverage",
+        "coverage",
+        "htmlcov",
+        "dist",
+        "build",
+        "target",
+        ".next",
+        ".nuxt",
+        "out",
+        "vendor",
     }
     _DENIED_NAMES = {
         ".env",
@@ -28,7 +43,17 @@ class WorkspacePolicy:
         "id_rsa",
         "id_ed25519",
     }
-    _DENIED_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
+    _DENIED_SUFFIXES = {
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+        ".pyc",
+        ".pyo",
+        ".class",
+        ".o",
+        ".obj",
+    }
 
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()

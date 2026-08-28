@@ -86,6 +86,64 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(listed.ok)
         self.assertIn("src/example.py", listed.data["entries"])
 
+    def test_list_search_and_read_support_continuation_metadata(self) -> None:
+        for index in range(5):
+            (self.workspace / f"file{index}.txt").write_text(
+                f"needle {index}\nsecond line\n",
+                encoding="utf-8",
+            )
+
+        first_list = self.execute("list_files", {"max_entries": 2})
+        second_list = self.execute(
+            "list_files",
+            {"max_entries": 2, "offset": first_list.data["next_offset"]},
+        )
+        self.assertTrue(first_list.data["truncated"])
+        self.assertEqual(first_list.data["next_offset"], 2)
+        self.assertFalse(set(first_list.data["entries"]) & set(second_list.data["entries"]))
+
+        first_search = self.execute(
+            "search_text",
+            {"query": "needle", "max_results": 2},
+        )
+        second_search = self.execute(
+            "search_text",
+            {
+                "query": "needle",
+                "max_results": 2,
+                "offset": first_search.data["next_offset"],
+            },
+        )
+        self.assertEqual([item["line"] for item in first_search.data["matches"]], [1, 1])
+        self.assertEqual(first_search.data["next_offset"], 2)
+        self.assertNotEqual(
+            first_search.data["matches"][0]["path"],
+            second_search.data["matches"][0]["path"],
+        )
+
+        read = self.execute("read_file", {"path": "file0.txt", "max_lines": 1})
+        self.assertTrue(read.data["truncated"])
+        self.assertEqual(read.data["next_start_line"], 2)
+        continued = self.execute(
+            "read_file",
+            {"path": "file0.txt", "start_line": read.data["next_start_line"]},
+        )
+        self.assertIn("second line", continued.data["content"])
+
+    def test_search_explains_when_all_candidates_are_filtered(self) -> None:
+        (self.workspace / "node_modules").mkdir()
+        (self.workspace / "node_modules" / "hidden.js").write_text(
+            "secret needle\n",
+            encoding="utf-8",
+        )
+
+        result = self.execute("search_text", {"query": "needle"})
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["matches"], [])
+        self.assertEqual(result.data["outcome"], "all_candidates_filtered")
+        self.assertGreater(result.data["filtered"]["policy"], 0)
+
     def test_edit_refuses_ambiguous_match(self) -> None:
         (self.workspace / "repeat.txt").write_text("same\nsame\n", encoding="utf-8")
         result = self.execute(
@@ -195,12 +253,15 @@ class ToolTests(unittest.TestCase):
         extra = self.execute("read_file", {"path": "a.txt", "surprise": True})
         self.assertFalse(extra.ok)
         self.assertIn("Unexpected argument", extra.message)
+        self.assertEqual(extra.data["error_code"], "invalid_arguments")
+        self.assertIn("schema", extra.data["suggestion"])
         invalid_enum = self.execute(
             "run_command",
             {"command": "python --version", "purpose": "pretend"},
         )
         self.assertFalse(invalid_enum.ok)
         self.assertIn("must be one of", invalid_enum.message)
+        self.assertEqual(invalid_enum.data["error_code"], "invalid_argument_value")
 
 
 if __name__ == "__main__":

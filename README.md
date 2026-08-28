@@ -13,6 +13,8 @@
 - Session：每次 CLI 运行原子保存版本化 Session；支持 `--resume`，保留 Responses provider items、工具执行状态、审批结果和累计 usage，并阻止不确定副作用被自动重放。
 - ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
 - 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、退出码、耗时和输出摘要；最终状态由本地事实决定。
+- 项目理解：启动时注入有界工作区概览，识别清单、入口、测试、验证命令、项目说明和 Git 起始状态，并跳过依赖、缓存与构建目录。
+- 工具体验：文件列表和搜索支持分页，读取支持明确的继续行号，搜索返回过滤原因；失败结果包含稳定错误码和下一步建议。
 - 错误恢复：认证、权限、限流、超时、网络、服务端、请求和响应解析错误分类；只对可恢复错误做带抖动和硬上限的有限重试。
 - 权限模式：默认 `safe`；命令按 `read_only`、`workspace_write`、`external_effect`、`dangerous`、`unknown` 分级，`--auto` 也不会自动批准后三类。
 
@@ -138,6 +140,24 @@ mini-coder --config agent.toml --workspace D:\path\to\project `
 
 命令风险分类是保守的本地策略，不是通用 shell 静态分析或操作系统沙箱。已知只读命令可直接执行；`safe` 模式仍会确认写工作区的命令；`--auto` 仅可自动批准已知 `read_only` 和 `workspace_write`。安装依赖、联网、Git 远端操作等 `external_effect`，删除/覆盖等 `dangerous`，以及无法理解的 `unknown` 命令始终要求人工确认。审批提示会显示命令、工作目录、风险等级和预期副作用。
 
+## 项目理解、分页与 Git 基线
+
+新任务开始时，本地会做一次有界、确定性的工作区发现，并把摘要作为 developer 消息提供给模型。它只记录理解项目所需的元数据，不把整个仓库内容塞入上下文：
+
+- 最多扫描 1,500 个条目和 5 层目录。
+- 识别 Python、Node、Rust、Java、Gradle 和 Go 的常见清单。
+- 识别 `main.py`、`cli.py`、`index.ts`、`main.rs` 等常见入口候选。
+- 识别测试目录、测试文件和已有测试配置。
+- 根据项目证据推荐 `unittest`、pytest、npm/pnpm/yarn、Cargo、Maven、Gradle 或 Go 验证命令。
+- 列出 `AGENTS.md`、Copilot instructions、`CLAUDE.md`、`CONTRIBUTING.md` 和 README；系统安全规则始终优先，嵌套 `AGENTS.md` 在自身子树内比根目录说明更具体。
+- 跳过 `.git`、`.mini-coder`、虚拟环境、依赖目录、缓存、coverage、`build`、`dist`、`target` 和常见编译产物。
+
+`list_files` 和 `search_text` 在结果截断时返回 `next_offset`，`read_file` 返回 `next_start_line`、总行数和文件大小。搜索最多遍历 10,000 个可见条目，超过后明确标记 `scan_truncated`；它还区分 `no_match`、`all_candidates_filtered` 和“已扫描文件无结果但存在被过滤候选”，并分别统计策略、glob、二进制、大文件和解码过滤。
+
+如果模型用不同范围重复读取同一个文件且至少一半内容重叠，结果会附带轻量效率提示。Session 记录失败工具数、非法工具数和重复读取提示数；连续完全相同的调用仍保留硬停止规则。真实 Eval 显示 Responses 可以在同一轮并行请求多个现有工具，因此没有再增加批量读取或批量搜索工具。
+
+如果工作区属于 Git 仓库，本地只运行受控的只读状态查询，保存任务开始时已有改动和最多 2 MB 文件的指纹。最终报告只把 ChangeTracker 管理的写入归因给 Agent，并单独报告任务期间新增的非托管 Git 变化。它不会自动 commit、push、reset、checkout 或清理工作区；`run_command` 产生的文件变化也不会被错误包装成 ChangeTracker 修改。
+
 ## Session 持久化与恢复
 
 CLI 运行开始后会在工作区内创建版本化 Session：
@@ -186,7 +206,7 @@ mini-coder --config agent.toml --resume "<session-file>" `
 
 一次真实 Responses 跨进程恢复的脱敏验收结果见 [`docs/runs/session-resume-run.md`](docs/runs/session-resume-run.md)。
 
-当前 Session schema 为 v4，增加模型调用数、缺失 usage 次数、累计工具输出，以及命令退出码、超时、截断和耗时。v1/v2/v3 Session 会逐级在内存中迁移并在下一次保存时写成 v4，不会丢失原有消息、工具执行或变更记录。
+当前 Session schema 为 v5，增加有界工作区/Git 基线、失败和非法工具计数，以及重复读取提示计数；v4 中的模型调用、usage、工具输出和命令结果字段继续保留。v1～v4 Session 会逐级在内存中迁移并在下一次保存时写成 v5，不会丢失原有消息、工具执行或变更记录。
 
 ## Diff、变更历史与 Undo
 
@@ -231,6 +251,8 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 阶段 F 的真实 Responses 修复、v4 预算统计、命令风险、结构化事件和离线故障注入验收见 [`docs/runs/resilience-budget-run.md`](docs/runs/resilience-budget-run.md)。
 
+阶段 G 的多文件项目入口、验证命令、忽略规则、Git 起始改动归属和工具效率验收见 [`docs/runs/project-understanding-run.md`](docs/runs/project-understanding-run.md)。
+
 ## 测试
 
 核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用：
@@ -250,8 +272,7 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 
 ## 下一步
 
-- 增强项目结构理解、忽略规则、搜索体验和失败诊断。
-- 建立独立 Eval、跨平台 CI 和提交演示。
+- 建立独立 Eval、跨平台 CI、演示脚本和发布检查。
 
 完整实现顺序、验收标准和可勾选任务见 [`ROADMAP.md`](ROADMAP.md)。
 

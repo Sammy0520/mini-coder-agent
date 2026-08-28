@@ -41,13 +41,17 @@ def _atomic_write(path: Path, text: str) -> None:
 
 class ListFilesTool(Tool):
     name = "list_files"
-    description = "List files and directories inside the workspace. Internal and sensitive paths are hidden."
+    description = (
+        "List files and directories inside the workspace. Internal and sensitive paths are "
+        "hidden. When truncated, continue with next_offset."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Workspace-relative directory, default '.'"},
             "max_depth": {"type": "integer", "description": "Maximum recursion depth, 1-6"},
             "max_entries": {"type": "integer", "description": "Maximum returned entries, 1-500"},
+            "offset": {"type": "integer", "description": "Zero-based entry offset for pagination"},
         },
         "additionalProperties": False,
     }
@@ -58,32 +62,54 @@ class ListFilesTool(Tool):
             raise ToolError("list_files path must be a directory")
         max_depth = min(max(arguments.get("max_depth", 3), 1), 6)
         max_entries = min(max(arguments.get("max_entries", 200), 1), 500)
+        offset = min(max(arguments.get("offset", 0), 0), 10_000)
         entries: list[str] = []
+        visible_seen = 0
+        filtered_count = 0
+        has_more = False
 
         def visit(directory: Path, depth: int) -> None:
-            if depth > max_depth or len(entries) >= max_entries:
+            nonlocal visible_seen, filtered_count, has_more
+            if depth > max_depth or has_more:
                 return
             for child in sorted(directory.iterdir(), key=lambda item: (item.is_file(), item.name.casefold())):
                 if context.policy.is_denied(child):
+                    filtered_count += 1
                     continue
+                if visible_seen < offset:
+                    visible_seen += 1
+                    if child.is_dir():
+                        visit(child, depth + 1)
+                    continue
+                if len(entries) >= max_entries:
+                    has_more = True
+                    return
                 suffix = "/" if child.is_dir() else ""
                 entries.append(context.policy.display(child) + suffix)
-                if len(entries) >= max_entries:
-                    return
+                visible_seen += 1
                 if child.is_dir():
                     visit(child, depth + 1)
 
         visit(root, 1)
         return ToolResult(
             True,
-            f"Listed {len(entries)} entries",
-            {"entries": entries, "truncated": len(entries) >= max_entries},
+            f"Listed {len(entries)} entries from offset {offset}",
+            {
+                "entries": entries,
+                "offset": offset,
+                "next_offset": offset + len(entries) if has_more else None,
+                "truncated": has_more,
+                "filtered_entries": filtered_count,
+            },
         )
 
 
 class ReadFileTool(Tool):
     name = "read_file"
-    description = "Read a UTF-8 text file from the workspace with line numbers and bounded output."
+    description = (
+        "Read a UTF-8 text file from the workspace with line numbers and bounded output. "
+        "When truncated, continue from next_start_line."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -113,6 +139,12 @@ class ReadFileTool(Tool):
                 "end_line": start + len(selected) - 1 if selected else start - 1,
                 "total_lines": len(lines),
                 "truncated": start - 1 + len(selected) < len(lines),
+                "next_start_line": (
+                    start + len(selected)
+                    if start - 1 + len(selected) < len(lines)
+                    else None
+                ),
+                "file_size_bytes": path.stat().st_size,
             },
         )
 

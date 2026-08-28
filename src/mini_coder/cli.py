@@ -295,6 +295,10 @@ def _print_resume_summary(session: AgentSession) -> None:
         if item.status.value in {"requested", "approved", "running", "uncertain"}
     ]
     task_preview = session.task.replace("\n", " ")[:240]
+    baseline_git = session.workspace_baseline.get("git", {})
+    preexisting_git_changes = (
+        len(baseline_git.get("entries", [])) if isinstance(baseline_git, dict) else 0
+    )
     print(
         "Resume summary:\n"
         f"  Session: {session.session_id}\n"
@@ -307,6 +311,10 @@ def _print_resume_summary(session: AgentSession) -> None:
         f"  Model calls/retries: {session.model_call_count}/{session.retry_count}\n"
         f"  Tool calls/output: {len(session.tool_executions)}/"
         f"{session.tool_output_chars} characters\n"
+        f"  Failed/invalid tools: {session.failed_tool_call_count}/"
+        f"{session.invalid_tool_call_count}\n"
+        f"  Repeated-read hints: {session.repeated_read_hint_count}\n"
+        f"  Pre-existing Git changes: {preexisting_git_changes}\n"
         f"  Provider usage: "
         f"{'partial or unknown' if session.usage_missing_count else 'complete'}\n"
         f"  Pending/uncertain tools: {len(pending)}\n"

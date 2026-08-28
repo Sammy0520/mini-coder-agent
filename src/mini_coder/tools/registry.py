@@ -5,6 +5,7 @@ from typing import Any
 
 from ..exceptions import ToolError
 from .base import Tool, ToolContext, ToolResult
+from .diagnostics import tool_error_data
 
 
 class ToolRegistry:
@@ -27,12 +28,14 @@ class ToolRegistry:
     def execute(self, name: str, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         tool = self.get(name)
         if tool is None:
-            return ToolResult(False, f"Unknown tool: {name}")
+            message = f"Unknown tool: {name}"
+            return ToolResult(False, message, tool_error_data(message, tool=name))
         try:
             self.validate_arguments(name, arguments)
             return tool.execute(arguments, context)
         except (ToolError, OSError, UnicodeError, ValueError) as exc:
-            return ToolResult(False, str(exc))
+            message = str(exc)
+            return ToolResult(False, message, tool_error_data(message, tool=name))
 
     def validate_arguments(self, name: str, arguments: dict[str, Any]) -> None:
         tool = self.get(name)
