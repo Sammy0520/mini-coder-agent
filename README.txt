@@ -8,4 +8,4 @@ Git 仓库地址：https://github.com/Sammy0520/mini-coder-agent
 
 安全说明：API key 通过环境变量或已被 Git 忽略的本地 auth.json 提供，不进入 provider TOML、Session 或 Eval 报告。文件工具有真实路径边界；通用 shell 不是完整操作系统沙箱，因此自动批准模式只用于可丢弃的受控目录。ChangeTracker 不声称能撤销命令、Git、网络或依赖安装副作用。
 
-发布状态：当前提交已满足 v0.1.0 发布候选的代码、测试、Eval、CI、真实运行证据和全新环境复现要求。许可证、GitHub description/topics 以及是否创建 v0.1.0 tag/Release 由仓库所有者最终确认。
+发布状态：当前提交已满足 v0.1.0 的代码、测试、Eval、CI、真实运行证据和全新环境复现要求，并采用 MIT License。GitHub 仓库发布 `v0.1.0` tag/Release 后，下一阶段进入未知任务盲测和数据驱动效率优化。

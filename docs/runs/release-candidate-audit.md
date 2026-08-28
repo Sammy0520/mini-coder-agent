@@ -62,8 +62,16 @@
 - About 区域当前没有 description、website 或 topics。
 - 仓库当前没有许可证文件或 GitHub 识别的 license。
 
-最后三项不会影响代码运行，但属于发布元数据。description/topics 可以在发布前补充；许可证需要由仓库所有者选择；`v0.1.0` tag 和 Release 只在所有者确认候选内容后创建。
+最后三项不会影响代码运行，但属于发布元数据。审计完成后，仓库所有者确认采用 MIT License、补充 description/topics，并从最终发布提交创建 `v0.1.0` tag 和 GitHub Release。
+
+## 发布完成项
+
+- License：MIT，版权标识为 `Copyright (c) 2026 Sammy0520`。
+- Python package metadata：声明 SPDX license expression `MIT`，并提供 Repository 和 Issues URL。
+- GitHub description：说明可恢复 Session、可审计 Diff、本地验证、安全控制和可重复 Eval。
+- GitHub topics：`coding-agent`、`ai-agent`、`llm-agent`、`openai-compatible`、`responses-api`、`python`、`developer-tools`、`evals`。
+- 版本：`v0.1.0` tag 和同名 GitHub Release。
 
 ## 结论
 
-当前提交满足离线测试、确定性 Eval、真实模型证据、跨平台 CI、公开页面可见性和全新环境复现要求，可以作为 `v0.1.0` 发布候选。剩余工作是同步本次审计文档、决定仓库元数据和许可证，并由仓库所有者确认是否创建 tag/Release。
+当前提交满足离线测试、确定性 Eval、真实模型证据、跨平台 CI、公开页面可见性和全新环境复现要求。仓库所有者已确认 MIT License、公开元数据和 `v0.1.0` 发布，阶段 I1 至此完成。

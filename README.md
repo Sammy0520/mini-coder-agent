@@ -352,10 +352,13 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 - 项目不包含 IDE GUI、多 Agent、向量数据库、通用 RAG、MCP 生态或自动 commit/push/PR；这些不属于当前考核核心闭环。
 - Eval 能证明预先声明场景的行为，不能保证模型在任意仓库中都成功；真实模型结果会受 provider、模型版本和网络状态影响。
 
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
+
 ## 下一步
 
-- 由仓库所有者决定许可证、GitHub description 和 topics。
-- 用户确认发布候选内容后创建 `v0.1.0` 标签和 GitHub Release；标签不会由 Agent 擅自创建。
+- `v0.1.0` 作为首个公开版本发布，代码、测试、Eval、CI 和全新环境复现证据见本页及发布候选审计记录。
 - 发布后进入未知任务盲测，用成功率、无关修改、工具调用、token 和耗时决定下一项效率优化，不为扩展功能面而盲目增加工具。
 
 完整实现顺序、验收标准和可勾选任务见 [`ROADMAP.md`](ROADMAP.md)。

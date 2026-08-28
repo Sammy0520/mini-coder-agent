@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,10 +7,16 @@ name = "mini-coder-agent"
 version = "0.1.0"
 description = "A small, inspectable coding agent built without an agent framework."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.82",
 ]
+
+[project.urls]
+Repository = "https://github.com/Sammy0520/mini-coder-agent"
+Issues = "https://github.com/Sammy0520/mini-coder-agent/issues"
 
 [project.scripts]
 mini-coder = "mini_coder.cli:main"
