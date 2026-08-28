@@ -292,7 +292,13 @@ class SessionStoreTests(unittest.TestCase):
             path = store.save(session)
             restored = store.load(session.session_id)
 
-            self.assertEqual(path, workspace / ".mini-coder" / "sessions" / f"{session.session_id}.json")
+            expected = (
+                workspace.resolve()
+                / ".mini-coder"
+                / "sessions"
+                / f"{session.session_id}.json"
+            )
+            self.assertEqual(path, expected)
             self.assertEqual(restored.to_dict(), session.to_dict())
 
     def test_atomic_replace_failure_preserves_previous_session(self) -> None:
