@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Coder Agent</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span></div>
+        <div>
+          <p class="eyebrow">LOCAL CODING AGENT</p>
+          <h1>Mini Coder Agent</h1>
+        </div>
+      </div>
+      <div class="connection">
+        <span id="connectionDot" class="connection-dot"></span>
+        <span id="connectionLabel">Ready</span>
+      </div>
+    </header>
+
+    <section class="launch-card">
+      <div class="field workspace-field">
+        <label for="workspace">Workspace</label>
+        <input id="workspace" autocomplete="off" spellcheck="false" value=".">
+      </div>
+      <div class="field config-field">
+        <label for="configPath">Provider config</label>
+        <input id="configPath" autocomplete="off" spellcheck="false" value="agent.toml">
+      </div>
+      <div class="field task-field">
+        <label for="task">Programming task</label>
+        <textarea id="task" rows="3" placeholder="Describe the change you want the agent to make..."></textarea>
+      </div>
+      <button id="runButton" class="run-button" type="button">
+        <span class="run-icon">▶</span>
+        Run agent
+      </button>
+    </section>
+
+    <section class="status-strip">
+      <div>
+        <span class="status-label">Run status</span>
+        <strong id="runStatus" class="status-value">Not started</strong>
+      </div>
+      <div>
+        <span class="status-label">Session</span>
+        <strong id="sessionId" class="status-value mono">—</strong>
+      </div>
+      <div>
+        <span class="status-label">Verification</span>
+        <strong id="verificationStatus" class="status-value">Waiting</strong>
+      </div>
+      <div>
+        <span class="status-label">Changed files</span>
+        <strong id="changeCount" class="status-value">0</strong>
+      </div>
+    </section>
+
+    <section class="workspace-grid">
+      <article class="panel timeline-panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">LIVE EXECUTION</p>
+            <h2>Agent timeline</h2>
+          </div>
+          <span id="eventCount" class="panel-count">0 events</span>
+        </div>
+        <div id="timeline" class="timeline">
+          <div class="empty-state">
+            <div class="empty-orbit"><span></span></div>
+            <h3>Ready for a real task</h3>
+            <p>The agent's model calls, tools, approvals and verification will appear here.</p>
+          </div>
+        </div>
+      </article>
+
+      <div class="detail-column">
+        <article id="approvalPanel" class="panel approval-panel hidden">
+          <div class="panel-header compact">
+            <div>
+              <p class="eyebrow warning">ACTION REQUIRED</p>
+              <h2>Approval</h2>
+            </div>
+            <span id="approvalRisk" class="risk-badge">write</span>
+          </div>
+          <p id="approvalTitle" class="approval-title"></p>
+          <pre id="approvalArguments" class="code-block"></pre>
+          <div class="approval-actions">
+            <button id="denyButton" class="secondary-button" type="button">Reject</button>
+            <button id="approveButton" class="primary-button" type="button">Approve change</button>
+          </div>
+        </article>
+
+        <article class="panel diff-panel">
+          <div class="panel-header compact">
+            <div>
+              <p class="eyebrow">AUDITABLE CHANGE</p>
+              <h2>Current diff</h2>
+            </div>
+            <span id="diffStats" class="diff-stats">No changes</span>
+          </div>
+          <div id="diffMeta" class="diff-meta">A write preview will appear before approval.</div>
+          <pre id="diffView" class="diff-view"><code><span class="diff-placeholder">Waiting for the agent to prepare a change…</span></code></pre>
+        </article>
+
+        <article class="panel verification-panel">
+          <div class="panel-header compact">
+            <div>
+              <p class="eyebrow">LOCAL EVIDENCE</p>
+              <h2>Verification</h2>
+            </div>
+            <span id="verificationBadge" class="verification-badge neutral">Not run</span>
+          </div>
+          <p id="verificationMessage" class="verification-message">The final status is decided by local command results, not by model claims.</p>
+        </article>
+
+        <article id="summaryPanel" class="panel summary-panel hidden">
+          <div class="panel-header compact">
+            <div>
+              <p class="eyebrow success">RUN COMPLETE</p>
+              <h2>Agent summary</h2>
+            </div>
+          </div>
+          <div id="summaryText" class="summary-text"></div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

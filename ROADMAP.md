@@ -688,7 +688,55 @@ run_cancelled
 
 ---
 
-## 13. 全局完成定义
+## 13. 阶段 J：本地 GUI 与视频展示
+
+### 目标能力
+
+不重新实现 Agent 或伪造运行结果，而是把现有运行、Diff、审批、验证、Session 和 Undo 变成适合短视频理解的本地可视化控制台。
+
+### 13.1 共享运行边界
+
+- [x] GUI 直接复用 `AgentRunner`、`ToolRegistry`、`SessionStore` 和 `OpenAICompatibleClient`。
+- [x] 使用线程安全 `RunController` 把同步 Agent 运行与 Web 请求隔离。
+- [x] 把现有结构化事件转成有序、可等待的 GUI 事件流。
+- [x] 将同步审批回调桥接为页面可批准/拒绝的等待状态。
+- [x] GUI 事件和审批参数继续经过统一脱敏。
+
+### 13.2 本地 Web 服务
+
+- [x] 增加只监听 `127.0.0.1` 的 FastAPI 服务和 `mini-coder-gui` 启动入口。
+- [x] 增加运行创建、状态查询、SSE 事件流和审批 API。
+- [x] 将 FastAPI/Uvicorn 放入 `gui` 可选依赖，不强制普通 CLI 用户安装。
+- [ ] 增加协作式停止；不能把“停止等待审批”误报成“已终止模型或命令”。
+- [ ] 增加 Session 列表、恢复、Changed Files 查询和安全 Undo API。
+
+### 13.3 展示页面
+
+- [x] 增加任务、工作区和 provider 配置输入。
+- [x] 增加实时 Agent 时间线、运行状态和 Session 摘要。
+- [x] 增加 Diff、增删统计和页面审批卡片。
+- [x] 增加验证状态和最终摘要面板。
+- [ ] 增加 Changed Files 详情、Session Resume 和 Undo 操作。
+- [ ] 为窄屏和视频录制分辨率做最终布局检查。
+
+### 13.4 验证与视频
+
+- [x] 离线覆盖完成、审批等待、批准、拒绝和无效工作区。
+- [x] 通过真实 HTTP 与 SSE 完成无模型纵向集成测试。
+- [x] 在浏览器中检查首屏真实渲染和静态资源。
+- [ ] 使用真实 provider 跑通一次安全模式 GUI 修改与验证。
+- [ ] 录制前完整排练：任务、Diff 审批、验证通过、Resume 或 Undo。
+
+### 验收标准
+
+- [ ] 视频中的每个状态都来自真实 Agent/Session 事件，不使用预录事件或假成功结果。
+- [ ] 页面可以完成任务启动、审批、验证、恢复和 Undo 的展示闭环。
+- [ ] CLI、Eval 与 GUI 共享内核，完整离线测试保持通过。
+- [ ] API Key 不进入页面、SSE、Session 或日志。
+
+---
+
+## 14. 全局完成定义
 
 任何阶段只有同时满足以下条件，才可以标记完成：
 
@@ -715,7 +763,7 @@ run_cancelled
   → 独立 commit
 ```
 
-## 14. 优先级与裁剪原则
+## 15. 优先级与裁剪原则
 
 ### P0：考核提交前必须完成
 
@@ -735,11 +783,12 @@ run_cancelled
 - [x] Git 原有改动与 Agent 改动区分。
 - [x] 大文件分页读取和更好的工具结果预算。
 - [x] 跨平台进程树清理。
+- [ ] 复用真实 Agent 内核的本地 GUI 视频展示闭环。
 
 ### P2：当前不优先
 
 - [ ] 多 Agent 编排。
-- [ ] GUI 或 IDE 插件。
+- [ ] 完整代码编辑器或 IDE 插件。
 - [ ] 向量数据库和通用 RAG。
 - [ ] MCP 插件生态。
 - [ ] 远程后台任务和云端执行。
@@ -748,7 +797,7 @@ run_cancelled
 
 这些能力并非没有价值，但当前阶段会扩大实现面，削弱核心闭环的完成度和可验证性。只有 P0、P1 已稳定且确有评测收益时才重新评估。
 
-## 15. 建议提交边界
+## 16. 建议提交边界
 
 提交名称可在实现时调整，但建议保持以下边界：
 
@@ -762,11 +811,12 @@ feat: improve repository discovery and tool efficiency
 test: add coding-agent evaluation harness
 ci: add cross-platform offline test workflow
 docs: add architecture, evaluation, and demo results
+feat: add local GUI run and approval console
 ```
 
 不要为了匹配列表强行拆分或合并提交。原则是每个提交能够独立说明、测试和审查，不把无关格式化或临时文件混入功能提交。
 
-## 16. 路线图维护规则
+## 17. 路线图维护规则
 
 - 开始一个阶段前，先确认上游阶段的验收条件。
 - 实现过程中只勾选已经由代码和测试证明的事项。
@@ -775,9 +825,11 @@ docs: add architecture, evaluation, and demo results
 - 每个阶段完成后更新本文档的勾选状态，并在提交信息或 PR 描述中引用对应章节。
 - 如果真实 Eval 表明路线优先级错误，以数据为依据调整顺序，并记录调整原因。
 
-## 17. 当前下一步
+## 18. 当前下一步
 
 1. 阶段 B～H 的核心实现、真实模型验收、115 项离线测试、10 项确定性 Eval、两分钟演示和跨平台 CI 已完成。
 2. 阶段 I1 已从公开仓库在全新虚拟环境复现安装、依赖检查、CLI、完整测试、完整 Eval 和演示初始状态，并保存发布候选审计记录。
 3. 仓库所有者已选择 MIT License、公开 description/topics，并确认创建 `v0.1.0` tag/Release；阶段 I1 完成。
-4. 当前进入阶段 I2 未知任务盲测，再根据成功率、无关修改、工具调用、token 和耗时选择一项阶段 I3 效率优化。
+4. 因考核需要视频展示，当前优先进入阶段 J：用 GUI 可视化已有真实能力，而不是扩展 Agent 工具面。
+5. 阶段 J1 已完成运行控制器、SSE、页面审批、Diff/验证面板和离线 HTTP 纵向测试；下一步补齐停止、Session Resume、Changed Files 和 Undo。
+6. GUI 视频主链稳定后进入阶段 I2 未知任务盲测，再根据成功率、无关修改、工具调用、token 和耗时选择一项阶段 I3 效率优化。

@@ -14,6 +14,12 @@ dependencies = [
     "openai>=1.82",
 ]
 
+[project.optional-dependencies]
+gui = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+]
+
 [project.urls]
 Repository = "https://github.com/Sammy0520/mini-coder-agent"
 Issues = "https://github.com/Sammy0520/mini-coder-agent/issues"
@@ -21,6 +27,10 @@ Issues = "https://github.com/Sammy0520/mini-coder-agent/issues"
 [project.scripts]
 mini-coder = "mini_coder.cli:main"
 mini-coder-eval = "mini_coder.evals.cli:main"
+mini-coder-gui = "mini_coder.gui.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"mini_coder.gui" = ["static/*.html", "static/*.css", "static/*.js"]
