@@ -127,3 +127,18 @@ isolated PEP 517 environment. That wheel was installed with `--no-deps` into a
 new virtual environment, where the installed `mini-coder-eval` entry point
 listed all scenarios and independently passed `boundary_bug`. This confirms the
 verification did not depend on the repository's editable installation.
+
+The first public CI run exposed one Windows-only test assertion: the runner
+represented the same temporary directory once as `C:\Users\runneradmin` and
+once through its 8.3 alias `C:\Users\RUNNER~1`. SessionStore had correctly
+normalized its root; the test now normalizes the expected path before comparing
+it. The CI test runner also emits named GitHub error annotations on future
+failures. The follow-up public run completed successfully on all four declared
+Windows/Ubuntu and Python 3.11/3.12 combinations:
+
+[GitHub Actions run 33156464072](https://github.com/Sammy0520/mini-coder-agent/actions/runs/33156464072)
+
+A separate public-clone release audit repeated installation, dependency checks,
+115 offline tests, all 10 deterministic Evals, both console entry points, and
+the resettable demo baseline. See the
+[release candidate audit](release-candidate-audit.md).

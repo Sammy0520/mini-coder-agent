@@ -11,6 +11,19 @@
 - 不把写文件当黑盒：每次写入都有 Diff、前后 hash、原子替换、变更归属和冲突安全 Undo。
 - 不只展示一次成功录屏：10 个隔离、确定性的 Eval 覆盖修复、恢复、拒绝、越界、429 和输出预算；真实 provider 使用同一评分协议。
 
+## 已验证发布基线
+
+| 证据 | 结果 |
+|---|---:|
+| 离线单元测试 | 115/115 通过 |
+| 确定性端到端 Eval | 10/10 通过 |
+| 真实 Responses Eval | 1/1 `completed_verified` |
+| 两分钟多文件演示 | 5/5 测试通过，未修改测试 |
+| GitHub Actions | Windows/Ubuntu × Python 3.11/3.12 全部通过 |
+| 公开仓库全新环境复现 | 克隆、安装、CLI、测试、Eval 和演示 baseline 全部通过 |
+
+最新跨平台结果见 [GitHub Actions run 33156464072](https://github.com/Sammy0520/mini-coder-agent/actions/runs/33156464072)，完整的公开仓库复现过程和发布元数据检查见 [`docs/runs/release-candidate-audit.md`](docs/runs/release-candidate-audit.md)。
+
 ## 当前能力
 
 - `ModelClient`：与厂商无关的模型边界。
@@ -264,7 +277,7 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 ## 测试
 
-核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用：
+核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 115 项：
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -306,6 +319,8 @@ mini-coder-eval --live --scenario multifile_interface `
 
 真实 Eval 的 provider usage 为 29,506 input、1,025 output、30,531 total tokens；只有 provider 实际返回 usage 时才记录。完整脱敏证据见 [`docs/runs/eval-ci-release-run.md`](docs/runs/eval-ci-release-run.md)。
 
+发布候选还从公开 GitHub URL 克隆到一次性目录，使用全新虚拟环境重新安装并通过 115 项测试、10 项 Eval、两个 CLI 入口和演示初始状态复现；该过程没有复制本地 API Key。详见 [`docs/runs/release-candidate-audit.md`](docs/runs/release-candidate-audit.md)。
+
 ## 两分钟多文件演示
 
 演示夹具比单文件折扣示例更接近小型服务：它包含项目说明、定价、服务、CLI 和测试，初始状态同时存在缺失策略模块与边界失败。每次演示先一键恢复到同一初始状态：
@@ -339,8 +354,9 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 
 ## 下一步
 
-- 等待 GitHub Actions 矩阵通过并复核公开仓库展示。
-- 用户确认发布内容后创建 `v0.1.0` 标签；标签不会由 Agent 擅自创建。
+- 由仓库所有者决定许可证、GitHub description 和 topics。
+- 用户确认发布候选内容后创建 `v0.1.0` 标签和 GitHub Release；标签不会由 Agent 擅自创建。
+- 发布后进入未知任务盲测，用成功率、无关修改、工具调用、token 和耗时决定下一项效率优化，不为扩展功能面而盲目增加工具。
 
 完整实现顺序、验收标准和可勾选任务见 [`ROADMAP.md`](ROADMAP.md)。
 
