@@ -7,7 +7,7 @@ const state = {
 };
 
 const els = Object.fromEntries([
-  "workspace", "configPath", "task", "runButton", "connectionDot", "connectionLabel",
+  "workspace", "selectWorkspaceButton", "configPath", "task", "runButton", "connectionDot", "connectionLabel",
   "runStatus", "sessionId", "verificationStatus", "changeCount", "eventCount",
   "timeline", "approvalPanel", "approvalRisk", "approvalTitle", "approvalArguments",
   "approveButton", "denyButton", "diffStats", "diffMeta", "diffView",
@@ -17,19 +17,56 @@ const els = Object.fromEntries([
 const terminalEvents = new Set(["controller_run_finished", "controller_run_failed"]);
 
 els.runButton.addEventListener("click", startRun);
+els.selectWorkspaceButton.addEventListener("click", selectWorkspace);
 els.approveButton.addEventListener("click", () => decideApproval(true));
 els.denyButton.addEventListener("click", () => decideApproval(false));
+loadDefaults();
+
+async function loadDefaults() {
+  try {
+    const response = await fetch("/api/bootstrap");
+    const data = await readJson(response);
+    if (!response.ok) return;
+    if (!els.workspace.value) els.workspace.value = data.default_workspace || "";
+    if (!els.configPath.value) els.configPath.value = data.default_config_path || "agent.toml";
+  } catch (_) {
+    // Fields remain editable if startup information is temporarily unavailable.
+  }
+}
+
+async function selectWorkspace() {
+  els.selectWorkspaceButton.disabled = true;
+  els.selectWorkspaceButton.textContent = "正在打开…";
+  try {
+    const response = await fetch("/api/select-workspace", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({initial_directory: els.workspace.value.trim() || null}),
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法打开文件夹选择窗口。");
+    if (data.selected && data.workspace) {
+      els.workspace.value = data.workspace;
+      toast("已选择项目文件夹");
+    }
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    els.selectWorkspaceButton.disabled = false;
+    els.selectWorkspaceButton.innerHTML = '<span aria-hidden="true">⌕</span> 选择文件夹';
+  }
+}
 
 async function startRun() {
   const task = els.task.value.trim();
   const workspace = els.workspace.value.trim();
   const configPath = els.configPath.value.trim();
   if (!task || !workspace) {
-    toast("Workspace and task are required.", true);
+    toast("请先选择项目文件夹，并填写要完成的任务。", true);
     return;
   }
   resetRunView();
-  setBusy(true, "Starting agent…");
+  setBusy(true, "正在启动 Agent…");
   try {
     const response = await fetch("/api/runs", {
       method: "POST",
@@ -37,13 +74,13 @@ async function startRun() {
       body: JSON.stringify({task, workspace, config_path: configPath || null, auto: false}),
     });
     const data = await readJson(response);
-    if (!response.ok) throw new Error(data.detail || "Could not start the run.");
+    if (!response.ok) throw new Error(data.detail || "无法开始执行任务。");
     state.runId = data.run_id;
     els.runStatus.textContent = labelStatus(data.status);
     connectEvents(data.run_id);
   } catch (error) {
-    setBusy(false, "Error");
-    els.runStatus.textContent = "Failed to start";
+    setBusy(false, "发生错误");
+    els.runStatus.textContent = "启动失败";
     toast(error.message, true);
   }
 }
@@ -52,7 +89,7 @@ function connectEvents(runId) {
   if (state.source) state.source.close();
   const source = new EventSource(`/api/runs/${runId}/events`);
   state.source = source;
-  source.addEventListener("open", () => setBusy(true, "Live"));
+  source.addEventListener("open", () => setBusy(true, "正在执行"));
   source.addEventListener("run-event", (message) => {
     const envelope = JSON.parse(message.data);
     renderEvent(envelope);
@@ -64,14 +101,14 @@ function connectEvents(runId) {
   });
   source.onerror = () => {
     if (!state.source) return;
-    els.connectionLabel.textContent = "Reconnecting…";
+    els.connectionLabel.textContent = "正在重新连接…";
     els.connectionDot.className = "connection-dot busy";
   };
 }
 
 function renderEvent(envelope) {
   state.eventCount += 1;
-  els.eventCount.textContent = `${state.eventCount} event${state.eventCount === 1 ? "" : "s"}`;
+  els.eventCount.textContent = `${state.eventCount} 条记录`;
   if (state.eventCount === 1) els.timeline.innerHTML = "";
   const payload = envelope.payload || {};
   const presentation = describeEvent(envelope.event, payload);
@@ -94,24 +131,24 @@ function renderEvent(envelope) {
 function describeEvent(name, payload) {
   const tool = payload.tool || "tool";
   const map = {
-    controller_run_created: ["01", "Run created", `Workspace: ${payload.workspace || ""}`, ""],
-    session_created: ["S", "Session saved", shortId(payload.session_id), "success"],
-    workspace_overview_generated: ["⌁", "Project understood", overviewDetail(payload), ""],
-    run_started: ["▶", "Agent started", payload.resumed ? "Resuming an existing session" : "Starting a new session", ""],
-    model_request_started: ["AI", "Asking model", `Step ${payload.step || ""}`, ""],
-    model_response_received: ["AI", "Model response", modelDetail(payload), ""],
-    tool_call_requested: ["↳", `Tool: ${tool}`, toolDetail(payload), ""],
-    approval_required: ["!", "Approval required", `${tool} · ${payload.risk || "write"}`, "warning"],
-    approval_resolved: [payload.approved ? "✓" : "×", payload.approved ? "Approved" : "Rejected", tool, payload.approved ? "success" : "error"],
-    change_preview: ["Δ", `Change preview: ${payload.path || "file"}`, `+${payload.additions || 0} / -${payload.deletions || 0}`, "warning"],
-    change_applied: ["✓", `Changed: ${payload.path || "file"}`, `+${payload.additions || 0} / -${payload.deletions || 0}`, "success"],
-    phase_changed: ["→", `Phase: ${payload.phase || "working"}`, `${payload.previous || "start"} → ${payload.phase || "working"}`, ""],
-    verification_started: ["V", "Verification started", payload.command || "Running local verification", ""],
-    verification_completed: [payload.passed ? "✓" : "×", payload.passed ? "Verification passed" : "Verification failed", verificationDetail(payload), payload.passed ? "success" : "error"],
-    run_completed: ["✓", "Agent completed", `Status: ${payload.verification_status || payload.result_status || "completed"}`, "success"],
-    run_failed: ["×", "Agent run failed", payload.stop_reason || payload.result_status || "Run failed", "error"],
-    controller_run_finished: ["✓", "Run controller finished", `${payload.steps || 0} model step(s)`, payload.result_status === "completed" ? "success" : "error"],
-    controller_run_failed: ["×", "Run controller failed", payload.error || "Unexpected error", "error"],
+    controller_run_created: ["01", "任务已创建", `项目：${payload.workspace || ""}`, ""],
+    session_created: ["S", "会话已保存", shortId(payload.session_id), "success"],
+    workspace_overview_generated: ["⌁", "已理解项目结构", overviewDetail(payload), ""],
+    run_started: ["▶", "Agent 已启动", payload.resumed ? "继续已有会话" : "开始新的会话", ""],
+    model_request_started: ["AI", "正在请求模型", `第 ${payload.step || ""} 步`, ""],
+    model_response_received: ["AI", "模型已响应", modelDetail(payload), ""],
+    tool_call_requested: ["↳", `调用工具：${tool}`, toolDetail(payload), ""],
+    approval_required: ["!", "需要确认操作", `${tool} · ${payload.risk || "write"}`, "warning"],
+    approval_resolved: [payload.approved ? "✓" : "×", payload.approved ? "已允许" : "已拒绝", tool, payload.approved ? "success" : "error"],
+    change_preview: ["Δ", `准备修改：${payload.path || "文件"}`, `新增 ${payload.additions || 0} 行 / 删除 ${payload.deletions || 0} 行`, "warning"],
+    change_applied: ["✓", `已修改：${payload.path || "文件"}`, `新增 ${payload.additions || 0} 行 / 删除 ${payload.deletions || 0} 行`, "success"],
+    phase_changed: ["→", `进入阶段：${payload.phase || "working"}`, `${payload.previous || "start"} → ${payload.phase || "working"}`, ""],
+    verification_started: ["V", "开始本地验证", payload.command || "正在运行项目检查", ""],
+    verification_completed: [payload.passed ? "✓" : "×", payload.passed ? "验证通过" : "验证失败", verificationDetail(payload), payload.passed ? "success" : "error"],
+    run_completed: ["✓", "Agent 已完成任务", `状态：${payload.verification_status || payload.result_status || "completed"}`, "success"],
+    run_failed: ["×", "Agent 执行失败", payload.stop_reason || payload.result_status || "执行失败", "error"],
+    controller_run_finished: ["✓", "本次执行已结束", `共 ${payload.steps || 0} 个模型步骤`, payload.result_status === "completed" ? "success" : "error"],
+    controller_run_failed: ["×", "运行控制器出错", payload.error || "发生未知错误", "error"],
   };
   const value = map[name] || ["·", humanize(name), compactPayload(payload), ""];
   return {icon: value[0], title: value[1], detail: value[2] || "", tone: value[3] || ""};
@@ -126,36 +163,36 @@ function updatePanels(name, payload) {
     if (payload.path) state.changes.add(payload.path);
     els.changeCount.textContent = state.changes.size;
   }
-  if (name === "verification_started") setVerification("running", "Running", payload.command || "Running local verification…");
+  if (name === "verification_started") setVerification("running", "验证中", payload.command || "正在运行项目检查…");
   if (name === "verification_completed") {
-    setVerification(payload.passed ? "passed" : "failed", payload.passed ? "Passed" : "Failed", verificationDetail(payload));
+    setVerification(payload.passed ? "passed" : "failed", payload.passed ? "已通过" : "未通过", verificationDetail(payload));
   }
   if (name === "controller_run_finished") {
     const completed = payload.result_status === "completed";
-    els.runStatus.textContent = completed ? "Completed" : labelStatus(payload.result_status);
-    setBusy(false, completed ? "Complete" : "Stopped");
-    showSummary(payload.final_text || "Run finished.");
+    els.runStatus.textContent = completed ? "已完成" : labelStatus(payload.result_status);
+    setBusy(false, completed ? "执行完成" : "已停止");
+    showSummary(payload.final_text || "本次执行已结束。");
   }
   if (name === "controller_run_failed") {
-    els.runStatus.textContent = "Failed";
-    setBusy(false, "Error", true);
-    showSummary(payload.error || "The run failed.");
+    els.runStatus.textContent = "执行失败";
+    setBusy(false, "发生错误", true);
+    showSummary(payload.error || "本次执行失败。");
   }
 }
 
 function showApproval(payload) {
   state.pendingApproval = payload;
   els.approvalRisk.textContent = payload.risk || "write";
-  els.approvalTitle.textContent = `Allow ${payload.tool || "this operation"}?`;
+  els.approvalTitle.textContent = `允许 Agent 执行 ${payload.tool || "这项操作"} 吗？`;
   els.approvalArguments.textContent = JSON.stringify(payload.arguments || {}, null, 2);
   els.approvalPanel.classList.remove("hidden");
-  els.runStatus.textContent = "Waiting for approval";
+  els.runStatus.textContent = "等待你的确认";
 }
 
 function hideApproval() {
   state.pendingApproval = null;
   els.approvalPanel.classList.add("hidden");
-  els.runStatus.textContent = "Running";
+  els.runStatus.textContent = "正在执行";
 }
 
 async function decideApproval(approved) {
@@ -170,7 +207,7 @@ async function decideApproval(approved) {
       body: JSON.stringify({approved}),
     });
     const data = await readJson(response);
-    if (!response.ok) throw new Error(data.detail || "Approval could not be submitted.");
+    if (!response.ok) throw new Error(data.detail || "无法提交确认结果。");
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -181,7 +218,7 @@ async function decideApproval(approved) {
 
 function showDiff(payload) {
   els.diffStats.textContent = `+${payload.additions || 0} / -${payload.deletions || 0}`;
-  els.diffMeta.textContent = `${payload.path || "file"}${payload.diff_truncated ? " · preview truncated" : ""}`;
+  els.diffMeta.textContent = `${payload.path || "文件"}${payload.diff_truncated ? " · 预览已截断" : ""}`;
   const code = document.createElement("code");
   String(payload.diff || "").split("\n").forEach((line) => {
     const span = document.createElement("span");
@@ -225,17 +262,17 @@ function resetRunView() {
   state.eventCount = 0;
   state.changes = new Set();
   state.pendingApproval = null;
-  els.eventCount.textContent = "0 events";
+  els.eventCount.textContent = "0 条记录";
   els.changeCount.textContent = "0";
   els.sessionId.textContent = "—";
-  els.runStatus.textContent = "Starting";
+  els.runStatus.textContent = "正在启动";
   els.timeline.innerHTML = "";
   els.approvalPanel.classList.add("hidden");
   els.summaryPanel.classList.add("hidden");
-  els.diffStats.textContent = "No changes";
-  els.diffMeta.textContent = "A write preview will appear before approval.";
-  els.diffView.innerHTML = '<code><span class="diff-placeholder">Waiting for the agent to prepare a change…</span></code>';
-  setVerification("neutral", "Not run", "The final status is decided by local command results, not by model claims.");
+  els.diffStats.textContent = "暂无修改";
+  els.diffMeta.textContent = "Agent 准备写入文件时，会先在这里展示修改内容。";
+  els.diffView.innerHTML = '<code><span class="diff-placeholder">等待 Agent 准备修改…</span></code>';
+  setVerification("neutral", "未运行", "Agent 完成修改后，会运行项目内的检查命令，用真实结果判断任务是否成功。");
 }
 
 function setBusy(busy, label, error = false) {
@@ -246,14 +283,14 @@ function setBusy(busy, label, error = false) {
 
 function overviewDetail(payload) {
   const files = [...(payload.manifests || []), ...(payload.entry_points || [])];
-  return files.length ? files.slice(0, 5).join(" · ") : "Workspace overview generated";
+  return files.length ? files.slice(0, 5).join(" · ") : "已生成项目概览";
 }
 
 function modelDetail(payload) {
   const tools = payload.tool_calls || [];
   const content = String(payload.content || "").trim();
-  if (tools.length) return `Requested: ${tools.join(", ")}`;
-  return content.slice(0, 220) || "Model returned a response";
+  if (tools.length) return `准备调用：${tools.join(", ")}`;
+  return content.slice(0, 220) || "模型已返回结果";
 }
 
 function toolDetail(payload) {
@@ -265,7 +302,7 @@ function toolDetail(payload) {
 function verificationDetail(payload) {
   const exitCode = payload.exit_code ?? "?";
   const duration = Number(payload.duration_seconds || 0).toFixed(2);
-  return `Exit ${exitCode} · ${duration}s${payload.command ? ` · ${payload.command}` : ""}`;
+  return `退出码 ${exitCode} · ${duration} 秒${payload.command ? ` · ${payload.command}` : ""}`;
 }
 
 function compactPayload(value) {
@@ -282,7 +319,18 @@ function diffClass(line) {
 }
 
 function labelStatus(status) {
-  return String(status || "unknown").replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const value = String(status || "unknown");
+  const labels = {
+    created: "已创建",
+    running: "正在执行",
+    waiting_for_approval: "等待确认",
+    completed: "已完成",
+    failed: "执行失败",
+    denied: "已拒绝",
+    interrupted: "已中断",
+    unknown: "未知状态",
+  };
+  return labels[value] || value.replaceAll("_", " ");
 }
 
 function humanize(name) { return labelStatus(name); }

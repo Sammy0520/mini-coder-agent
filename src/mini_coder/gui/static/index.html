@@ -20,44 +20,62 @@
       </div>
       <div class="connection">
         <span id="connectionDot" class="connection-dot"></span>
-        <span id="connectionLabel">Ready</span>
+        <span id="connectionLabel">已就绪</span>
       </div>
     </header>
 
+    <section class="quick-guide" aria-label="使用步骤">
+      <div class="guide-intro">
+        <p class="eyebrow">快速开始</p>
+        <strong>告诉 Agent 去哪里、做什么，然后开始执行</strong>
+      </div>
+      <div class="guide-step"><span>1</span><p><strong>选择项目</strong>填写要修改的项目文件夹</p></div>
+      <div class="guide-arrow">→</div>
+      <div class="guide-step"><span>2</span><p><strong>描述任务</strong>用一句话说清要完成什么</p></div>
+      <div class="guide-arrow">→</div>
+      <div class="guide-step"><span>3</span><p><strong>确认修改</strong>查看过程，并批准写入操作</p></div>
+    </section>
+
     <section class="launch-card">
       <div class="field workspace-field">
-        <label for="workspace">Workspace</label>
-        <input id="workspace" autocomplete="off" spellcheck="false" value=".">
+        <label for="workspace">项目文件夹 <span class="required">必填</span></label>
+        <div class="input-with-action">
+          <input id="workspace" autocomplete="off" spellcheck="false" placeholder="例如：D:\Projects\my-app">
+          <button id="selectWorkspaceButton" class="folder-button" type="button"><span aria-hidden="true">⌕</span> 选择文件夹</button>
+        </div>
+        <p class="field-help">点击“选择文件夹”，选择希望 Agent 阅读和修改的项目。Agent 不会操作这个文件夹以外的文件。</p>
       </div>
       <div class="field config-field">
-        <label for="configPath">Provider config</label>
-        <input id="configPath" autocomplete="off" spellcheck="false" value="agent.toml">
+        <label for="configPath">模型配置文件 <span class="optional">通常不用改</span></label>
+        <input id="configPath" autocomplete="off" spellcheck="false" placeholder="agent.toml">
+        <p class="field-help">这里保存模型地址和名称；API Key 不写在这个文件里。</p>
       </div>
       <div class="field task-field">
-        <label for="task">Programming task</label>
-        <textarea id="task" rows="3" placeholder="Describe the change you want the agent to make..."></textarea>
+        <label for="task">你希望 Agent 完成什么？ <span class="required">必填</span></label>
+        <textarea id="task" rows="3" placeholder="例如：阅读这个项目，为 README 增加一段中文的快速开始说明。"></textarea>
+        <p class="field-help">尽量说明目标和验收标准，不需要告诉它具体怎么写代码。</p>
       </div>
       <button id="runButton" class="run-button" type="button">
         <span class="run-icon">▶</span>
-        Run agent
+        开始执行
       </button>
     </section>
 
     <section class="status-strip">
       <div>
-        <span class="status-label">Run status</span>
-        <strong id="runStatus" class="status-value">Not started</strong>
+        <span class="status-label">运行状态</span>
+        <strong id="runStatus" class="status-value">尚未开始</strong>
       </div>
       <div>
-        <span class="status-label">Session</span>
+        <span class="status-label">会话</span>
         <strong id="sessionId" class="status-value mono">—</strong>
       </div>
       <div>
-        <span class="status-label">Verification</span>
-        <strong id="verificationStatus" class="status-value">Waiting</strong>
+        <span class="status-label">验证结果</span>
+        <strong id="verificationStatus" class="status-value">等待运行</strong>
       </div>
       <div>
-        <span class="status-label">Changed files</span>
+        <span class="status-label">修改文件</span>
         <strong id="changeCount" class="status-value">0</strong>
       </div>
     </section>
@@ -66,16 +84,16 @@
       <article class="panel timeline-panel">
         <div class="panel-header">
           <div>
-            <p class="eyebrow">LIVE EXECUTION</p>
-            <h2>Agent timeline</h2>
+            <p class="eyebrow">实时执行过程</p>
+            <h2>Agent 工作记录</h2>
           </div>
-          <span id="eventCount" class="panel-count">0 events</span>
+          <span id="eventCount" class="panel-count">0 条记录</span>
         </div>
         <div id="timeline" class="timeline">
           <div class="empty-state">
             <div class="empty-orbit"><span></span></div>
-            <h3>Ready for a real task</h3>
-            <p>The agent's model calls, tools, approvals and verification will appear here.</p>
+            <h3>等待第一个任务</h3>
+            <p>开始后，Agent 的思考步骤、工具操作、修改确认和验证结果都会显示在这里。</p>
           </div>
         </div>
       </article>
@@ -84,47 +102,47 @@
         <article id="approvalPanel" class="panel approval-panel hidden">
           <div class="panel-header compact">
             <div>
-              <p class="eyebrow warning">ACTION REQUIRED</p>
-              <h2>Approval</h2>
+              <p class="eyebrow warning">需要你的确认</p>
+              <h2>是否允许这次操作？</h2>
             </div>
             <span id="approvalRisk" class="risk-badge">write</span>
           </div>
           <p id="approvalTitle" class="approval-title"></p>
           <pre id="approvalArguments" class="code-block"></pre>
           <div class="approval-actions">
-            <button id="denyButton" class="secondary-button" type="button">Reject</button>
-            <button id="approveButton" class="primary-button" type="button">Approve change</button>
+            <button id="denyButton" class="secondary-button" type="button">拒绝</button>
+            <button id="approveButton" class="primary-button" type="button">允许操作</button>
           </div>
         </article>
 
         <article class="panel diff-panel">
           <div class="panel-header compact">
             <div>
-              <p class="eyebrow">AUDITABLE CHANGE</p>
-              <h2>Current diff</h2>
+              <p class="eyebrow">修改预览</p>
+              <h2>代码变更</h2>
             </div>
-            <span id="diffStats" class="diff-stats">No changes</span>
+            <span id="diffStats" class="diff-stats">暂无修改</span>
           </div>
-          <div id="diffMeta" class="diff-meta">A write preview will appear before approval.</div>
-          <pre id="diffView" class="diff-view"><code><span class="diff-placeholder">Waiting for the agent to prepare a change…</span></code></pre>
+          <div id="diffMeta" class="diff-meta">Agent 准备写入文件时，会先在这里展示修改内容。</div>
+          <pre id="diffView" class="diff-view"><code><span class="diff-placeholder">等待 Agent 准备修改…</span></code></pre>
         </article>
 
         <article class="panel verification-panel">
           <div class="panel-header compact">
             <div>
-              <p class="eyebrow">LOCAL EVIDENCE</p>
-              <h2>Verification</h2>
+              <p class="eyebrow">本地验证</p>
+              <h2>任务验收</h2>
             </div>
-            <span id="verificationBadge" class="verification-badge neutral">Not run</span>
+            <span id="verificationBadge" class="verification-badge neutral">未运行</span>
           </div>
-          <p id="verificationMessage" class="verification-message">The final status is decided by local command results, not by model claims.</p>
+          <p id="verificationMessage" class="verification-message">Agent 完成修改后，会运行项目内的检查命令，用真实结果判断任务是否成功。</p>
         </article>
 
         <article id="summaryPanel" class="panel summary-panel hidden">
           <div class="panel-header compact">
             <div>
-              <p class="eyebrow success">RUN COMPLETE</p>
-              <h2>Agent summary</h2>
+              <p class="eyebrow success">执行结束</p>
+              <h2>Agent 总结</h2>
             </div>
           </div>
           <div id="summaryText" class="summary-text"></div>

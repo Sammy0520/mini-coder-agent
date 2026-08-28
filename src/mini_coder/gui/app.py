@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -23,8 +24,38 @@ class ApprovalBody(BaseModel):
     approved: bool
 
 
-def create_app(controller: RunController | None = None) -> FastAPI:
+class SelectDirectoryBody(BaseModel):
+    initial_directory: str | None = Field(default=None, max_length=2_000)
+
+
+def _select_directory(initial_directory: str | None = None) -> str | None:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    initial = Path(initial_directory).expanduser() if initial_directory else Path.cwd()
+    if not initial.is_dir():
+        initial = Path.cwd()
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        selected = filedialog.askdirectory(
+            parent=root,
+            initialdir=str(initial.resolve()),
+            title="选择 Agent 要处理的项目文件夹",
+            mustexist=True,
+        )
+    finally:
+        root.destroy()
+    return str(Path(selected).resolve()) if selected else None
+
+
+def create_app(
+    controller: RunController | None = None,
+    directory_picker: Callable[[str | None], str | None] | None = None,
+) -> FastAPI:
     active_controller = controller or RunController()
+    active_directory_picker = directory_picker or _select_directory
     static_dir = Path(__file__).with_name("static")
     app = FastAPI(
         title="Mini Coder Agent GUI",
@@ -42,6 +73,27 @@ def create_app(controller: RunController | None = None) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/bootstrap")
+    def bootstrap() -> dict[str, str]:
+        workspace = Path.cwd().resolve()
+        return {
+            "default_workspace": str(workspace),
+            "default_config_path": str(workspace / "agent.toml"),
+        }
+
+    @app.post("/api/select-workspace")
+    def select_workspace(body: SelectDirectoryBody) -> dict[str, str | bool | None]:
+        try:
+            selected = active_directory_picker(body.initial_directory)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"无法打开文件夹选择窗口：{exc}",
+            ) from exc
+        if selected and not Path(selected).is_dir():
+            raise HTTPException(status_code=400, detail="选择的路径不是有效文件夹")
+        return {"selected": selected is not None, "workspace": selected}
 
     @app.post("/api/runs", status_code=202)
     def start_run(body: StartRunBody) -> dict:

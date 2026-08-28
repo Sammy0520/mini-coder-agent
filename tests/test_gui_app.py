@@ -57,7 +57,10 @@ class GuiHttpTests(unittest.TestCase):
         )
         self.port = _unused_port()
         config = uvicorn.Config(
-            create_app(self.controller),
+            create_app(
+                self.controller,
+                directory_picker=lambda initial: tempfile.gettempdir(),
+            ),
             host="127.0.0.1",
             port=self.port,
             log_level="error",
@@ -82,6 +85,16 @@ class GuiHttpTests(unittest.TestCase):
                 health = json.load(response)
             with urllib.request.urlopen(f"{base}/", timeout=3) as response:
                 index = response.read().decode("utf-8")
+            with urllib.request.urlopen(f"{base}/api/bootstrap", timeout=3) as response:
+                bootstrap = json.load(response)
+            picker_request = urllib.request.Request(
+                f"{base}/api/select-workspace",
+                data=json.dumps({"initial_directory": directory}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(picker_request, timeout=3) as response:
+                picker = json.load(response)
 
             body = json.dumps(
                 {
@@ -111,6 +124,13 @@ class GuiHttpTests(unittest.TestCase):
 
             self.assertEqual(health, {"status": "ok"})
             self.assertIn("Mini Coder Agent", index)
+            self.assertEqual(Path(bootstrap["default_workspace"]), Path.cwd().resolve())
+            self.assertEqual(
+                Path(bootstrap["default_config_path"]),
+                Path.cwd().resolve() / "agent.toml",
+            )
+            self.assertTrue(picker["selected"])
+            self.assertEqual(Path(picker["workspace"]), Path(tempfile.gettempdir()))
             self.assertIn("event: run-event", event_stream)
             self.assertIn('"event": "change_preview"', event_stream)
             self.assertIn('"event": "verification_completed"', event_stream)
