@@ -1,6 +1,15 @@
 # Mini Coder Agent
 
-一个不依赖 Agent 框架、核心逻辑可检查的命令行编程智能体。模型负责选择下一步，本项目自行负责对话历史、上下文裁剪、工具定义与本地执行、响应解析、审批、循环终止和错误处理。
+[![CI](https://github.com/Sammy0520/mini-coder-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Sammy0520/mini-coder-agent/actions/workflows/ci.yml)
+
+一个不依赖 Agent 框架、控制逻辑可检查、能够修改并验证真实代码的命令行编程智能体。模型只负责选择下一步；项目自行实现会话、工具执行、Diff、审批、安全边界、失败恢复、验证状态和可重复 Eval。
+
+**30 秒了解差异点：**
+
+- 不是把模型套进 Agent SDK：核心循环、Responses/Chat Completions 适配和工具协议都在仓库内。
+- 不把“模型说测试通过”当成事实：完成状态由本地命令、修改版本和 Session 记录决定。
+- 不把写文件当黑盒：每次写入都有 Diff、前后 hash、原子替换、变更归属和冲突安全 Undo。
+- 不只展示一次成功录屏：10 个隔离、确定性的 Eval 覆盖修复、恢复、拒绝、越界、429 和输出预算；真实 provider 使用同一评分协议。
 
 ## 当前能力
 
@@ -22,15 +31,15 @@
 
 ```text
 CLI
- └─ AgentRunner                 本地实现循环、停止条件、审批与历史
-     ├─ ModelClient             可替换的模型抽象
-     │   └─ OpenAICompatibleClient
-     ├─ ContextManager          本地限制发送给模型的上下文
-     ├─ ChangeTracker           Diff、hash、原子写入、冲突检测与 Undo
-     ├─ VerificationTracker     验证命令、修改版本、失效规则与完成判定
-     └─ ToolRegistry            本地校验和分发工具
-         ├─ filesystem/search   本地读写和检索
-         └─ command             本地进程执行
+ ├─ AgentRunner                 本地实现循环、停止条件、审批与历史
+ │   ├─ ModelClient             可替换的模型抽象
+ │   │   └─ OpenAICompatibleClient
+ │   ├─ WorkspaceInspector      清单、入口、测试、说明与 Git 基线
+ │   ├─ ContextManager          本地限制发送给模型的上下文
+ │   ├─ ChangeTracker           Diff、hash、原子写入、冲突检测与 Undo
+ │   ├─ VerificationTracker     验证命令、修改版本、失效规则与完成判定
+ │   └─ ToolRegistry            本地校验和分发文件、搜索与命令工具
+ └─ EvalRunner                  隔离工作区、确定性/真实模型、评分与报告
 ```
 
 模型只能看到 AgentRunner 主动发送的消息，不能直接访问磁盘。模型返回 function tool call 后，由 ToolRegistry 在本机执行，再把结果放回下一轮。Responses 模式会在本地保留并重放上一轮全部 output 项和对应的 `function_call_output`；Chat Completions 模式使用标准 `assistant`/`tool` 消息。项目不使用 OpenAI Agents SDK、LangChain、AutoGen 等 Agent 框架，也不调用托管的 Code Interpreter 或 Files 工具。
@@ -262,7 +271,55 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 Agent 工具循环、审批与风险分类、有限重试和 `Retry-After`、运行预算、集中脱敏、事件 envelope、日志故障隔离、进程树超时/Ctrl+C 清理、路径逃逸、敏感文件、命令执行、上下文压缩、Responses 历史重放、Session 原子保存/迁移/恢复、ChangeTracker、Undo，以及本地验证完成规则。
+测试覆盖 Agent 工具循环、审批与风险分类、有限重试和 `Retry-After`、运行预算、集中脱敏、事件 envelope、日志故障隔离、进程树超时/Ctrl+C 清理、路径逃逸、敏感文件、命令执行、上下文压缩、Responses 历史重放、Session 原子保存/迁移/恢复、ChangeTracker、Undo、本地验证完成规则以及 Eval/发布脚本。
+
+## Eval 与可重复证据
+
+确定性 Eval 使用假模型，但会真实执行 AgentRunner、文件工具、命令、Session、Diff、审批和安全策略，不需要 API key，也不会产生模型费用：
+
+```powershell
+mini-coder-eval --list
+mini-coder-eval --output eval-results\local
+```
+
+只运行指定场景：
+
+```powershell
+mini-coder-eval --scenario failed_then_fix --output eval-results\focused
+```
+
+真实模型模式必须同时显式给出 `--live` 和至少一个 `--scenario`，因此 CI 或误输入不会自动产生模型调用：
+
+```powershell
+mini-coder-eval --live --scenario multifile_interface `
+  --config agent.toml --output eval-results\live
+```
+
+每次运行生成 `eval-report.json`、`summary.md` 和单场景 JSON。失败场景会额外保留脱敏 Session 与事件；确定性失败保留隔离工作区，真实失败默认只保留工作区文件 hash 清单，避免自动复制可能敏感的源码。只有显式使用 `--keep-workspaces` 才会保留真实工作区内容。`eval-results/` 已被 Git 忽略。
+
+当前基线：
+
+| 模式 | 结果 | 关键证据 |
+|---|---:|---|
+| 确定性完整套件 | 10/10 | 修复、跨文件、失败后继续、只读、越界、恢复、拒绝、Undo 冲突、429、长输出 |
+| 真实 Responses `multifile_interface` | 1/1 | `completed_verified`，2 个预期文件，0 个无关修改，4 次模型/9 次工具调用，46.81 秒 |
+
+真实 Eval 的 provider usage 为 29,506 input、1,025 output、30,531 total tokens；只有 provider 实际返回 usage 时才记录。完整脱敏证据见 [`docs/runs/eval-ci-release-run.md`](docs/runs/eval-ci-release-run.md)。
+
+## 两分钟多文件演示
+
+演示夹具比单文件折扣示例更接近小型服务：它包含项目说明、定价、服务、CLI 和测试，初始状态同时存在缺失策略模块与边界失败。每次演示先一键恢复到同一初始状态：
+
+```powershell
+python scripts\reset-demo.py
+cd examples\order_service\workspace
+python -m unittest discover -s tests -v
+cd ..\..\..
+mini-coder --config agent.toml --auto `
+  --workspace examples\order_service\workspace "Read TASK.md and complete it."
+```
+
+任务要求新增 `DiscountPolicy`、修改 pricing/service 调用链、保持公共 API，并运行完整测试；`AGENTS.md` 明确禁止修改测试。生成的 `workspace/` 被 Git 忽略，原始 `fixture/` 不会被 Agent 修改。
 
 ## 安全边界
 
@@ -270,9 +327,20 @@ python -m unittest discover -s tests -v
 
 Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从文件列表隐藏，并拒绝通过文件工具直接读取，避免运行状态或缓存污染模型上下文。
 
+## 设计取舍与已知限制
+
+- `run_command` 是受风险分级、审批、超时和脱敏约束的本地 shell，不是容器或完整操作系统沙箱；不可信仓库应放入虚拟机、容器或低权限账号。
+- 路径策略严格约束专用文件工具，但无法从操作系统层面阻止一个已获批准的任意 shell 命令访问当前账号可见资源。
+- 当前只有 `OpenAICompatibleClient`，支持 Responses 与 Chat Completions function calling；其他厂商可通过 `ModelClient` 扩展，但尚无内置适配器。
+- ChangeTracker 追踪 `write_file`/`edit_file`，不声称可以撤销命令、依赖安装、Git 或网络副作用。
+- 文本修改采用可审计的精确替换，不提供 AST 重构或模糊补丁；单个受追踪文本文件上限为 2 MB。
+- 项目不包含 IDE GUI、多 Agent、向量数据库、通用 RAG、MCP 生态或自动 commit/push/PR；这些不属于当前考核核心闭环。
+- Eval 能证明预先声明场景的行为，不能保证模型在任意仓库中都成功；真实模型结果会受 provider、模型版本和网络状态影响。
+
 ## 下一步
 
-- 建立独立 Eval、跨平台 CI、演示脚本和发布检查。
+- 等待 GitHub Actions 矩阵通过并复核公开仓库展示。
+- 用户确认发布内容后创建 `v0.1.0` 标签；标签不会由 Agent 擅自创建。
 
 完整实现顺序、验收标准和可勾选任务见 [`ROADMAP.md`](ROADMAP.md)。
 

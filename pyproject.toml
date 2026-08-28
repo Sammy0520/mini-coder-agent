@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 mini-coder = "mini_coder.cli:main"
+mini-coder-eval = "mini_coder.evals.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

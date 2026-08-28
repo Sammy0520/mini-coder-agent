@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install editable package
+        run: python -m pip install -e .
+
+      - name: Check installed dependencies
+        run: python -m pip check
+
+      - name: Run offline unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Run deterministic end-to-end evals
+        run: mini-coder-eval --output eval-results/ci
+
+      - name: Build wheel in an isolated PEP 517 environment
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - name: Check tracked files for credentials
+        run: python scripts/check-secrets.py
