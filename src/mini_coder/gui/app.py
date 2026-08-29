@@ -62,6 +62,141 @@ def _friendly_final_text(text: str) -> str:
     return result
 
 
+def _natural_session_reply(session) -> str:
+    active_changes = [item for item in session.changes if item.undo_status == "active"]
+    paths = list(dict.fromkeys(item.path for item in active_changes))
+    if session.status.value.startswith("completed"):
+        paragraphs = ["已经完成了。"]
+        if paths:
+            created = all(item.before_hash is None for item in active_changes)
+            verb = "创建了" if created else "创建或修改了"
+            paragraphs.append(f"我{verb} {_join_chinese(paths)}。")
+        if session.verification_status.value == "passed":
+            paragraphs[-1] = paragraphs[-1][:-1] + "，也运行了项目测试，结果全部通过。"
+        elif session.verification_status.value in {"failed", "stale"}:
+            paragraphs.append("项目检查还没有完全通过，具体情况可以在右侧查看。")
+        elif paths:
+            paragraphs.append("这次修改还没有经过完整的项目检查。")
+        if paths:
+            paragraphs.append("想看具体内容的话，可以点击右侧的文件名查看完整改动。")
+        return "\n\n".join(paragraphs)
+    friendly = _friendly_final_text(session.final_text)
+    if friendly:
+        first = friendly.split("\n", 1)[0].strip().strip("`#*- ")
+        if first:
+            return f"这次任务还没有完全完成。\n\n{first}"
+    return "这次任务还没有完全完成，可以查看右侧过程了解停在哪里。"
+
+
+def _join_chinese(values: list[str]) -> str:
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    return "、".join(values[:-1]) + " 和 " + values[-1]
+
+
+def _friendly_tool_action(name: str) -> str:
+    return {
+        "read_file": "阅读文件",
+        "list_files": "查看文件列表",
+        "search_text": "搜索项目内容",
+        "write_file": "写入文件",
+        "edit_file": "修改文件",
+        "run_command": "运行本地命令",
+    }.get(name, "完成一项项目操作")
+
+
+def _session_execution_history(session) -> list[dict]:
+    history: list[dict] = []
+    if session.workspace_baseline:
+        history.append(
+            {
+                "title": "先了解了一下项目结构",
+                "details": ["看过项目入口、测试和主要文件后再开始处理任务。"],
+                "time": session.created_at,
+                "icon": "⌁",
+            }
+        )
+    changes = {item.tool_execution_id: item for item in session.changes}
+    verifications = {
+        item.tool_execution_id: item for item in session.verification_records
+    }
+    read_group: dict | None = None
+    for execution in session.tool_executions:
+        arguments = execution.arguments or {}
+        if execution.name in {"read_file", "list_files", "search_text"}:
+            target = arguments.get("path") or arguments.get("query") or "项目内容"
+            detail = f"{_friendly_tool_action(execution.name)}：{target}"
+            if read_group is None:
+                read_group = {
+                    "title": "查看和阅读了项目文件",
+                    "details": [detail],
+                    "time": execution.created_at,
+                    "icon": "⌕",
+                    "count": 1,
+                }
+                history.append(read_group)
+            else:
+                read_group["details"].append(detail)
+                read_group["count"] += 1
+                read_group["title"] = (
+                    f"查看和阅读了项目文件（{read_group['count']} 项）"
+                )
+            continue
+        read_group = None
+        if execution.name in {"write_file", "edit_file"}:
+            change = changes.get(execution.execution_id)
+            path = change.path if change is not None else arguments.get("path", "项目文件")
+            if execution.approval_granted is False:
+                title = f"没有改动 {path}"
+                details = ["这次修改没有得到允许，所以文件保持原样。"]
+                icon = "×"
+            elif change is not None:
+                verb = "创建了" if change.before_hash is None else "修改了"
+                title = f"{verb} {path}"
+                details = [
+                    f"这个文件新增了 {change.additions} 行，删除了 {change.deletions} 行。"
+                ]
+                icon = "✓"
+            else:
+                title = f"尝试处理 {path}"
+                details = ["这次文件操作没有成功完成。"]
+                icon = "!"
+        elif execution.name == "run_command":
+            verification = verifications.get(execution.execution_id)
+            if verification is not None:
+                title = (
+                    "运行测试，确认功能可以正常使用"
+                    if verification.passed
+                    else "运行测试后发现还有问题"
+                )
+                details = [
+                    "测试已经通过。" if verification.passed else "测试没有通过，需要继续处理。",
+                    f"运行内容：{verification.command}",
+                ]
+                icon = "✓" if verification.passed else "!"
+            else:
+                title = "运行了一项本地检查"
+                details = [f"运行内容：{arguments.get('command', '本地命令')}"]
+                icon = "✓" if execution.ok else "!"
+        else:
+            title = _friendly_tool_action(execution.name)
+            details = []
+            if arguments.get("path"):
+                details.append(f"处理位置：{arguments['path']}")
+            icon = "✓" if execution.ok is not False else "!"
+        history.append(
+            {
+                "title": title,
+                "details": details,
+                "time": execution.updated_at,
+                "icon": icon,
+            }
+        )
+    return history
+
+
 def _resolve_session(workspace: str, session_id: str):
     root = Path(workspace).expanduser().resolve()
     if not root.is_dir():
@@ -152,7 +287,7 @@ def create_app(controller: RunController | None = None) -> FastAPI:
         conversation = [{"role": "user", "content": session.task}]
         if session.final_text:
             conversation.append(
-                {"role": "assistant", "content": _friendly_final_text(session.final_text)}
+                {"role": "assistant", "content": _natural_session_reply(session)}
             )
         return {
             **_session_summary(session),
@@ -162,6 +297,7 @@ def create_app(controller: RunController | None = None) -> FastAPI:
             "model_calls": session.model_call_count,
             "tool_calls": len(session.tool_executions),
             "run_duration_seconds": session.run_duration_seconds,
+            "execution": _session_execution_history(session),
             "changes": [
                 {
                     "change_id": change.change_id,

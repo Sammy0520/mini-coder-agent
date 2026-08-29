@@ -230,7 +230,13 @@ async function loadSession(sessionId) {
     state.sessionId = data.session_id;
     state.sessionTitle = data.title || "未命名会话";
     state.eventCount = 0;
-    state.executionGroups = [];
+    state.executionGroups = (data.execution || []).map((item) => ({
+      title: item.title,
+      details: item.details || [],
+      time: formatTime(item.time),
+      icon: item.icon || "✓",
+      count: 1,
+    }));
     state.readGroup = null;
     state.changes = new Map();
     (data.changes || []).filter((item) => item.undo_status === "active").forEach((item) => {
@@ -245,7 +251,7 @@ async function loadSession(sessionId) {
     els.runStatus.textContent = labelStatus(data.status);
     setVerificationFromSession(data.verification_status, data.verifications || []);
     renderChanges();
-    renderExecutionGroups("历史会话只展示结果；新的执行过程会在运行时显示。 ");
+    renderExecutionGroups("这个会话没有保存可展示的执行过程。 ");
     els.task.value = "";
     els.task.disabled = true;
     els.task.placeholder = "当前版本暂不支持继续已完成会话，请新建会话开始新任务。";
@@ -381,7 +387,7 @@ function handleEvent(envelope) {
     state.sessionId = payload.session_id || state.sessionId;
     loadSessions();
   } else if (name === "workspace_overview_generated") {
-    addExecution("已了解项目结构", overviewDetail(payload), timestamp, "⌁");
+    addExecution("先了解了一下项目结构", overviewDetail(payload), timestamp, "⌁");
   } else if (name === "tool_call_requested") {
     handleToolRequest(payload, timestamp);
   } else if (name === "approval_required") {
@@ -389,11 +395,11 @@ function handleEvent(envelope) {
   } else if (name === "approval_resolved" || name === "approval_expired") {
     hideApproval(payload.approved, name === "approval_expired");
   } else if (name === "change_preview") {
-    rememberChangePreview(payload);
+    rememberChangePreview(payload, timestamp);
   } else if (name === "change_applied") {
     rememberAppliedChange(payload);
   } else if (name === "verification_completed") {
-    const title = payload.passed ? "本地检查已通过" : "本地检查未通过";
+    const title = payload.passed ? "运行测试，确认功能可以正常使用" : "运行测试后发现还有问题";
     addExecution(title, verificationDetail(payload), timestamp, payload.passed ? "✓" : "!");
     setVerification(payload.passed ? "passed" : "failed", payload.passed ? "已通过" : "未通过", friendlyVerification(payload));
   } else if (name === "verification_invalidated") {
@@ -418,22 +424,23 @@ function handleToolRequest(payload, timestamp) {
     const detail = args.path || args.query || friendlyToolName(tool);
     if (state.readGroup) {
       state.readGroup.count += 1;
-      state.readGroup.title = `查看项目文件（${state.readGroup.count} 项）`;
+      state.readGroup.title = `查看和阅读了项目文件（${state.readGroup.count} 项）`;
       state.readGroup.details.push(`${friendlyToolName(tool)}：${detail}`);
       renderExecutionGroups();
     } else {
-      state.readGroup = addExecution("查看项目文件", `${friendlyToolName(tool)}：${detail}`, timestamp, "⌕", true);
+      state.readGroup = addExecution("查看和阅读了项目文件", `${friendlyToolName(tool)}：${detail}`, timestamp, "⌕", true);
     }
     return;
   }
   state.readGroup = null;
   if (tool === "write_file" || tool === "edit_file") {
-    addExecution(`准备修改 ${args.path || "项目文件"}`, technicalToolDetail(tool, args), timestamp, "Δ");
+    return;
   } else if (tool === "run_command") {
-    addExecution("运行项目检查", args.command || "执行本地命令", timestamp, "▶");
-    setVerification("running", "验证中", "正在运行项目内的检查命令…");
+    const verifying = args.purpose === "verify";
+    addExecution(verifying ? "运行测试，检查修改是否正确" : "运行一项本地操作", args.command || "执行本地命令", timestamp, "▶");
+    if (verifying) setVerification("running", "验证中", "正在运行项目测试…");
   } else {
-    addExecution(`调用工具：${friendlyToolName(tool)}`, technicalToolDetail(tool, args), timestamp, "↳");
+    addExecution(friendlyToolName(tool), technicalToolDetail(tool, args), timestamp, "↳");
   }
 }
 
@@ -525,7 +532,7 @@ function addMessage(role, content) {
 function finishRun(payload) {
   const completed = payload.result_status === "completed";
   markProgressDone(completed ? "任务已完成" : "任务已停止");
-  addMessage("assistant", friendlyFinalText(payload.final_text || (completed ? "任务已经完成。" : "任务没有完成。")));
+  addMessage("assistant", conversationalFinalText(payload.final_text, completed));
   els.conversationEyebrow.textContent = completed ? "会话已完成" : "会话已停止";
   els.runStatus.textContent = completed ? "已完成" : labelStatus(payload.result_status);
   els.task.disabled = true;
@@ -597,9 +604,11 @@ async function decideApproval(approved) {
   }
 }
 
-function rememberChangePreview(payload) {
+function rememberChangePreview(payload, timestamp) {
   const key = payload.tool_execution_id || `preview:${payload.path}`;
   state.changes.set(key, {...payload, key, previewOnly: true});
+  const action = payload.before_hash == null ? "准备创建" : "准备修改";
+  addExecution(`${action} ${payload.path || "项目文件"}`, `预计新增 ${Number(payload.additions || 0)} 行，删除 ${Number(payload.deletions || 0)} 行。`, timestamp, "Δ");
   renderChanges();
 }
 
@@ -859,6 +868,45 @@ function friendlyFinalText(text) {
     if (result.includes(marker)) result = result.split(marker, 1)[0].trim();
   }
   return result || "任务已经结束。 ";
+}
+
+function conversationalFinalText(raw, completed) {
+  if (!completed) {
+    const friendly = friendlyFinalText(raw || "任务没有完成。 ");
+    const firstLine = friendly.split("\n", 1)[0].replace(/[`#*_]/g, "").trim();
+    return `这次任务还没有完全完成。\n\n${firstLine}`;
+  }
+  const changes = [...state.changes.values()].filter((item) => !item.previewOnly);
+  const paths = [...new Set(changes.map((item) => item.path).filter(Boolean))];
+  if (paths.length) {
+    const created = changes.every((item) => item.before_hash == null);
+    const verb = created ? "创建了" : "创建或修改了";
+    const paragraphs = ["已经完成了。", `我${verb} ${joinChinese(paths)}。`];
+    if (els.verificationStatus.textContent === "已通过") {
+      paragraphs[1] = `${paragraphs[1].slice(0, -1)}，也运行了项目测试，结果全部通过。`;
+    } else if (els.verificationStatus.textContent === "未通过") {
+      paragraphs.push("项目测试还没有通过，具体情况可以在右侧查看。 ");
+    } else {
+      paragraphs.push("这次修改还没有经过完整的项目测试。 ");
+    }
+    paragraphs.push("想看具体内容的话，可以点击右侧的文件名查看完整改动。 ");
+    return paragraphs.join("\n\n");
+  }
+  return cleanModelReply(raw) || "已经完成了。 ";
+}
+
+function cleanModelReply(text) {
+  let result = friendlyFinalText(text || "");
+  result = result.replace(/```[\s\S]*?```/g, "");
+  result = result.replace(/`([^`]+)`/g, "$1");
+  result = result.replace(/^[-*]\s+/gm, "");
+  result = result.replace(/\n{3,}/g, "\n\n").trim();
+  return result;
+}
+
+function joinChinese(values) {
+  if (values.length <= 1) return values[0] || "";
+  return `${values.slice(0, -1).join("、")} 和 ${values[values.length - 1]}`;
 }
 
 function friendlyError(message) {

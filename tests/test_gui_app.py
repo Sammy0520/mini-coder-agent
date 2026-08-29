@@ -16,7 +16,13 @@ from mini_coder.agent import AgentRunResult
 from mini_coder.changes import ChangeTracker
 from mini_coder.gui.app import create_app
 from mini_coder.gui.controller import RunController
-from mini_coder.session import AgentSession, SessionStore
+from mini_coder.session import (
+    AgentSession,
+    SessionStatus,
+    SessionStore,
+    ToolExecutionRecord,
+    ToolExecutionStatus,
+)
 
 
 class HttpFakeRunner:
@@ -165,10 +171,31 @@ class GuiHttpTests(unittest.TestCase):
                 title="Friendly greeting",
                 workspace=workspace,
                 model={"model": "fake"},
+                workspace_baseline={"entry_points": ["greeting.py"]},
             )
+            execution = ToolExecutionRecord.create(
+                execution_id="execution-1",
+                tool_call_id="call-1",
+                step=1,
+                name="edit_file",
+                arguments={"path": "greeting.py"},
+                raw_arguments='{"path":"greeting.py"}',
+                risk="write",
+            )
+            execution.set_status(ToolExecutionStatus.APPROVED)
+            execution.set_status(ToolExecutionStatus.RUNNING)
+            execution.set_status(ToolExecutionStatus.COMPLETED)
+            execution.approval_granted = True
+            execution.ok = True
+            execution.change_id = change.change_id
+            session.tool_executions.append(execution)
             session.changes.append(change)
             session.refresh_verification_status()
-            session.final_text = "Updated the greeting.\n\nOutcome: internal diagnostics"
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(
+                SessionStatus.COMPLETED_UNVERIFIED,
+                final_text="Updated the greeting.\n\nOutcome: internal diagnostics",
+            )
             SessionStore.for_workspace(workspace).save(session)
 
             base = f"http://127.0.0.1:{self.port}"
@@ -189,7 +216,12 @@ class GuiHttpTests(unittest.TestCase):
 
             self.assertEqual(listing["sessions"][0]["title"], "Friendly greeting")
             self.assertEqual(detail["conversation"][0]["content"], "Update the greeting")
-            self.assertEqual(detail["conversation"][1]["content"], "Updated the greeting.")
+            reply = detail["conversation"][1]["content"]
+            self.assertIn("已经完成了", reply)
+            self.assertIn("greeting.py", reply)
+            self.assertNotIn("Outcome", reply)
+            self.assertEqual(detail["execution"][0]["title"], "先了解了一下项目结构")
+            self.assertEqual(detail["execution"][1]["title"], "修改了 greeting.py")
             self.assertEqual(detail["changes"][0]["change_id"], change.change_id)
             self.assertEqual(code["before"].splitlines(), ['message = "hello"'])
             self.assertEqual(code["after"].splitlines(), ['message = "hello world"'])

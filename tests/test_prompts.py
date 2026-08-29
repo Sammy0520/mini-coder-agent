@@ -17,6 +17,9 @@ class PromptTests(unittest.TestCase):
         self.assertIn("do not assume Bash", prompt)
         self.assertIn("Do not assume the workspace is a Git repository", prompt)
         self.assertIn("python -m unittest", prompt)
+        self.assertIn("same language as the user", prompt)
+        self.assertIn("not like a technical report", prompt)
+        self.assertIn("Do not dump source code", prompt)
         self.assertIn(platform.system(), prompt)
         if os.name == "nt":
             self.assertIn("cmd.exe semantics", prompt)
