@@ -50,12 +50,17 @@ from .verification import VerificationTracker
 
 EventCallback = Callable[[str, dict[str, Any]], None]
 ApprovalCallback = Callable[[Tool, dict[str, Any]], bool]
+CancellationCallback = Callable[[], bool]
 
 
 class _RunBudgetExceeded(Exception):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class _RunCancelled(Exception):
+    pass
 
 
 @dataclass(slots=True)
@@ -78,6 +83,7 @@ class AgentRunner:
         system_prompt: str | None = None,
         approval_callback: ApprovalCallback | None = None,
         event_callback: EventCallback | None = None,
+        cancellation_callback: CancellationCallback | None = None,
         session_store: SessionStore | None = None,
         session_title: str | None = None,
     ) -> None:
@@ -87,6 +93,7 @@ class AgentRunner:
         self.system_prompt = build_system_prompt() if system_prompt is None else system_prompt
         self.approval_callback = approval_callback
         self.event_callback = event_callback
+        self.cancellation_callback = cancellation_callback
         self.session_store = session_store
         self.session_title = session_title
         self.context = ContextManager(
@@ -109,6 +116,7 @@ class AgentRunner:
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
             max_output_chars=config.max_tool_output_chars,
+            cancellation_requested=cancellation_callback,
         )
 
     def run(
@@ -185,6 +193,7 @@ class AgentRunner:
                 SessionStatus.COMPLETED_UNVERIFIED,
                 SessionStatus.FAILED,
                 SessionStatus.DENIED,
+                SessionStatus.INTERRUPTED,
             }
             if self._continuing_turn:
                 session.start_follow_up(task)
@@ -261,6 +270,7 @@ class AgentRunner:
         )
 
         try:
+            self._check_cancelled()
             if session is not None:
                 budget_reason = self._budget_reason(session, before_model=False)
                 if budget_reason is not None:
@@ -299,6 +309,7 @@ class AgentRunner:
             first_step = (session.current_step + 1) if session is not None else 1
             for step in range(first_step, self.config.max_steps + 1):
                 self._current_step = step
+                self._check_cancelled()
                 if session is not None:
                     budget_reason = self._budget_reason(session, before_model=True)
                     if budget_reason is not None:
@@ -363,6 +374,8 @@ class AgentRunner:
                         stop_reason="model_error",
                         last_error=safe_error,
                     )
+
+                self._check_cancelled()
 
                 response = self._redact_model_response(response)
                 self._accumulate_usage(usage, response)
@@ -465,6 +478,7 @@ class AgentRunner:
                     repeated_flags,
                     strict=True,
                 ):
+                    self._check_cancelled()
                     if repeated:
                         result = ToolResult(
                             False,
@@ -483,6 +497,7 @@ class AgentRunner:
                         stop_for_repetition = True
                     else:
                         self._process_tool_call(call, record, messages, usage, session)
+                        self._check_cancelled()
                     if session is not None:
                         budget_reason = self._budget_reason(session, before_model=False)
                         if budget_reason is not None:
@@ -516,6 +531,17 @@ class AgentRunner:
                 session_status=SessionStatus.INTERRUPTED,
                 stop_reason="max_steps",
                 last_error=self._budget_message("max_steps"),
+            )
+        except _RunCancelled:
+            return self._finish(
+                "cancelled",
+                "任务已按你的要求停止。当前进度已经保存，可以稍后继续。",
+                self._current_step,
+                messages,
+                usage,
+                session,
+                session_status=SessionStatus.INTERRUPTED,
+                stop_reason="user_cancelled",
             )
         except KeyboardInterrupt:
             if session is not None:
@@ -558,6 +584,7 @@ class AgentRunner:
                 SessionStatus.COMPLETED_UNVERIFIED,
                 SessionStatus.FAILED,
                 SessionStatus.DENIED,
+                SessionStatus.INTERRUPTED,
             }
         ):
             raise SessionError("an unfinished session cannot be given a different task")
@@ -668,6 +695,7 @@ class AgentRunner:
             json.dumps(tool_definitions, ensure_ascii=False, default=str)
         )
         while True:
+            self._check_cancelled()
             if session is not None:
                 budget_reason = self._budget_reason(session, before_model=True)
                 if budget_reason is not None:
@@ -693,6 +721,7 @@ class AgentRunner:
             try:
                 response = self.model.complete(prepared, tool_definitions)
             except ModelError as exc:
+                self._check_cancelled()
                 if session is not None:
                     session.usage_missing_count += 1
                     session.model_call_records.append(
@@ -742,8 +771,9 @@ class AgentRunner:
                         "request_duration_seconds": time.monotonic() - request_started,
                     },
                 )
-                time.sleep(delay)
+                self._wait_for_retry(delay)
                 continue
+            self._check_cancelled()
             self._last_model_duration = time.monotonic() - request_started
             if session is not None:
                 if not isinstance(response.usage.get("total_tokens"), int):
@@ -1070,6 +1100,7 @@ class AgentRunner:
             approval_automatic = False
             if session is not None:
                 session.set_status(SessionStatus.RUNNING)
+            self._check_cancelled()
 
         if record is not None:
             record.approval_granted = approved
@@ -1126,6 +1157,7 @@ class AgentRunner:
 
         if prepared_change is not None:
             try:
+                self._check_cancelled()
                 change = self.change_tracker.apply(prepared_change)
                 if session is not None:
                     session.changes.append(change)
@@ -1196,6 +1228,22 @@ class AgentRunner:
             status=ToolExecutionStatus.COMPLETED if result.ok else ToolExecutionStatus.FAILED,
         )
         return result
+
+    def _check_cancelled(self) -> None:
+        if self.cancellation_callback is not None and self.cancellation_callback():
+            raise _RunCancelled
+
+    def _wait_for_retry(self, delay: float) -> None:
+        if self.cancellation_callback is None:
+            time.sleep(delay)
+            return
+        deadline = time.monotonic() + max(0.0, delay)
+        while True:
+            self._check_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.1, remaining))
 
     def _record_tool_result(
         self,

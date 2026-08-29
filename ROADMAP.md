@@ -707,8 +707,8 @@ run_cancelled
 - [x] 增加只监听 `127.0.0.1` 的 FastAPI 服务和 `mini-coder-gui` 启动入口。
 - [x] 增加运行创建、状态查询、SSE 事件流和审批 API。
 - [x] 将 FastAPI/Uvicorn 放入 `gui` 可选依赖，不强制普通 CLI 用户安装。
-- [ ] 增加协作式停止；不能把“停止等待审批”误报成“已终止模型或命令”。
-- [ ] 增加 Session 列表、恢复、Changed Files 查询和安全 Undo API。
+- [x] 增加协作式停止；审批等待、步骤间和本地命令均接入停止信号，模型请求在返回或超时后停止。
+- [x] 增加 Session 列表、恢复、Changed Files 查询和安全 Undo API。
 
 ### 13.3 展示页面
 
@@ -716,7 +716,7 @@ run_cancelled
 - [x] 增加实时 Agent 时间线、运行状态和 Session 摘要。
 - [x] 增加 Diff、增删统计和页面审批卡片。
 - [x] 增加验证状态和最终摘要面板。
-- [ ] 增加 Changed Files 详情、Session Resume 和 Undo 操作。
+- [x] 增加 Changed Files 详情、Session Resume 和 Undo 操作。
 - [ ] 为窄屏和视频录制分辨率做最终布局检查。
 
 ### 13.4 验证与视频
@@ -730,8 +730,8 @@ run_cancelled
 ### 验收标准
 
 - [ ] 视频中的每个状态都来自真实 Agent/Session 事件，不使用预录事件或假成功结果。
-- [ ] 页面可以完成任务启动、审批、验证、恢复和 Undo 的展示闭环。
-- [ ] CLI、Eval 与 GUI 共享内核，完整离线测试保持通过。
+- [x] 页面可以完成任务启动、审批、验证、恢复和 Undo 的展示闭环。
+- [x] CLI、Eval 与 GUI 共享内核，完整离线测试保持通过。
 - [ ] API Key 不进入页面、SSE、Session 或日志。
 
 ---
@@ -834,7 +834,7 @@ feat: add local GUI run and approval console
 - [x] 新一轮仅携带结构化工作记忆、上一轮结论和最新请求，不重放旧工具日志。
 - [x] 单轮后续请求移除已经过时的 provider reasoning replay，并压缩较早的超长工具输出。
 - [x] 上下文同时使用字符上限和本地 Token 估算控制。
-- [x] GUI 执行详情显示累计模型调用与 provider Token 摘要。
+- [x] GUI 执行详情显示当前轮次、简洁操作次数和会话记忆提示；Token 仅留在 Session/评测记录中，不在页面展示。
 - [ ] 使用真实 provider 对同一组单轮与两轮任务做优化前后对比。
 
 ## 19. 当前下一步

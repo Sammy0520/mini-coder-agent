@@ -37,7 +37,7 @@
 - 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、退出码、耗时和输出摘要；最终状态由本地事实决定。
 - 项目理解：启动时注入有界工作区概览，识别清单、入口、测试、验证命令、项目说明和 Git 起始状态，并跳过依赖、缓存与构建目录。
 - 工具体验：文件列表和搜索支持分页，读取支持明确的继续行号，搜索返回过滤原因；失败结果包含稳定错误码和下一步建议。
-- 本地 GUI：浏览器页面与 CLI 复用同一个 `AgentRunner`，支持全局会话列表、同会话连续对话、线程安全 RunController、SSE 事件流、页面审批、完整文件查看、运行时间线、Diff、验证结果和 Token 用量摘要。
+- 本地 GUI：浏览器页面与 CLI 复用同一个 `AgentRunner`，支持全局会话列表、同会话连续对话、线程安全 RunController、SSE 事件流、页面审批、协作式停止、安全 Undo、完整文件查看、运行时间线、Diff、验证结果和会话记忆提示。
 - 错误恢复：认证、权限、限流、超时、网络、服务端、请求和响应解析错误分类；只对可恢复错误做带抖动和硬上限的有限重试。
 - 权限模式：默认 `safe`；命令按 `read_only`、`workspace_write`、`external_effect`、`dangerous`、`unknown` 分级，`--auto` 也不会自动批准后三类。
 
@@ -160,7 +160,7 @@ mini-coder-gui
 
 服务默认只监听 `http://127.0.0.1:8765`，并自动打开浏览器；服务器环境可以使用 `mini-coder-gui --no-browser`。页面提交的任务仍由现有 `AgentRunner`、工具、Session、Diff 和验证逻辑真实执行。默认使用 `safe` 审批模式，写入或有副作用的命令会在页面等待批准；API key 继续从环境变量或本地 `auth.json` 加载，不会显示在页面。
 
-当前 GUI 已包含：新建会话时选择工作文件夹、跨文件夹的全局会话列表、同一会话连续追加任务、后台真实运行、结构化事件时间线、SSE 实时推送、Diff、完整文件查看、页面审批、验证状态、Token 摘要和自然语言结果。页面仍不是完整 IDE，主动停止运行和 Undo 继续由后续版本补齐。
+当前 GUI 已包含：新建会话时选择工作文件夹、跨文件夹的全局会话列表、同一会话连续追加任务、后台真实运行、结构化事件时间线、SSE 实时推送、Diff、完整文件查看、页面审批、协作式停止、安全 Undo、验证状态、轮次/会话记忆提示和自然语言结果。页面不展示 Token 用量，也不把自己包装成完整 IDE。
 
 可通过 `--log agent-events.jsonl` 保存可选的本地 JSONL 事件日志。每项事件包含 schema 版本、UTC 时间、run/session ID、step 和运行时长。日志写入失败只产生可见警告，不会中断主任务。事件内容会经过统一凭据脱敏，但仍可能含有代码或命令输出，因此默认关闭，也不应提交。
 
@@ -227,7 +227,7 @@ mini-coder --config agent.toml --resume "D:\path\to\workspace\.mini-coder\sessio
 mini-coder --config agent.toml --workspace "D:\path\to\workspace" --resume <session-id>
 ```
 
-中断中的 Session 使用上述命令恢复，不能同时更换任务。已经结束的 Session 可以在 GUI 里直接继续输入，也可以在 CLI 中把新任务和 `--resume` 一起提供，从而开始同一会话的下一轮；不同 Session 之间不会共享工作记忆。当前配置的 provider、model 和 wire API 必须与保存值一致，API Key 仍从当前环境变量或本地 `auth.json` 重新加载，不会从 Session 恢复。
+中断中的 Session 可以直接恢复原任务，也可以在 GUI 或 CLI 中给出新的继续说明，作为同一会话的下一轮接着处理。已经结束的 Session 同样可以继续输入；不同 Session 之间不会共享工作记忆。当前配置的 provider、model 和 wire API 必须与保存值一致，API Key 仍从当前环境变量或本地 `auth.json` 重新加载，不会从 Session 恢复。
 
 ```powershell
 mini-coder --config agent.toml --resume "<session-file>" "继续在刚才的实现上增加导出功能并验证"
@@ -378,7 +378,7 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 - 当前只有 `OpenAICompatibleClient`，支持 Responses 与 Chat Completions function calling；其他厂商可通过 `ModelClient` 扩展，但尚无内置适配器。
 - ChangeTracker 追踪 `write_file`/`edit_file`，不声称可以撤销命令、依赖安装、Git 或网络副作用。
 - 文本修改采用可审计的精确替换，不提供 AST 重构或模糊补丁；单个受追踪文本文件上限为 2 MB。
-- 当前 GUI 是复用真实 Agent 内核的本地展示控制台，不是完整代码编辑器或 IDE；尚未在页面提供主动停止运行和 Undo。
+- 当前 GUI 是复用真实 Agent 内核的本地展示控制台，不是完整代码编辑器或 IDE；停止模型请求只能在该次请求返回或超时后生效，但审批等待、本地命令和步骤间停止会立即响应。
 - 项目不包含多 Agent、向量数据库、通用 RAG、MCP 生态或自动 commit/push/PR；这些不属于当前考核核心闭环。
 - Eval 能证明预先声明场景的行为，不能保证模型在任意仓库中都成功；真实模型结果会受 provider、模型版本和网络状态影响。
 

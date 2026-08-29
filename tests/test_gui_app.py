@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from mini_coder.session import (
     ToolExecutionRecord,
     ToolExecutionStatus,
 )
+from mini_coder.verification import VerificationRecord
 
 
 class HttpFakeRunner:
@@ -136,6 +138,10 @@ class GuiHttpTests(unittest.TestCase):
 
             self.assertEqual(health, {"status": "ok"})
             self.assertIn("Mini Coder Agent", index)
+            self.assertIn('id="stopRunButton"', index)
+            self.assertIn('id="undoButton"', index)
+            self.assertIn('id="turnSummary"', index)
+            self.assertNotIn('id="usageSummary"', index)
             self.assertEqual(Path(bootstrap["default_workspace"]), Path.cwd().resolve())
             self.assertEqual(
                 Path(bootstrap["default_config_path"]),
@@ -195,10 +201,24 @@ class GuiHttpTests(unittest.TestCase):
             execution.change_id = change.change_id
             session.tool_executions.append(execution)
             session.changes.append(change)
+            session.verification_records.append(
+                VerificationRecord.create(
+                    tool_execution_id="verify-1",
+                    command="python -m unittest",
+                    cwd=".",
+                    exit_code=0,
+                    duration_seconds=0.1,
+                    stdout_summary="OK",
+                    stderr_summary="",
+                    change_revision=session.change_revision,
+                    passed=True,
+                    timed_out=False,
+                )
+            )
             session.refresh_verification_status()
             session.set_status(SessionStatus.RUNNING)
             session.set_status(
-                SessionStatus.COMPLETED_UNVERIFIED,
+                SessionStatus.COMPLETED_VERIFIED,
                 final_text="Updated the greeting.\n\nOutcome: internal diagnostics",
             )
             SessionStore.for_workspace(workspace).save(session)
@@ -252,6 +272,69 @@ class GuiHttpTests(unittest.TestCase):
             self.assertEqual(code["after"].splitlines(), ['message = "hello world"'])
             self.assertIn('+message = "hello world"', code["diff"])
             self.assertTrue(code["matches_agent_version"])
+
+            undo_request = urllib.request.Request(
+                f"{base}/api/sessions/{session.session_id}/undo-last",
+                data=b"",
+                method="POST",
+            )
+            with urllib.request.urlopen(undo_request, timeout=3) as response:
+                undo = json.load(response)
+            with urllib.request.urlopen(
+                f"{base}/api/sessions/{session.session_id}", timeout=3
+            ) as response:
+                after_undo = json.load(response)
+
+            self.assertEqual(undo["path"], "greeting.py")
+            self.assertEqual(target.read_text(encoding="utf-8"), 'message = "hello"\n')
+            self.assertEqual(after_undo["status"], "interrupted")
+            self.assertEqual(after_undo["verification_status"], "stale")
+            self.assertEqual(after_undo["changes"][0]["undo_status"], "undone")
+
+    def test_undo_refuses_to_overwrite_a_user_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / "notes.txt"
+            target.write_text("before\n", encoding="utf-8")
+            tracker = ChangeTracker(workspace)
+            change = tracker.apply(
+                tracker.prepare(
+                    "edit_file",
+                    {
+                        "path": "notes.txt",
+                        "old_text": "before",
+                        "new_text": "agent version",
+                    },
+                    "execution-conflict",
+                )
+            )
+            session = AgentSession.create(
+                task="Update notes",
+                workspace=workspace,
+                model={"model": "fake"},
+            )
+            session.changes.append(change)
+            session.refresh_verification_status()
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(SessionStatus.COMPLETED_UNVERIFIED, final_text="done")
+            SessionStore.for_workspace(workspace).save(session)
+
+            base = f"http://127.0.0.1:{self.port}"
+            query = urllib.parse.urlencode({"workspace": directory})
+            with urllib.request.urlopen(f"{base}/api/sessions?{query}", timeout=3):
+                pass
+            target.write_text("user version\n", encoding="utf-8")
+            request = urllib.request.Request(
+                f"{base}/api/sessions/{session.session_id}/undo-last",
+                data=b"",
+                method="POST",
+            )
+
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=3)
+
+            self.assertEqual(caught.exception.code, 409)
+            self.assertEqual(target.read_text(encoding="utf-8"), "user version\n")
 
 
 if __name__ == "__main__":

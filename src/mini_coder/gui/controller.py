@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 import uuid
 from collections.abc import Callable
@@ -47,7 +48,12 @@ class _SessionBoundRunner:
 
 
 RunnerFactory = Callable[
-    [RunRequest, Callable[[str, dict[str, Any]], None], Callable[[Tool, dict[str, Any]], bool]],
+    [
+        RunRequest,
+        Callable[[str, dict[str, Any]], None],
+        Callable[[Tool, dict[str, Any]], bool],
+        Callable[[], bool],
+    ],
     RunnerLike,
 ]
 
@@ -84,6 +90,11 @@ class RunRecord:
     pending_approval: PendingApproval | None = None
     result: AgentRunResult | None = None
     error: str | None = None
+    session_id: str | None = None
+    cancellation_requested: threading.Event = field(
+        default_factory=threading.Event,
+        repr=False,
+    )
 
 
 class RunController:
@@ -133,10 +144,14 @@ class RunController:
             config_path=str(config_path) if config_path is not None else None,
             auto=request.auto,
         )
-        record = RunRecord(run_id=uuid.uuid4().hex, request=normalized)
+        record = RunRecord(
+            run_id=uuid.uuid4().hex,
+            request=normalized,
+            session_id=session_id,
+        )
         with self._condition:
             if session_id and any(
-                item.request.session_id == session_id
+                item.session_id == session_id
                 and item.status not in self.TERMINAL_STATUSES
                 for item in self._runs.values()
             ):
@@ -205,10 +220,38 @@ class RunController:
             self._condition.notify_all()
             return self._snapshot_locked(record)
 
+    def cancel(self, run_id: str) -> dict[str, Any]:
+        with self._condition:
+            record = self._require_run_locked(run_id)
+            if record.status in self.TERMINAL_STATUSES:
+                raise ValueError("run has already finished")
+            if not record.cancellation_requested.is_set():
+                record.cancellation_requested.set()
+                record.status = "cancelling"
+                record.updated_at = _utc_now()
+                if record.pending_approval is not None:
+                    record.pending_approval.resolved.set()
+                self._append_event_locked(
+                    record,
+                    "controller_cancel_requested",
+                    {"session_id": record.session_id},
+                )
+            return self._snapshot_locked(record)
+
+    def is_session_active(self, session_id: str) -> bool:
+        with self._condition:
+            return any(
+                record.session_id == session_id
+                and record.status not in self.TERMINAL_STATUSES
+                for record in self._runs.values()
+            )
+
     def _run_worker(self, run_id: str) -> None:
         with self._condition:
             record = self._require_run_locked(run_id)
-            record.status = "running"
+            record.status = (
+                "cancelling" if record.cancellation_requested.is_set() else "running"
+            )
             record.updated_at = _utc_now()
             self._condition.notify_all()
 
@@ -217,6 +260,9 @@ class RunController:
             safe_payload = safe_value if isinstance(safe_value, dict) else {}
             with self._condition:
                 active = self._require_run_locked(run_id)
+                emitted_session_id = safe_payload.get("session_id")
+                if isinstance(emitted_session_id, str) and emitted_session_id:
+                    active.session_id = emitted_session_id
                 self._append_event_locked(active, name, safe_payload)
 
         def approval_callback(tool: Tool, arguments: dict[str, Any]) -> bool:
@@ -234,6 +280,8 @@ class RunController:
             )
             with self._condition:
                 active = self._require_run_locked(run_id)
+                if active.cancellation_requested.is_set():
+                    return False
                 active.pending_approval = pending
                 active.status = "waiting_for_approval"
                 active.updated_at = _utc_now()
@@ -248,7 +296,8 @@ class RunController:
                 active = self._require_run_locked(run_id)
                 if active.pending_approval is pending:
                     active.pending_approval = None
-                active.status = "running"
+                cancelled = active.cancellation_requested.is_set()
+                active.status = "cancelling" if cancelled else "running"
                 active.updated_at = _utc_now()
                 self._append_event_locked(
                     active,
@@ -257,18 +306,45 @@ class RunController:
                         "approval_id": pending.approval_id,
                         "tool": pending.tool,
                         "approved": approved,
+                        "cancelled": cancelled,
                     },
                 )
             return approved
 
+        def cancellation_callback() -> bool:
+            return self._runs[run_id].cancellation_requested.is_set()
+
         try:
             record = self._runs[run_id]
-            runner = self._runner_factory(record.request, event_callback, approval_callback)
+            factory_parameters = inspect.signature(self._runner_factory).parameters.values()
+            supports_cancellation = any(
+                item.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+                for item in factory_parameters
+            ) or len(factory_parameters) >= 4
+            if supports_cancellation:
+                runner = self._runner_factory(
+                    record.request,
+                    event_callback,
+                    approval_callback,
+                    cancellation_callback,
+                )
+            else:
+                runner = self._runner_factory(  # type: ignore[call-arg]
+                    record.request,
+                    event_callback,
+                    approval_callback,
+                )
             result = runner.run(record.request.task)
             with self._condition:
                 active = self._require_run_locked(run_id)
                 active.result = result
-                active.status = "completed" if result.status == "completed" else "failed"
+                active.session_id = result.session_id or active.session_id
+                if result.status == "completed":
+                    active.status = "completed"
+                elif result.status == "cancelled":
+                    active.status = "cancelled"
+                else:
+                    active.status = "failed"
                 active.updated_at = _utc_now()
                 self._append_event_locked(
                     active,
@@ -328,7 +404,8 @@ class RunController:
             "task": record.request.task,
             "title": record.request.title,
             "workspace": record.request.workspace,
-            "session_id": record.request.session_id,
+            "session_id": record.session_id,
+            "can_cancel": record.status not in self.TERMINAL_STATUSES,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
             "latest_sequence": record.next_sequence - 1,
@@ -372,6 +449,7 @@ class RunController:
         request: RunRequest,
         event_callback: Callable[[str, dict[str, Any]], None],
         approval_callback: Callable[[Tool, dict[str, Any]], bool],
+        cancellation_callback: Callable[[], bool],
     ) -> RunnerLike:
         policy = ApprovalPolicy.AUTO if request.auto else ApprovalPolicy.SAFE
         config = AgentConfig.from_env(
@@ -395,6 +473,7 @@ class RunController:
             config=config,
             approval_callback=approval_callback,
             event_callback=event_callback,
+            cancellation_callback=cancellation_callback,
             session_store=SessionStore.for_workspace(config.workspace),
             session_title=request.title,
         )

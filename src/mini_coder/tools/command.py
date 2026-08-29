@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,9 @@ class RunCommandTool(Tool):
         assessment = assess_command(command)
         started_at = time.monotonic()
         process: subprocess.Popen[str] | None = None
+        collector: threading.Thread | None = None
+        collected: dict[str, tuple[str | bytes | None, str | bytes | None]] = {}
+        collection_error: list[BaseException] = []
         creationflags = (
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         )
@@ -73,13 +77,49 @@ class RunCommandTool(Tool):
                 start_new_session=os.name != "nt",
                 creationflags=creationflags,
             )
-            stdout, stderr = process.communicate(timeout=timeout)
+            def collect_output() -> None:
+                try:
+                    collected["streams"] = process.communicate()
+                except BaseException as exc:  # propagated on the calling thread below
+                    collection_error.append(exc)
+
+            collector = threading.Thread(
+                target=collect_output,
+                name=f"mini-coder-command-{process.pid}",
+                daemon=True,
+            )
+            collector.start()
+            deadline = started_at + timeout
+            while collector.is_alive():
+                if context.is_cancelled():
+                    duration_seconds = time.monotonic() - started_at
+                    terminated = _terminate_process_tree(process)
+                    return _stopped_result(
+                        process,
+                        "",
+                        "",
+                        encoding=encoding,
+                        context=context,
+                        assessment=assessment,
+                        duration_seconds=duration_seconds,
+                        terminated=terminated,
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                collector.join(timeout=min(0.1, remaining))
+            if collection_error:
+                raise collection_error[0]
+            stdout, stderr = collected.get("streams", ("", ""))
         except subprocess.TimeoutExpired:
             duration_seconds = time.monotonic() - started_at
             if process is None:
                 raise
             terminated = _terminate_process_tree(process)
-            stdout, stderr = _collect_after_termination(process)
+            _close_process_streams(process)
+            if collector is not None:
+                collector.join(timeout=0.5)
+            stdout, stderr = collected.get("streams", ("", ""))
             stdout_text, stdout_truncated = _truncate_stream(
                 redact_sensitive_text(_as_text(stdout, encoding)),
                 context.max_output_chars // 2,
@@ -108,7 +148,7 @@ class RunCommandTool(Tool):
         except KeyboardInterrupt:
             if process is not None:
                 _terminate_process_tree(process)
-                _collect_after_termination(process)
+                _close_process_streams(process)
             raise
 
         per_stream = max(500, context.max_output_chars // 2)
@@ -175,6 +215,46 @@ def _as_text(value: str | bytes | None, encoding: str) -> str:
     return value
 
 
+def _stopped_result(
+    process: subprocess.Popen[str],
+    stdout: str | bytes | None,
+    stderr: str | bytes | None,
+    *,
+    encoding: str,
+    context: ToolContext,
+    assessment: Any,
+    duration_seconds: float,
+    terminated: bool,
+) -> ToolResult:
+    per_stream = max(500, context.max_output_chars // 2)
+    stdout_text, stdout_truncated = _truncate_stream(
+        redact_sensitive_text(_as_text(stdout, encoding)),
+        per_stream,
+    )
+    stderr_text, stderr_truncated = _truncate_stream(
+        redact_sensitive_text(_as_text(stderr, encoding)),
+        per_stream,
+    )
+    return ToolResult(
+        False,
+        "Command stopped by user",
+        {
+            "cancelled": True,
+            "exit_code": process.returncode,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "timed_out": False,
+            "duration_seconds": duration_seconds,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "output_truncated": stdout_truncated or stderr_truncated,
+            "process_tree_terminated": terminated,
+            "command_risk": assessment.level.value,
+            "expected_side_effects": assessment.expected_side_effects,
+        },
+    )
+
+
 def _truncate_stream(text: str, limit: int) -> tuple[str, bool]:
     return truncate_text(text, limit), len(text) > limit
 
@@ -190,7 +270,7 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
-                timeout=5,
+                timeout=2,
                 creationflags=flags,
             )
         else:
@@ -210,11 +290,10 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> bool:
             return False
 
 
-def _collect_after_termination(
-    process: subprocess.Popen[str],
-) -> tuple[str | bytes | None, str | bytes | None]:
-    try:
-        return process.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return process.communicate()
+def _close_process_streams(process: subprocess.Popen[str]) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass

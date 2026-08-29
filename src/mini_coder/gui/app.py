@@ -14,8 +14,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ..exceptions import SessionError
-from ..session import SessionStore
+from ..changes import ChangeTracker
+from ..exceptions import ChangeError, SessionError
+from ..session import SessionStatus, SessionStore, TaskPhase
 from .controller import RunController, RunRequest
 
 
@@ -446,6 +447,39 @@ def create_app(
             "matches_agent_version": hashlib.sha256(raw).hexdigest() == change.after_hash,
         }
 
+    @app.post("/api/sessions/{session_id}/undo-last")
+    def undo_last_change(session_id: str) -> dict:
+        if active_controller.is_session_active(session_id):
+            raise HTTPException(status_code=409, detail="任务运行时不能撤销修改，请先停止任务")
+        session = _resolve_catalog_session(catalog, session_id)
+        tracker = ChangeTracker(session.workspace)
+        try:
+            change, undo = tracker.undo_last(session.changes)
+        except ChangeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        session.undo_history.append(undo)
+        session.set_phase(TaskPhase.IMPLEMENT)
+        invalidated = session.invalidate_verification(
+            f"tracked change undone: {change.path}"
+        )
+        if session.status in {
+            SessionStatus.COMPLETED_VERIFIED,
+            SessionStatus.COMPLETED_UNVERIFIED,
+        }:
+            session.set_status(
+                SessionStatus.INTERRUPTED,
+                stop_reason="change_undone",
+            )
+        SessionStore.for_workspace(session.workspace).save(session)
+        return {
+            "session": _session_summary(session),
+            "change_id": change.change_id,
+            "path": change.path,
+            "undo_id": undo.undo_id,
+            "restored_hash": undo.restored_hash,
+            "verification_invalidated": len(invalidated),
+        }
+
     @app.post("/api/runs", status_code=202)
     def start_run(body: StartRunBody) -> dict:
         try:
@@ -469,6 +503,15 @@ def create_app(
             return active_controller.snapshot(run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/cancel", status_code=202)
+    def cancel_run(run_id: str) -> dict:
+        try:
+            return active_controller.cancel(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/runs/{run_id}/approvals/{approval_id}")
     def decide_approval(run_id: str, approval_id: str, body: ApprovalBody) -> dict:

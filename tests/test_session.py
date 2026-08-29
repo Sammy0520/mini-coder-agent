@@ -369,6 +369,36 @@ class SessionStoreTests(unittest.TestCase):
 
 
 class SessionRunnerTests(unittest.TestCase):
+    def test_user_cancellation_is_persisted_as_resumable_interruption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            cancelled_runner = AgentRunner(
+                model=SequenceModel([]),
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+                cancellation_callback=lambda: True,
+            )
+
+            cancelled = cancelled_runner.run("Inspect the project")
+            saved = store.load(cancelled.session_id or "")
+
+            self.assertEqual(cancelled.status, "cancelled")
+            self.assertEqual(saved.status, SessionStatus.INTERRUPTED)
+            self.assertEqual(saved.stop_reason, "user_cancelled")
+
+            resumed_runner = AgentRunner(
+                model=SequenceModel([ModelResponse(content="Finished after resuming.")]),
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+            resumed = resumed_runner.run("Continue from the saved point", session=saved)
+
+            self.assertEqual(resumed.status, "completed")
+            self.assertEqual(store.load(saved.session_id).turn_count, 2)
+
     def test_completed_session_accepts_follow_up_with_compact_memory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -444,6 +444,7 @@ class AgentSession:
             SessionStatus.COMPLETED_UNVERIFIED,
             SessionStatus.FAILED,
             SessionStatus.DENIED,
+            SessionStatus.INTERRUPTED,
         }:
             raise SessionError("only a finished session can receive a follow-up task")
         self.task = follow_up

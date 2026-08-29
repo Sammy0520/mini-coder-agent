@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -194,6 +195,35 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(result.data["process_tree_terminated"])
         self.assertIn("output_truncated", result.data)
         self.assertLess(result.data["duration_seconds"], 4)
+
+    def test_command_cancellation_terminates_process_tree(self) -> None:
+        release = threading.Event()
+        process = MagicMock()
+        process.pid = 12345
+        process.poll.return_value = None
+        process.communicate.side_effect = lambda: (release.wait(2), ("", ""))[1]
+        self.context.cancellation_requested = MagicMock(side_effect=[False, True])
+
+        def terminate(_process):
+            release.set()
+            return True
+
+        with patch(
+            "mini_coder.tools.command.subprocess.Popen",
+            return_value=process,
+        ), patch(
+            "mini_coder.tools.command._terminate_process_tree",
+            side_effect=terminate,
+        ) as terminate_tree:
+            result = self.execute(
+                "run_command",
+                {"command": "python long_task.py", "timeout_seconds": 5},
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.data["cancelled"])
+        self.assertTrue(result.data["process_tree_terminated"])
+        terminate_tree.assert_called_once_with(process)
 
     def test_keyboard_interrupt_requests_process_tree_cleanup(self) -> None:
         process = MagicMock()

@@ -4,6 +4,7 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from collections.abc import Callable
 from typing import Any
 
 from .safety import WorkspacePolicy
@@ -20,6 +21,10 @@ class ToolContext:
     policy: WorkspacePolicy
     command_timeout_seconds: int = 60
     max_output_chars: int = 12_000
+    cancellation_requested: Callable[[], bool] | None = None
+
+    def is_cancelled(self) -> bool:
+        return bool(self.cancellation_requested and self.cancellation_requested())
 
 
 @dataclass(slots=True)
@@ -65,4 +70,3 @@ class Tool(ABC):
     @abstractmethod
     def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         """Execute a locally implemented tool."""
-

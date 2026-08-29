@@ -6,9 +6,13 @@ const state = {
   sessionTitle: "",
   sessionId: null,
   draft: true,
+  runActive: false,
+  cancellationRequested: false,
+  currentTurn: 1,
+  turnModelCalls: 0,
+  turnToolCalls: 0,
+  usedSessionMemory: false,
   eventCount: 0,
-  modelCalls: 0,
-  totalUsage: {},
   executionGroups: [],
   readGroup: null,
   changes: new Map(),
@@ -23,10 +27,10 @@ const state = {
 const elementIds = [
   "newSessionButton", "sessionCount", "sessionList",
   "connectionDot", "connectionLabel", "conversationEyebrow", "conversationTitle", "conversationProject",
-  "detailsToggleButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
+  "detailsToggleButton", "stopRunButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
   "welcomeState", "messageList", "task", "composerHint", "runButton", "inspector", "closeInspectorButton",
   "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
-  "denyButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "usageSummary",
+  "denyButton", "undoButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "turnSummary",
   "executionList", "sessionModal", "sessionModalClose", "sessionModalCancel", "sessionModalConfirm",
   "sessionDialogEyebrow", "sessionDialogTitle", "sessionTitleField", "sessionTitleInput", "workspace",
   "selectWorkspaceButton", "configPath", "folderModal", "folderCloseButton", "folderCancelButton",
@@ -63,6 +67,8 @@ function bindEvents() {
     if (event.target === els.folderModal) closeFolderBrowser();
   });
   els.runButton.addEventListener("click", startRun);
+  els.stopRunButton.addEventListener("click", stopRun);
+  els.undoButton.addEventListener("click", undoLastChange);
   els.task.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startRun();
   });
@@ -225,9 +231,13 @@ async function loadSession(sessionId) {
     state.workspace = data.workspace || state.workspace;
     state.sessionId = data.session_id;
     state.sessionTitle = data.title || "未命名会话";
+    state.runActive = false;
+    state.cancellationRequested = false;
+    state.currentTurn = Math.max(1, Number(data.turn_count || 1));
+    state.turnModelCalls = 0;
+    state.turnToolCalls = 0;
+    state.usedSessionMemory = state.currentTurn > 1;
     state.eventCount = 0;
-    state.modelCalls = Number(data.model_calls || 0);
-    state.totalUsage = data.usage || {};
     state.executionGroups = (data.execution || []).map((item) => ({
       title: item.title,
       details: item.details || [],
@@ -250,7 +260,7 @@ async function loadSession(sessionId) {
     setVerificationFromSession(data.verification_status, data.verifications || []);
     renderChanges();
     renderExecutionGroups("这个会话没有保存可展示的执行过程。 ");
-    renderUsageSummary();
+    renderTurnSummary("已完成");
     els.task.value = "";
     els.task.disabled = false;
     els.task.placeholder = "继续告诉 Agent 接下来要做什么…";
@@ -273,9 +283,13 @@ function resetDraft(options = {}) {
   state.source = null;
   state.sessionId = null;
   state.draft = true;
+  state.runActive = false;
+  state.cancellationRequested = false;
+  state.currentTurn = 1;
+  state.turnModelCalls = 0;
+  state.turnToolCalls = 0;
+  state.usedSessionMemory = false;
   state.eventCount = 0;
-  state.modelCalls = 0;
-  state.totalUsage = {};
   state.executionGroups = [];
   state.readGroup = null;
   state.changes = new Map();
@@ -291,11 +305,12 @@ function resetDraft(options = {}) {
   els.task.placeholder = "描述你希望 Agent 完成的任务…";
   els.runButton.disabled = false;
   els.runButton.innerHTML = "<span>▶</span> 开始执行";
+  els.stopRunButton.classList.add("hidden");
   els.approvalPanel.classList.add("hidden");
   renderChanges();
   setVerification("neutral", "未运行", "完成修改后，Agent 会运行项目内的检查命令。");
   renderExecutionGroups();
-  renderUsageSummary();
+  renderTurnSummary("尚未开始");
   updateProjectDisplay();
   setConnection("已就绪");
 }
@@ -335,13 +350,52 @@ async function startRun() {
     markProgressDone("任务未能启动");
     setConnection("启动失败", "error");
     els.runStatus.textContent = "启动失败";
+    els.task.disabled = false;
     els.runButton.disabled = false;
-    toast(error.message, true);
+    els.runButton.innerHTML = `<span>▶</span> ${state.sessionId ? "继续执行" : "开始执行"}`;
+    state.runActive = false;
+    state.runId = null;
+    if (state.sessionId) state.currentTurn = Math.max(1, state.currentTurn - 1);
+    els.stopRunButton.classList.add("hidden");
+    renderTurnSummary("启动失败");
+    renderChanges();
+    toast(friendlyError(error.message), true);
+  }
+}
+
+async function stopRun() {
+  if (!state.runId || !state.runActive || state.cancellationRequested) return;
+  state.cancellationRequested = true;
+  els.stopRunButton.disabled = true;
+  els.stopRunButton.textContent = "正在停止…";
+  els.runStatus.textContent = "正在停止";
+  markProgressStopping();
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(state.runId)}/cancel`, {
+      method: "POST",
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法停止当前任务");
+  } catch (error) {
+    state.cancellationRequested = false;
+    els.stopRunButton.disabled = false;
+    els.stopRunButton.textContent = "停止任务";
+    els.runStatus.textContent = "正在执行";
+    const heading = document.getElementById("progressTitle");
+    if (heading) heading.textContent = "正在了解项目并完成任务…";
+    setConnection("正在执行", "busy");
+    toast(friendlyError(error.message), true);
   }
 }
 
 function prepareRunningView(task) {
   const continuing = Boolean(state.sessionId);
+  state.runActive = true;
+  state.cancellationRequested = false;
+  state.currentTurn = continuing ? state.currentTurn + 1 : 1;
+  state.turnModelCalls = 0;
+  state.turnToolCalls = 0;
+  state.usedSessionMemory = continuing;
   state.eventCount = 0;
   state.executionGroups = [];
   state.readGroup = null;
@@ -358,10 +412,14 @@ function prepareRunningView(task) {
   els.task.disabled = true;
   els.runButton.disabled = true;
   els.runButton.innerHTML = "<span>●</span> 执行中";
+  els.stopRunButton.disabled = false;
+  els.stopRunButton.textContent = "停止任务";
+  els.stopRunButton.classList.remove("hidden");
   els.approvalPanel.classList.add("hidden");
   renderChanges();
   setVerification("neutral", "等待运行", "Agent 完成修改后会运行本地检查。");
   renderExecutionGroups();
+  renderTurnSummary("执行中");
   setConnection("正在启动", "busy");
 }
 
@@ -392,9 +450,15 @@ function handleEvent(envelope) {
   if (name === "session_created") {
     state.sessionId = payload.session_id || state.sessionId;
     loadSessions();
+  } else if (name === "session_turn_started") {
+    state.currentTurn = Math.max(1, Number(payload.turn || state.currentTurn));
+    state.usedSessionMemory = state.currentTurn > 1;
+    renderTurnSummary("执行中");
   } else if (name === "workspace_overview_generated") {
     addExecution("先了解了一下项目结构", overviewDetail(payload), timestamp, "⌁");
   } else if (name === "tool_call_requested") {
+    state.turnToolCalls += 1;
+    renderTurnSummary("执行中");
     handleToolRequest(payload, timestamp);
   } else if (name === "approval_required") {
     showApproval(payload);
@@ -413,24 +477,22 @@ function handleEvent(envelope) {
   } else if (name === "tool_call_denied") {
     addExecution("操作已被拒绝", friendlyToolName(payload.tool), timestamp, "×");
   } else if (name === "model_response_received") {
-    state.modelCalls += 1;
-    Object.entries(payload.usage || {}).forEach(([key, value]) => {
-      if (Number.isFinite(Number(value))) {
-        state.totalUsage[key] = Number(state.totalUsage[key] || 0) + Number(value);
-      }
-    });
-    renderUsageSummary();
+    state.turnModelCalls += 1;
+    renderTurnSummary("执行中");
   } else if (name === "model_error") {
     addExecution("模型请求遇到问题", payload.error || "稍后可以重新尝试", timestamp, "!");
   } else if (name === "context_compacted") {
+    state.usedSessionMemory = state.currentTurn > 1;
+    renderTurnSummary("执行中");
     addExecution("已整理较长的上下文", "保留重要信息后继续执行", timestamp, "·");
-  } else if (name === "run_completed" || name === "run_failed" || name === "run_cancelled") {
-    state.modelCalls = Number(payload.model_calls || state.modelCalls);
-    state.totalUsage = payload.total_usage || state.totalUsage;
-    renderUsageSummary();
+  } else if (name === "controller_cancel_requested") {
+    state.cancellationRequested = true;
+    els.runStatus.textContent = "正在停止";
+    els.stopRunButton.disabled = true;
+    els.stopRunButton.textContent = "正在停止…";
+    els.approvalPanel.classList.add("hidden");
+    markProgressStopping();
   } else if (name === "controller_run_finished") {
-    state.totalUsage = payload.total_usage || state.totalUsage;
-    renderUsageSummary();
     finishRun(payload);
   } else if (name === "controller_run_failed") {
     failRun(payload.error || "本次执行失败");
@@ -538,6 +600,11 @@ function markProgressDone(title = "任务执行结束") {
   if (heading) heading.textContent = title;
 }
 
+function markProgressStopping() {
+  const heading = document.getElementById("progressTitle");
+  if (heading) heading.textContent = "正在安全停止并保存当前进度…";
+}
+
 function addMessage(role, content) {
   const normalizedRole = role === "assistant" ? "agent" : "user";
   const wrapper = document.createElement("div");
@@ -560,24 +627,27 @@ function finishRun(payload) {
   els.task.placeholder = "继续告诉 Agent 接下来要做什么…";
   els.runButton.disabled = false;
   els.runButton.innerHTML = "<span>▶</span> 继续执行";
+  state.runActive = false;
+  state.cancellationRequested = false;
+  state.runId = null;
+  els.stopRunButton.classList.add("hidden");
+  els.stopRunButton.disabled = false;
+  els.stopRunButton.textContent = "停止任务";
   state.draft = true;
   els.composerHint.textContent = "可以继续提出修改、追问或新的验收要求";
-  setConnection(completed ? "执行完成" : "已停止", completed ? "" : "error");
+  renderTurnSummary(completed ? "已完成" : "已停止");
+  renderChanges();
+  setConnection(completed ? "执行完成" : "已停止");
   loadSessions();
 }
 
-function renderUsageSummary() {
-  const total = Number(state.totalUsage.total_tokens || 0);
-  const input = Number(state.totalUsage.input_tokens || state.totalUsage.prompt_tokens || 0);
-  const tokenText = total ? `${formatCompactNumber(total)} Token` : (input ? `${formatCompactNumber(input)} 输入 Token` : "用量等待模型返回");
-  els.usageSummary.textContent = state.modelCalls
-    ? `模型调用 ${state.modelCalls} 次 · ${tokenText}`
-    : "还没有调用模型";
-}
-
-function formatCompactNumber(value) {
-  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 1 : 2).replace(/\.0$/, "")}k`;
-  return String(value);
+function renderTurnSummary(status = "") {
+  const parts = [`第 ${Math.max(1, state.currentTurn)} 轮`];
+  if (status) parts.push(status);
+  if (state.turnModelCalls) parts.push(`思考 ${state.turnModelCalls} 次`);
+  if (state.turnToolCalls) parts.push(`操作 ${state.turnToolCalls} 项`);
+  if (state.usedSessionMemory) parts.push("已使用会话记忆，不重放旧工具记录");
+  els.turnSummary.textContent = parts.join(" · ");
 }
 
 function failRun(message) {
@@ -588,7 +658,13 @@ function failRun(message) {
   els.task.disabled = false;
   els.runButton.disabled = false;
   els.runButton.innerHTML = "<span>▶</span> 继续执行";
+  state.runActive = false;
+  state.cancellationRequested = false;
+  state.runId = null;
+  els.stopRunButton.classList.add("hidden");
   state.draft = true;
+  renderTurnSummary("未完成");
+  renderChanges();
   setConnection("发生错误", "error");
   loadSessions();
 }
@@ -669,6 +745,7 @@ function renderChanges() {
   els.changeList.replaceChildren();
   if (!changes.length) {
     els.changeList.innerHTML = '<div class="detail-empty">Agent 修改文件后会显示在这里</div>';
+    updateUndoButton();
     return;
   }
   changes.forEach((change) => {
@@ -682,6 +759,38 @@ function renderChanges() {
     button.addEventListener("click", () => openChange(change));
     els.changeList.appendChild(button);
   });
+  updateUndoButton();
+}
+
+function updateUndoButton() {
+  const canUndo = Boolean(
+    state.sessionId
+    && !state.runActive
+    && [...state.changes.values()].some((item) => !item.previewOnly),
+  );
+  els.undoButton.classList.toggle("hidden", !canUndo);
+  els.undoButton.disabled = false;
+  els.undoButton.textContent = "撤销上次修改";
+}
+
+async function undoLastChange() {
+  if (!state.sessionId || state.runActive) return;
+  els.undoButton.disabled = true;
+  els.undoButton.textContent = "正在撤销…";
+  try {
+    const response = await fetch(
+      `/api/sessions/${encodeURIComponent(state.sessionId)}/undo-last`,
+      {method: "POST"},
+    );
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法撤销这次修改");
+    toast(`已撤销 ${data.path || "上一次文件修改"}`);
+    await loadSession(state.sessionId);
+  } catch (error) {
+    els.undoButton.disabled = false;
+    els.undoButton.textContent = "撤销上次修改";
+    toast(friendlyError(error.message), true);
+  }
 }
 
 async function openChange(change) {
@@ -947,6 +1056,8 @@ function joinChinese(values) {
 
 function friendlyError(message) {
   const text = String(message || "发生未知问题");
+  if (text.includes("session has no active file change")) return "这个会话没有可以撤销的文件修改。";
+  if (text.includes("Cannot undo") && text.includes("file changed after")) return "这个文件后来又被修改过，为了保护你的内容，Agent 没有覆盖它。";
   if (text.includes("API") || text.includes("model")) return "模型服务暂时无法完成请求，请检查配置后重试。";
   return text;
 }
@@ -956,6 +1067,7 @@ function labelStatus(status) {
     created: "已创建",
     running: "正在执行",
     waiting_for_approval: "等待确认",
+    cancelling: "正在停止",
     completed: "已完成",
     completed_verified: "已完成",
     completed_unverified: "已完成（未验证）",

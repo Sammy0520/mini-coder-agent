@@ -50,6 +50,21 @@ class FakeRunner:
         )
 
 
+class CancellationAwareRunner:
+    def __init__(self, approval_callback, cancellation_callback) -> None:
+        self.approval_callback = approval_callback
+        self.cancellation_callback = cancellation_callback
+
+    def run(self, task: str) -> AgentRunResult:
+        self.approval_callback(
+            DummyWriteTool(),
+            {"path": "answer.txt", "content": "done\n"},
+        )
+        if self.cancellation_callback():
+            return AgentRunResult("cancelled", "Stopped and saved.", 1)
+        return AgentRunResult("completed", "done", 1)
+
+
 def wait_until(predicate, timeout: float = 2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -210,6 +225,39 @@ class RunControllerTests(unittest.TestCase):
             )
 
             self.assertEqual(finished["result"]["status"], "denied")
+
+    def test_cancel_wakes_pending_approval_and_finishes_as_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = RunController(
+                runner_factory=lambda request, event, approval, cancelled: (
+                    CancellationAwareRunner(approval, cancelled)
+                ),
+                approval_timeout_seconds=5,
+            )
+            started = controller.start(
+                RunRequest(task="Create answer.txt", workspace=directory)
+            )
+            wait_until(
+                lambda: controller.snapshot(started["run_id"])["pending_approval"]
+            )
+
+            cancelling = controller.cancel(started["run_id"])
+            self.assertEqual(cancelling["status"], "cancelling")
+            finished = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))["status"]
+                    == "cancelled"
+                    else None
+                )
+            )
+
+            self.assertEqual(finished["result"]["status"], "cancelled")
+            self.assertIsNone(finished["pending_approval"])
+            names = [item["event"] for item in controller.events_after(started["run_id"])]
+            self.assertIn("controller_cancel_requested", names)
+            with self.assertRaisesRegex(ValueError, "already finished"):
+                controller.cancel(started["run_id"])
 
     def test_start_rejects_empty_task_and_missing_workspace(self) -> None:
         controller = RunController(
