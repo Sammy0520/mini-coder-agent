@@ -480,6 +480,39 @@ def create_app(
             "verification_invalidated": len(invalidated),
         }
 
+    @app.post("/api/sessions/{session_id}/changes/{change_id}/undo")
+    def undo_file_change(session_id: str, change_id: str) -> dict:
+        if active_controller.is_session_active(session_id):
+            raise HTTPException(status_code=409, detail="任务运行时不能撤销修改，请先停止任务")
+        session = _resolve_catalog_session(catalog, session_id)
+        tracker = ChangeTracker(session.workspace)
+        try:
+            change, undo = tracker.undo_change(session.changes, change_id)
+        except ChangeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        session.undo_history.append(undo)
+        session.set_phase(TaskPhase.IMPLEMENT)
+        invalidated = session.invalidate_verification(
+            f"tracked change undone: {change.path}"
+        )
+        if session.status in {
+            SessionStatus.COMPLETED_VERIFIED,
+            SessionStatus.COMPLETED_UNVERIFIED,
+        }:
+            session.set_status(
+                SessionStatus.INTERRUPTED,
+                stop_reason="change_undone",
+            )
+        SessionStore.for_workspace(session.workspace).save(session)
+        return {
+            "session": _session_summary(session),
+            "change_id": change.change_id,
+            "path": change.path,
+            "undo_id": undo.undo_id,
+            "restored_hash": undo.restored_hash,
+            "verification_invalidated": len(invalidated),
+        }
+
     @app.post("/api/runs", status_code=202)
     def start_run(body: StartRunBody) -> dict:
         try:
@@ -496,6 +529,10 @@ def create_app(
             )
         except (ValueError, SessionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/runs")
+    def list_active_runs() -> dict:
+        return {"runs": active_controller.active_runs()}
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:

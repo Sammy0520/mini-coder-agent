@@ -52,6 +52,7 @@ RunnerFactory = Callable[
         RunRequest,
         Callable[[str, dict[str, Any]], None],
         Callable[[Tool, dict[str, Any]], bool],
+        Callable[[list[tuple[Tool, dict[str, Any]]]], bool],
         Callable[[], bool],
     ],
     RunnerLike,
@@ -65,6 +66,8 @@ class PendingApproval:
     risk: str
     arguments: dict[str, Any]
     created_at: str
+    items: list[dict[str, Any]] = field(default_factory=list)
+    summary: str = ""
     resolved: threading.Event = field(default_factory=threading.Event, repr=False)
     approved: bool | None = None
 
@@ -74,6 +77,8 @@ class PendingApproval:
             "tool": self.tool,
             "risk": self.risk,
             "arguments": self.arguments,
+            "items": self.items,
+            "summary": self.summary,
             "created_at": self.created_at,
         }
 
@@ -181,6 +186,14 @@ class RunController:
             record = self._require_run_locked(run_id)
             return self._snapshot_locked(record)
 
+    def active_runs(self) -> list[dict[str, Any]]:
+        with self._condition:
+            return [
+                self._snapshot_locked(record)
+                for record in self._runs.values()
+                if record.status not in self.TERMINAL_STATUSES
+            ]
+
     def events_after(self, run_id: str, sequence: int = 0) -> list[dict[str, Any]]:
         with self._condition:
             record = self._require_run_locked(run_id)
@@ -266,18 +279,35 @@ class RunController:
                 self._append_event_locked(active, name, safe_payload)
 
         def approval_callback(tool: Tool, arguments: dict[str, Any]) -> bool:
-            risk = tool.risk.value
-            if tool.name == "run_command":
-                risk = assess_command(str(arguments.get("command", ""))).level.value
-            safe_value = redact_sensitive_value(arguments)
-            safe_arguments = safe_value if isinstance(safe_value, dict) else {}
+            item = self._approval_item(tool, arguments)
             pending = PendingApproval(
                 approval_id=uuid.uuid4().hex,
                 tool=tool.name,
-                risk=risk,
-                arguments=safe_arguments,
+                risk=str(item["risk"]),
+                arguments=dict(item["arguments"]),
                 created_at=_utc_now(),
+                items=[item],
+                summary=str(item["description"]),
             )
+            return wait_for_approval(pending)
+
+        def batch_approval_callback(
+            requests: list[tuple[Tool, dict[str, Any]]],
+        ) -> bool:
+            items = [self._approval_item(tool, arguments) for tool, arguments in requests]
+            risks = [str(item["risk"]) for item in items]
+            pending = PendingApproval(
+                approval_id=uuid.uuid4().hex,
+                tool="batch",
+                risk=self._highest_risk(risks),
+                arguments={},
+                created_at=_utc_now(),
+                items=items,
+                summary=self._batch_summary(items),
+            )
+            return wait_for_approval(pending)
+
+        def wait_for_approval(pending: PendingApproval) -> bool:
             with self._condition:
                 active = self._require_run_locked(run_id)
                 if active.cancellation_requested.is_set():
@@ -317,12 +347,20 @@ class RunController:
         try:
             record = self._runs[run_id]
             factory_parameters = inspect.signature(self._runner_factory).parameters.values()
-            supports_cancellation = any(
+            has_variadic = any(
                 item.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
                 for item in factory_parameters
-            ) or len(factory_parameters) >= 4
-            if supports_cancellation:
+            )
+            if has_variadic or len(factory_parameters) >= 5:
                 runner = self._runner_factory(
+                    record.request,
+                    event_callback,
+                    approval_callback,
+                    batch_approval_callback,
+                    cancellation_callback,
+                )
+            elif len(factory_parameters) >= 4:
+                runner = self._runner_factory(  # type: ignore[call-arg]
                     record.request,
                     event_callback,
                     approval_callback,
@@ -435,6 +473,56 @@ class RunController:
             raise KeyError(f"unknown run: {run_id}") from exc
 
     @staticmethod
+    def _approval_item(tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:
+        risk = tool.risk.value
+        if tool.name == "run_command":
+            risk = assess_command(str(arguments.get("command", ""))).level.value
+        safe_value = redact_sensitive_value(arguments)
+        safe_arguments = safe_value if isinstance(safe_value, dict) else {}
+        if tool.name in {"write_file", "edit_file"}:
+            description = f"修改文件 {safe_arguments.get('path', '项目文件')}"
+        elif tool.name == "run_command":
+            purpose = safe_arguments.get("purpose")
+            prefix = "运行项目检查" if purpose == "verify" else "运行本地命令"
+            description = f"{prefix}：{safe_arguments.get('command', '')}"
+        else:
+            description = f"执行 {tool.name}"
+        return {
+            "tool": tool.name,
+            "risk": risk,
+            "arguments": safe_arguments,
+            "description": description,
+        }
+
+    @staticmethod
+    def _highest_risk(risks: list[str]) -> str:
+        order = {
+            "read": 0,
+            "read_only": 0,
+            "write": 1,
+            "workspace_write": 1,
+            "execute": 2,
+            "unknown": 3,
+            "external_effect": 4,
+            "dangerous": 5,
+        }
+        return max(risks or ["write"], key=lambda item: order.get(item, 3))
+
+    @staticmethod
+    def _batch_summary(items: list[dict[str, Any]]) -> str:
+        writes = sum(item.get("tool") in {"write_file", "edit_file"} for item in items)
+        commands = sum(item.get("tool") == "run_command" for item in items)
+        parts = []
+        if writes:
+            parts.append(f"修改 {writes} 个文件")
+        if commands:
+            parts.append(f"运行 {commands} 条本地命令")
+        other = len(items) - writes - commands
+        if other:
+            parts.append(f"执行 {other} 项操作")
+        return "，并".join(parts) or "执行一批操作"
+
+    @staticmethod
     def _resolve_config_path(config_path: str | None) -> Path | None:
         if config_path:
             path = Path(config_path).expanduser().resolve()
@@ -449,6 +537,9 @@ class RunController:
         request: RunRequest,
         event_callback: Callable[[str, dict[str, Any]], None],
         approval_callback: Callable[[Tool, dict[str, Any]], bool],
+        batch_approval_callback: Callable[
+            [list[tuple[Tool, dict[str, Any]]]], bool
+        ],
         cancellation_callback: Callable[[], bool],
     ) -> RunnerLike:
         policy = ApprovalPolicy.AUTO if request.auto else ApprovalPolicy.SAFE
@@ -472,6 +563,7 @@ class RunController:
             registry=create_default_registry(),
             config=config,
             approval_callback=approval_callback,
+            batch_approval_callback=batch_approval_callback,
             event_callback=event_callback,
             cancellation_callback=cancellation_callback,
             session_store=SessionStore.for_workspace(config.workspace),

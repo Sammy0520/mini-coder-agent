@@ -21,6 +21,16 @@ class DummyWriteTool(Tool):
         return ToolResult(True, "unused")
 
 
+class DummyCommandTool(Tool):
+    name = "run_command"
+    description = "Run a command"
+    parameters = {"type": "object", "properties": {}}
+    risk = RiskLevel.EXECUTE
+
+    def execute(self, arguments: dict, context: ToolContext) -> ToolResult:
+        return ToolResult(True, "unused")
+
+
 class FakeRunner:
     def __init__(self, event_callback, approval_callback, *, request_approval: bool) -> None:
         self.event_callback = event_callback
@@ -65,6 +75,32 @@ class CancellationAwareRunner:
         return AgentRunResult("completed", "done", 1)
 
 
+class BatchApprovalRunner:
+    def __init__(self, batch_approval_callback, *, commands: bool = False) -> None:
+        self.batch_approval_callback = batch_approval_callback
+        self.commands = commands
+
+    def run(self, task: str) -> AgentRunResult:
+        items = (
+            [
+                (DummyCommandTool(), {"command": "python -m unittest", "purpose": "verify"}),
+                (DummyCommandTool(), {"command": "python -m compileall src", "purpose": "verify"}),
+            ]
+            if self.commands
+            else [
+                (DummyWriteTool(), {"path": "one.txt", "content": "one\n"}),
+                (DummyWriteTool(), {"path": "two.txt", "content": "two\n"}),
+            ]
+        )
+        approved = self.batch_approval_callback(items)
+        return AgentRunResult(
+            "completed" if approved else "denied",
+            "done" if approved else "denied",
+            1,
+            session_id="batch-session",
+        )
+
+
 def wait_until(predicate, timeout: float = 2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -76,6 +112,68 @@ def wait_until(predicate, timeout: float = 2.0):
 
 
 class RunControllerTests(unittest.TestCase):
+    def test_batch_approval_is_exposed_as_one_active_run_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def factory(request, event, approval, batch_approval, cancelled):
+                return BatchApprovalRunner(batch_approval)
+
+            controller = RunController(
+                runner_factory=factory,
+                approval_timeout_seconds=2,
+            )
+            started = controller.start(
+                RunRequest(task="Create two files", workspace=directory)
+            )
+            waiting = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))["status"]
+                    == "waiting_for_approval"
+                    else None
+                )
+            )
+
+            self.assertEqual(len(controller.active_runs()), 1)
+            pending = waiting["pending_approval"]
+            self.assertEqual(pending["tool"], "batch")
+            self.assertEqual(len(pending["items"]), 2)
+            self.assertEqual(pending["summary"], "修改 2 个文件")
+
+            controller.decide_approval(
+                started["run_id"], pending["approval_id"], True
+            )
+            wait_until(
+                lambda: controller.snapshot(started["run_id"])["status"] == "completed"
+            )
+            self.assertEqual(controller.active_runs(), [])
+
+    def test_batch_command_approval_explains_the_requested_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def factory(request, event, approval, batch_approval, cancelled):
+                return BatchApprovalRunner(batch_approval, commands=True)
+
+            controller = RunController(
+                runner_factory=factory,
+                approval_timeout_seconds=2,
+            )
+            started = controller.start(
+                RunRequest(task="Run project checks", workspace=directory)
+            )
+            waiting = wait_until(
+                lambda: controller.snapshot(started["run_id"])["pending_approval"]
+            )
+            pending = waiting
+
+            self.assertEqual(pending["summary"], "运行 2 条本地命令")
+            self.assertIn("运行项目检查", pending["items"][0]["description"])
+            self.assertIn("python -m unittest", pending["items"][0]["description"])
+            controller.decide_approval(
+                started["run_id"], pending["approval_id"], False
+            )
+            wait_until(
+                lambda: controller.snapshot(started["run_id"])["status"] == "failed"
+            )
+
     def test_follow_up_request_reuses_saved_session_title_and_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             session = AgentSession.create(

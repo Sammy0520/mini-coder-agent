@@ -22,6 +22,10 @@ const state = {
   startAfterSetup: false,
   codeDetail: null,
   codeTab: "diff",
+  currentSequence: 0,
+  activeRuns: new Map(),
+  changesExpanded: false,
+  sessionPoller: null,
 };
 
 const elementIds = [
@@ -30,7 +34,7 @@ const elementIds = [
   "detailsToggleButton", "stopRunButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
   "welcomeState", "messageList", "task", "composerHint", "runButton", "inspector", "closeInspectorButton",
   "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
-  "denyButton", "undoButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "turnSummary",
+  "denyButton", "undoButton", "changesToggleButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "turnSummary",
   "executionList", "sessionModal", "sessionModalClose", "sessionModalCancel", "sessionModalConfirm",
   "sessionDialogEyebrow", "sessionDialogTitle", "sessionTitleField", "sessionTitleInput", "workspace",
   "selectWorkspaceButton", "configPath", "folderModal", "folderCloseButton", "folderCancelButton",
@@ -69,6 +73,10 @@ function bindEvents() {
   els.runButton.addEventListener("click", startRun);
   els.stopRunButton.addEventListener("click", stopRun);
   els.undoButton.addEventListener("click", undoLastChange);
+  els.changesToggleButton.addEventListener("click", () => {
+    state.changesExpanded = !state.changesExpanded;
+    renderChanges();
+  });
   els.task.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startRun();
   });
@@ -112,7 +120,9 @@ async function bootstrap() {
       : (data.default_config_path || "agent.toml");
     updateProjectDisplay();
     resetDraft();
+    await syncActiveRuns();
     await loadSessions();
+    state.sessionPoller = window.setInterval(refreshBackgroundRuns, 3000);
   } catch (error) {
     setConnection("启动信息读取失败", "error");
     toast(error.message, true);
@@ -184,11 +194,12 @@ function updateProjectDisplay() {
     : "新建会话时选择工作文件夹";
 }
 
-async function loadSessions() {
-  els.sessionList.innerHTML = '<div class="sidebar-empty">正在读取会话…</div>';
+async function loadSessions(options = {}) {
+  if (!options.silent) {
+    els.sessionList.innerHTML = '<div class="sidebar-empty">正在读取会话…</div>';
+  }
   try {
-    const query = state.workspace ? `?workspace=${encodeURIComponent(state.workspace)}` : "";
-    const response = await fetch(`/api/sessions${query}`);
+    const response = await fetch("/api/sessions");
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.detail || "无法读取会话");
     renderSessions(data.sessions || []);
@@ -206,32 +217,59 @@ function renderSessions(sessions) {
     return;
   }
   sessions.forEach((session) => {
+    const activeRun = activeRunForSession(session.session_id);
+    const displayStatus = activeRun?.status || session.status;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `session-item${state.sessionId === session.session_id ? " active" : ""}`;
     button.innerHTML = `
-      <span class="session-item-icon">${sessionIcon(session.status)}</span>
-      <span><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(pathName(session.workspace))} · ${escapeHtml(sessionTime(session.updated_at))} · ${escapeHtml(labelStatus(session.status))}</small></span>`;
+      <span class="session-item-icon">${sessionIcon(displayStatus)}</span>
+      <span><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(pathName(session.workspace))} · ${escapeHtml(sessionTime(session.updated_at))} · ${escapeHtml(labelStatus(displayStatus))}</small></span>`;
     button.addEventListener("click", () => loadSession(session.session_id));
     els.sessionList.appendChild(button);
   });
 }
 
-async function loadSession(sessionId) {
-  if (state.source) {
-    toast("当前任务仍在运行，请等待完成后再切换会话。", true);
-    return;
+async function syncActiveRuns() {
+  try {
+    const response = await fetch("/api/runs");
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法读取运行任务");
+    state.activeRuns = new Map((data.runs || []).map((run) => [run.run_id, run]));
+  } catch (_) {
+    // A temporary polling failure should not interrupt the current conversation.
   }
+}
+
+function activeRunForSession(sessionId) {
+  return [...state.activeRuns.values()].find((run) => run.session_id === sessionId) || null;
+}
+
+async function refreshBackgroundRuns() {
+  await syncActiveRuns();
+  await loadSessions({silent: true});
+  if (state.runActive && state.runId && !state.source && state.activeRuns.has(state.runId)) {
+    const run = state.activeRuns.get(state.runId);
+    connectEvents(run.run_id, run.latest_sequence || state.currentSequence);
+  }
+}
+
+async function loadSession(sessionId) {
+  disconnectEvents();
   try {
     setConnection("正在打开会话", "busy");
+    await syncActiveRuns();
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.detail || "无法打开会话");
+    const activeRun = activeRunForSession(data.session_id);
     state.draft = true;
     state.workspace = data.workspace || state.workspace;
     state.sessionId = data.session_id;
     state.sessionTitle = data.title || "未命名会话";
-    state.runActive = false;
+    state.runId = activeRun?.run_id || null;
+    state.currentSequence = Number(activeRun?.latest_sequence || 0);
+    state.runActive = Boolean(activeRun);
     state.cancellationRequested = false;
     state.currentTurn = Math.max(1, Number(data.turn_count || 1));
     state.turnModelCalls = 0;
@@ -246,6 +284,7 @@ async function loadSession(sessionId) {
       count: 1,
     }));
     state.readGroup = null;
+    state.changesExpanded = false;
     state.changes = new Map();
     (data.changes || []).filter((item) => item.undo_status === "active").forEach((item) => {
       state.changes.set(item.change_id, {...item, key: item.change_id});
@@ -256,21 +295,36 @@ async function loadSession(sessionId) {
     els.conversationEyebrow.textContent = "历史会话";
     els.conversationTitle.textContent = state.sessionTitle;
     els.sessionName.textContent = state.sessionTitle;
-    els.runStatus.textContent = labelStatus(data.status);
+    els.runStatus.textContent = labelStatus(activeRun?.status || data.status);
     setVerificationFromSession(data.verification_status, data.verifications || []);
     renderChanges();
     renderExecutionGroups("这个会话没有保存可展示的执行过程。 ");
     renderTurnSummary("已完成");
     els.task.value = "";
-    els.task.disabled = false;
+    els.task.disabled = Boolean(activeRun);
     els.task.placeholder = "继续告诉 Agent 接下来要做什么…";
-    els.runButton.disabled = false;
-    els.runButton.innerHTML = "<span>▶</span> 继续执行";
-    els.composerHint.textContent = "可以在这个会话中继续提出修改或追问";
+    els.runButton.disabled = Boolean(activeRun);
+    els.runButton.innerHTML = activeRun ? "<span>●</span> 执行中" : "<span>▶</span> 继续执行";
+    els.stopRunButton.classList.toggle("hidden", !activeRun);
+    els.stopRunButton.disabled = false;
+    els.stopRunButton.textContent = "停止任务";
     updateProjectDisplay();
-    els.composerHint.textContent = "可以在这个会话中继续提出修改或追问";
-    await loadSessions();
-    setConnection("已就绪");
+    els.composerHint.textContent = activeRun
+      ? "这个任务仍在后台运行，你可以切换到其他会话"
+      : "可以在这个会话中继续提出修改或追问";
+    hideApprovalCard();
+    if (activeRun) {
+      addProgressMessage();
+      renderProgressSteps();
+      renderTurnSummary(labelStatus(activeRun.status));
+      if (activeRun.pending_approval) showApproval(activeRun.pending_approval);
+      connectEvents(activeRun.run_id, activeRun.latest_sequence || 0);
+    } else {
+      hideApprovalCard();
+    }
+    await loadSessions({silent: true});
+    setConnection(activeRun ? labelStatus(activeRun.status) : "已就绪", activeRun ? "busy" : "");
+    scrollConversation();
   } catch (error) {
     setConnection("打开失败", "error");
     toast(error.message, true);
@@ -278,9 +332,9 @@ async function loadSession(sessionId) {
 }
 
 function resetDraft(options = {}) {
-  if (state.source) state.source.close();
+  disconnectEvents();
   state.runId = null;
-  state.source = null;
+  state.currentSequence = 0;
   state.sessionId = null;
   state.draft = true;
   state.runActive = false;
@@ -292,6 +346,7 @@ function resetDraft(options = {}) {
   state.eventCount = 0;
   state.executionGroups = [];
   state.readGroup = null;
+  state.changesExpanded = false;
   state.changes = new Map();
   state.pendingApproval = null;
   if (!options.keepTitle) state.sessionTitle = "";
@@ -344,8 +399,10 @@ async function startRun() {
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.detail || "无法开始执行任务");
     state.runId = data.run_id;
+    state.currentSequence = 0;
+    state.activeRuns.set(data.run_id, data);
     els.runStatus.textContent = labelStatus(data.status);
-    connectEvents(data.run_id);
+    connectEvents(data.run_id, 0);
   } catch (error) {
     markProgressDone("任务未能启动");
     setConnection("启动失败", "error");
@@ -423,23 +480,36 @@ function prepareRunningView(task) {
   setConnection("正在启动", "busy");
 }
 
-function connectEvents(runId) {
+function disconnectEvents() {
   if (state.source) state.source.close();
-  const source = new EventSource(`/api/runs/${runId}/events`);
+  state.source = null;
+}
+
+function connectEvents(runId, after = 0) {
+  disconnectEvents();
+  state.currentSequence = Number(after || 0);
+  const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events?after=${state.currentSequence}`);
   state.source = source;
-  source.addEventListener("open", () => setConnection("正在执行", "busy"));
+  source.addEventListener("open", () => {
+    if (state.runId === runId) setConnection("正在执行", "busy");
+  });
   source.addEventListener("run-event", (message) => {
+    if (state.runId !== runId || state.source !== source) return;
     const envelope = JSON.parse(message.data);
+    state.currentSequence = Math.max(state.currentSequence, Number(envelope.sequence || 0));
+    const active = state.activeRuns.get(runId) || {run_id: runId};
+    state.activeRuns.set(runId, {...active, latest_sequence: state.currentSequence});
+    const wasCurrent = state.runId === runId;
     handleEvent(envelope);
     if (terminalEvents.has(envelope.event)) {
       source.close();
-      state.source = null;
-      state.source = null;
-      refreshSnapshot(runId);
+      if (state.source === source) state.source = null;
+      state.activeRuns.delete(runId);
+      refreshSnapshot(runId, wasCurrent);
     }
   });
   source.onerror = () => {
-    if (state.source) setConnection("正在重新连接…", "busy");
+    if (state.source === source && state.runId === runId) setConnection("正在重新连接…", "busy");
   };
 }
 
@@ -449,7 +519,9 @@ function handleEvent(envelope) {
   const timestamp = envelope.timestamp;
   if (name === "session_created") {
     state.sessionId = payload.session_id || state.sessionId;
-    loadSessions();
+    const active = state.activeRuns.get(state.runId);
+    if (active) state.activeRuns.set(state.runId, {...active, session_id: state.sessionId});
+    loadSessions({silent: true});
   } else if (name === "session_turn_started") {
     state.currentTurn = Math.max(1, Number(payload.turn || state.currentTurn));
     state.usedSessionMemory = state.currentTurn > 1;
@@ -638,7 +710,6 @@ function finishRun(payload) {
   renderTurnSummary(completed ? "已完成" : "已停止");
   renderChanges();
   setConnection(completed ? "执行完成" : "已停止");
-  loadSessions();
 }
 
 function renderTurnSummary(status = "") {
@@ -666,13 +737,46 @@ function failRun(message) {
   renderTurnSummary("未完成");
   renderChanges();
   setConnection("发生错误", "error");
-  loadSessions();
 }
 
 function showApproval(payload) {
-  state.pendingApproval = payload;
-  const args = payload.arguments || {};
-  const tool = payload.tool || "tool";
+  state.pendingApproval = {...payload, run_id: state.runId};
+  const items = Array.isArray(payload.items) && payload.items.length
+    ? payload.items
+    : [{
+        tool: payload.tool || "tool",
+        risk: payload.risk || "write",
+        arguments: payload.arguments || {},
+        description: approvalItemDescription(payload.tool, payload.arguments || {}),
+      }];
+  const summary = payload.summary || items[0].description || "Agent 想执行一项需要确认的操作";
+  const oldMessage = document.getElementById("inlineApprovalMessage");
+  if (oldMessage) oldMessage.remove();
+  const wrapper = document.createElement("div");
+  wrapper.id = "inlineApprovalMessage";
+  wrapper.className = "message agent approval-message";
+  const visibleItems = items.slice(0, 10);
+  const remainder = items.length - visibleItems.length;
+  const technical = items.map((item, index) => {
+    const label = item.description || approvalItemDescription(item.tool, item.arguments || {});
+    return `${index + 1}. ${label}\n${JSON.stringify(item.arguments || {}, null, 2)}`;
+  }).join("\n\n");
+  wrapper.innerHTML = `
+    <div class="message-author"><span class="author-dot">AI</span><span>Mini Coder</span></div>
+    <div class="inline-approval-card">
+      <div class="inline-approval-header"><strong>需要你的确认</strong><span class="risk-badge">${escapeHtml(friendlyRisk(payload.risk))}</span></div>
+      <div class="inline-approval-body"><p>${escapeHtml(summary)}。允许后才会真正执行。</p>
+        <ul class="approval-item-list">${visibleItems.map((item) => `<li>${escapeHtml(item.description || approvalItemDescription(item.tool, item.arguments || {}))}</li>`).join("")}${remainder > 0 ? `<li>另外还有 ${remainder} 项同类操作</li>` : ""}</ul>
+      </div>
+      <details class="inline-technical-details"><summary>查看具体内容</summary><pre>${escapeHtml(technical)}</pre></details>
+      <div class="approval-actions"><button class="secondary-button inline-deny" type="button">拒绝</button><button class="primary-button inline-approve" type="button">允许这些操作</button></div>
+    </div>`;
+  wrapper.querySelector(".inline-deny").addEventListener("click", () => decideApproval(false));
+  wrapper.querySelector(".inline-approve").addEventListener("click", () => decideApproval(true));
+  els.messageList.appendChild(wrapper);
+
+  const args = payload.arguments || items[0]?.arguments || {};
+  const tool = payload.tool || items[0]?.tool || "tool";
   els.approvalRisk.textContent = friendlyRisk(payload.risk);
   els.approvalHeading.textContent = "Agent 需要你的确认";
   if (tool === "edit_file" || tool === "write_file") {
@@ -682,16 +786,25 @@ function showApproval(payload) {
   } else {
     els.approvalTitle.textContent = `Agent 想执行“${friendlyToolName(tool)}”。`;
   }
-  els.approvalArguments.textContent = JSON.stringify(args, null, 2);
-  els.approvalPanel.classList.remove("hidden");
-  els.inspector.classList.add("open");
+  els.approvalArguments.textContent = technical || JSON.stringify(args, null, 2);
+  els.approvalPanel.classList.add("hidden");
   els.runStatus.textContent = "等待你的确认";
   setConnection("等待确认", "busy");
+  scrollConversation();
 }
 
 function hideApproval(approved, expired = false) {
   state.pendingApproval = null;
   els.approvalPanel.classList.add("hidden");
+  const message = document.getElementById("inlineApprovalMessage");
+  if (message) {
+    const card = message.querySelector(".inline-approval-card");
+    if (card) {
+      card.classList.add("resolved");
+      card.innerHTML = `<div class="inline-approval-result">${expired ? "确认已超时，这批操作没有执行" : approved ? "你已允许这批操作，Agent 正在继续" : "你已拒绝这批操作，文件不会因此被修改"}</div>`;
+    }
+    message.removeAttribute("id");
+  }
   if (expired) toast("确认等待超时，Agent 已停止这项操作。", true);
   else if (approved === false) toast("已拒绝这项操作。 ");
   els.runStatus.textContent = "正在执行";
@@ -700,11 +813,13 @@ function hideApproval(approved, expired = false) {
 
 async function decideApproval(approved) {
   const pending = state.pendingApproval;
-  if (!pending || !state.runId) return;
+  const runId = pending?.run_id || state.runId;
+  if (!pending || !runId) return;
   els.approveButton.disabled = true;
   els.denyButton.disabled = true;
+  document.querySelectorAll("#inlineApprovalMessage button").forEach((button) => { button.disabled = true; });
   try {
-    const response = await fetch(`/api/runs/${state.runId}/approvals/${pending.approval_id}`, {
+    const response = await fetch(`/api/runs/${runId}/approvals/${pending.approval_id}`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({approved}),
@@ -716,7 +831,23 @@ async function decideApproval(approved) {
   } finally {
     els.approveButton.disabled = false;
     els.denyButton.disabled = false;
+    document.querySelectorAll("#inlineApprovalMessage button").forEach((button) => { button.disabled = false; });
   }
+}
+
+function hideApprovalCard() {
+  state.pendingApproval = null;
+  els.approvalPanel.classList.add("hidden");
+  const message = document.getElementById("inlineApprovalMessage");
+  if (message) message.remove();
+}
+
+function approvalItemDescription(tool, args = {}) {
+  if (tool === "write_file" || tool === "edit_file") return `修改文件 ${args.path || "项目文件"}`;
+  if (tool === "run_command") {
+    return args.purpose === "verify" ? `运行项目检查：${args.command || "本地命令"}` : `运行本地命令：${args.command || "未命名命令"}`;
+  }
+  return friendlyToolName(tool);
 }
 
 function rememberChangePreview(payload, timestamp) {
@@ -738,26 +869,48 @@ function rememberAppliedChange(payload) {
 
 function renderChanges() {
   const changes = [...state.changes.values()];
-  els.changeCount.textContent = String(new Set(changes.map((item) => item.path)).size);
+  const latestByPath = new Map();
+  changes.forEach((item) => latestByPath.set(item.path || item.key, item));
+  const visibleChanges = [...latestByPath.values()];
+  const fileCount = visibleChanges.length;
+  els.changeCount.textContent = String(fileCount);
   const additions = changes.reduce((sum, item) => sum + Number(item.additions || 0), 0);
   const deletions = changes.reduce((sum, item) => sum + Number(item.deletions || 0), 0);
   els.diffStats.textContent = changes.length ? `+${additions} / -${deletions}` : "暂无修改";
+  els.changesToggleButton.disabled = !fileCount;
+  els.changesToggleButton.setAttribute("aria-expanded", String(Boolean(fileCount && state.changesExpanded)));
+  els.changesToggleButton.textContent = `${state.changesExpanded ? "收起" : "展开"} ${fileCount} 个文件`;
+  els.changeList.classList.toggle("hidden", !fileCount || !state.changesExpanded);
   els.changeList.replaceChildren();
   if (!changes.length) {
-    els.changeList.innerHTML = '<div class="detail-empty">Agent 修改文件后会显示在这里</div>';
     updateUndoButton();
     return;
   }
-  changes.forEach((change) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "change-item";
-    button.innerHTML = `
-      <span class="change-icon">&lt;/&gt;</span>
-      <span><strong>${escapeHtml(change.path || "项目文件")}</strong><small>${change.previewOnly ? "等待确认" : "点击查看完整代码"}</small></span>
-      <span class="change-stats">+${Number(change.additions || 0)} / -${Number(change.deletions || 0)}</span>`;
-    button.addEventListener("click", () => openChange(change));
-    els.changeList.appendChild(button);
+  if (!state.changesExpanded) {
+    updateUndoButton();
+    return;
+  }
+  visibleChanges.forEach((change) => {
+    const row = document.createElement("div");
+    row.className = "change-item";
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "change-open-button";
+    openButton.innerHTML = `
+        <span class="change-icon">&lt;/&gt;</span>
+        <span><strong>${escapeHtml(change.path || "项目文件")}</strong><small>${change.previewOnly ? "等待确认" : "点击查看完整代码"}</small></span>
+        <span class="change-stats">+${Number(change.additions || 0)} / -${Number(change.deletions || 0)}</span>`;
+    openButton.addEventListener("click", () => openChange(change));
+    row.appendChild(openButton);
+    if (state.sessionId && !state.runActive && !change.previewOnly && change.change_id) {
+      const undoFileButton = document.createElement("button");
+      undoFileButton.type = "button";
+      undoFileButton.className = "file-undo-button";
+      undoFileButton.textContent = "撤销此文件";
+      undoFileButton.addEventListener("click", () => undoFileChange(change, undoFileButton));
+      row.appendChild(undoFileButton);
+    }
+    els.changeList.appendChild(row);
   });
   updateUndoButton();
 }
@@ -789,6 +942,26 @@ async function undoLastChange() {
   } catch (error) {
     els.undoButton.disabled = false;
     els.undoButton.textContent = "撤销上次修改";
+    toast(friendlyError(error.message), true);
+  }
+}
+
+async function undoFileChange(change, button) {
+  if (!state.sessionId || state.runActive || !change.change_id) return;
+  button.disabled = true;
+  button.textContent = "正在撤销…";
+  try {
+    const response = await fetch(
+      `/api/sessions/${encodeURIComponent(state.sessionId)}/changes/${encodeURIComponent(change.change_id)}/undo`,
+      {method: "POST"},
+    );
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法撤销这个文件的修改");
+    toast(`已撤销 ${data.path || change.path || "这个文件"}`);
+    await loadSession(state.sessionId);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "撤销此文件";
     toast(friendlyError(error.message), true);
   }
 }
@@ -950,13 +1123,18 @@ function setVerification(tone, label, message) {
   els.verificationMessage.textContent = message;
 }
 
-async function refreshSnapshot(runId) {
+async function refreshSnapshot(runId, refreshOpenSession = false) {
   try {
     const response = await fetch(`/api/runs/${runId}`);
     const data = await readJson(response);
     if (!response.ok) return;
-    if (data.result?.session_id) state.sessionId = data.result.session_id;
-    await loadSessions();
+    const sessionId = data.result?.session_id || data.session_id || state.sessionId;
+    if (sessionId && refreshOpenSession) state.sessionId = sessionId;
+    await syncActiveRuns();
+    await loadSessions({silent: true});
+    if (refreshOpenSession && sessionId && state.sessionId === sessionId) {
+      await loadSession(sessionId);
+    }
   } catch (_) {
     // The event stream already delivered the user-facing result.
   }

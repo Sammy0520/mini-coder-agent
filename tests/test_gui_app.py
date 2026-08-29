@@ -140,6 +140,7 @@ class GuiHttpTests(unittest.TestCase):
             self.assertIn("Mini Coder Agent", index)
             self.assertIn('id="stopRunButton"', index)
             self.assertIn('id="undoButton"', index)
+            self.assertIn('id="changesToggleButton"', index)
             self.assertIn('id="turnSummary"', index)
             self.assertNotIn('id="usageSummary"', index)
             self.assertEqual(Path(bootstrap["default_workspace"]), Path.cwd().resolve())
@@ -321,8 +322,12 @@ class GuiHttpTests(unittest.TestCase):
 
             base = f"http://127.0.0.1:{self.port}"
             query = urllib.parse.urlencode({"workspace": directory})
-            with urllib.request.urlopen(f"{base}/api/sessions?{query}", timeout=3):
-                pass
+            with urllib.request.urlopen(f"{base}/api/sessions?{query}", timeout=3) as response:
+                listing = json.load(response)
+            self.assertIn(
+                session.session_id,
+                [item["session_id"] for item in listing["sessions"]],
+            )
             target.write_text("user version\n", encoding="utf-8")
             request = urllib.request.Request(
                 f"{base}/api/sessions/{session.session_id}/undo-last",
@@ -335,6 +340,63 @@ class GuiHttpTests(unittest.TestCase):
 
             self.assertEqual(caught.exception.code, 409)
             self.assertEqual(target.read_text(encoding="utf-8"), "user version\n")
+
+    def test_single_file_undo_only_reverts_the_requested_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tracker = ChangeTracker(workspace)
+            first = tracker.apply(
+                tracker.prepare(
+                    "write_file",
+                    {"path": "first.txt", "content": "first\n"},
+                    "execution-first",
+                )
+            )
+            second = tracker.apply(
+                tracker.prepare(
+                    "write_file",
+                    {"path": "second.txt", "content": "second\n"},
+                    "execution-second",
+                )
+            )
+            session = AgentSession.create(
+                task="Create two files",
+                workspace=workspace,
+                model={"model": "fake"},
+            )
+            session.changes.extend([first, second])
+            session.refresh_verification_status()
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(SessionStatus.COMPLETED_UNVERIFIED, final_text="done")
+            SessionStore.for_workspace(workspace).save(session)
+
+            base = f"http://127.0.0.1:{self.port}"
+            query = urllib.parse.urlencode({"workspace": directory})
+            with urllib.request.urlopen(
+                f"{base}/api/sessions?{query}", timeout=3
+            ) as response:
+                listing = json.load(response)
+            self.assertIn(
+                session.session_id,
+                [item["session_id"] for item in listing["sessions"]],
+            )
+            request = urllib.request.Request(
+                f"{base}/api/sessions/{session.session_id}/changes/{first.change_id}/undo",
+                data=b"",
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    result = json.load(response)
+            except urllib.error.HTTPError as exc:
+                self.fail(f"single-file undo failed: {exc.read().decode('utf-8')}")
+
+            self.assertEqual(result["change_id"], first.change_id)
+            self.assertFalse((workspace / "first.txt").exists())
+            self.assertTrue((workspace / "second.txt").exists())
+            saved = SessionStore.for_workspace(workspace).load(session.session_id)
+            self.assertEqual(saved.changes[0].undo_status, "undone")
+            self.assertEqual(saved.changes[1].undo_status, "active")
 
 
 if __name__ == "__main__":

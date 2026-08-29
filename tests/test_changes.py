@@ -150,6 +150,30 @@ class ChangeTrackerTests(unittest.TestCase):
         self.assertEqual(undone_first.change_id, first.change_id)
         self.assertEqual(path.read_text(encoding="utf-8"), "A\n")
 
+    def test_undo_change_targets_one_file_without_touching_another(self) -> None:
+        first = self.tracker.apply(
+            self.tracker.prepare(
+                "write_file",
+                {"path": "first.txt", "content": "first\n"},
+                "execution-first-file",
+            )
+        )
+        second = self.tracker.apply(
+            self.tracker.prepare(
+                "write_file",
+                {"path": "second.txt", "content": "second\n"},
+                "execution-second-file",
+            )
+        )
+
+        undone, event = self.tracker.undo_change([first, second], first.change_id)
+
+        self.assertEqual(undone.change_id, first.change_id)
+        self.assertEqual(event.change_id, first.change_id)
+        self.assertFalse((self.workspace / "first.txt").exists())
+        self.assertTrue((self.workspace / "second.txt").exists())
+        self.assertEqual(second.undo_status, "active")
+
     def test_undo_new_file_removes_it(self) -> None:
         change = self.tracker.apply(
             self.tracker.prepare(

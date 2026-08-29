@@ -149,6 +149,26 @@ class ChangeTracker:
         change = next((item for item in reversed(changes) if item.undo_status == "active"), None)
         if change is None:
             raise ChangeError("session has no active file change to undo")
+        return self._undo_change(change)
+
+    def undo_change(
+        self,
+        changes: list[ChangeRecord],
+        change_id: str,
+    ) -> tuple[ChangeRecord, UndoRecord]:
+        change = next(
+            (
+                item
+                for item in changes
+                if item.change_id == change_id and item.undo_status == "active"
+            ),
+            None,
+        )
+        if change is None:
+            raise ChangeError("tracked file change is not active or does not exist")
+        return self._undo_change(change)
+
+    def _undo_change(self, change: ChangeRecord) -> tuple[ChangeRecord, UndoRecord]:
         path = self._resolve_record_path(change.path)
         self._reject_symlinks(change.path)
         if path.exists() and not path.is_file():

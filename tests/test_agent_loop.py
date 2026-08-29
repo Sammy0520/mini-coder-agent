@@ -109,6 +109,51 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(session.status, SessionStatus.DENIED)
             self.assertIsNotNone(session.tool_executions[0].prepared_change)
 
+    def test_safe_mode_batches_multiple_writes_from_one_model_response(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            batches: list[list[str]] = []
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-one",
+                                name="write_file",
+                                arguments={"path": "one.txt", "content": "one\n"},
+                                raw_arguments='{"path":"one.txt","content":"one\\n"}',
+                            ),
+                            ToolCall(
+                                id="call-two",
+                                name="write_file",
+                                arguments={"path": "two.txt", "content": "two\n"},
+                                raw_arguments='{"path":"two.txt","content":"two\\n"}',
+                            ),
+                        ]
+                    ),
+                    ModelResponse(content="Created both files."),
+                ]
+            )
+
+            def approve_batch(items) -> bool:
+                batches.append([arguments["path"] for _, arguments in items])
+                return True
+
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace, approval_policy=ApprovalPolicy.SAFE),
+                approval_callback=lambda *_: self.fail("individual approval was requested"),
+                batch_approval_callback=approve_batch,
+            )
+
+            result = runner.run("Create two files")
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(batches, [["one.txt", "two.txt"]])
+            self.assertEqual((workspace / "one.txt").read_text(encoding="utf-8"), "one\n")
+            self.assertEqual((workspace / "two.txt").read_text(encoding="utf-8"), "two\n")
+
     def test_multiple_agent_writes_are_ordered_and_summarized_in_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

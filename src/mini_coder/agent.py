@@ -50,6 +50,7 @@ from .verification import VerificationTracker
 
 EventCallback = Callable[[str, dict[str, Any]], None]
 ApprovalCallback = Callable[[Tool, dict[str, Any]], bool]
+BatchApprovalCallback = Callable[[list[tuple[Tool, dict[str, Any]]]], bool]
 CancellationCallback = Callable[[], bool]
 
 
@@ -82,6 +83,7 @@ class AgentRunner:
         config: AgentConfig,
         system_prompt: str | None = None,
         approval_callback: ApprovalCallback | None = None,
+        batch_approval_callback: BatchApprovalCallback | None = None,
         event_callback: EventCallback | None = None,
         cancellation_callback: CancellationCallback | None = None,
         session_store: SessionStore | None = None,
@@ -92,6 +94,7 @@ class AgentRunner:
         self.config = config
         self.system_prompt = build_system_prompt() if system_prompt is None else system_prompt
         self.approval_callback = approval_callback
+        self.batch_approval_callback = batch_approval_callback
         self.event_callback = event_callback
         self.cancellation_callback = cancellation_callback
         self.session_store = session_store
@@ -472,6 +475,39 @@ class AgentRunner:
                     )
 
                 stop_for_repetition = False
+                batch_decisions: dict[str, bool] = {}
+                batch_candidates: list[tuple[Tool, dict[str, Any]]] = []
+                batch_call_ids: list[str] = []
+                for call, repeated in zip(
+                    response.tool_calls,
+                    repeated_flags,
+                    strict=True,
+                ):
+                    if repeated or call.arguments is None or call.parse_error:
+                        continue
+                    try:
+                        self.registry.validate_arguments(call.name, call.arguments)
+                    except ToolError:
+                        continue
+                    tool = self.registry.get(call.name)
+                    if tool is None or not self._requires_interactive_approval(
+                        tool,
+                        call.arguments,
+                    ):
+                        continue
+                    batch_candidates.append((tool, call.arguments))
+                    batch_call_ids.append(call.id)
+                if len(batch_candidates) > 1 and self.batch_approval_callback is not None:
+                    if session is not None:
+                        session.set_status(SessionStatus.WAITING_FOR_APPROVAL)
+                        self._persist(session, messages, usage)
+                    approved_batch = self._ask_batch_approval(batch_candidates)
+                    if session is not None:
+                        session.set_status(SessionStatus.RUNNING)
+                    self._check_cancelled()
+                    batch_decisions.update(
+                        {call_id: approved_batch for call_id in batch_call_ids}
+                    )
                 for call, record, repeated in zip(
                     response.tool_calls,
                     records,
@@ -496,7 +532,14 @@ class AgentRunner:
                         )
                         stop_for_repetition = True
                     else:
-                        self._process_tool_call(call, record, messages, usage, session)
+                        self._process_tool_call(
+                            call,
+                            record,
+                            messages,
+                            usage,
+                            session,
+                            approval_decision=batch_decisions.get(call.id),
+                        )
                         self._check_cancelled()
                     if session is not None:
                         budget_reason = self._budget_reason(session, before_model=False)
@@ -962,6 +1005,7 @@ class AgentRunner:
         session: AgentSession | None,
         *,
         reuse_approval: bool = False,
+        approval_decision: bool | None = None,
     ) -> ToolResult:
         command_assessment = (
             assess_command(str(call.arguments.get("command", "")))
@@ -1078,21 +1122,25 @@ class AgentRunner:
             )
             return result
 
-        approved = reuse_approval or tool.risk == RiskLevel.READ
-        approval_automatic = approved
-        if command_assessment is not None and command_assessment.level == CommandRisk.READ_ONLY:
-            approved = True
-            approval_automatic = True
-        elif (
-            self.config.approval_policy == ApprovalPolicy.AUTO
-            and (
-                command_assessment is None
-                or command_assessment.auto_approvable
-            )
-        ):
-            approved = True
-            approval_automatic = True
-        if not approved:
+        if approval_decision is None:
+            approved = reuse_approval or tool.risk == RiskLevel.READ
+            approval_automatic = approved
+            if command_assessment is not None and command_assessment.level == CommandRisk.READ_ONLY:
+                approved = True
+                approval_automatic = True
+            elif (
+                self.config.approval_policy == ApprovalPolicy.AUTO
+                and (
+                    command_assessment is None
+                    or command_assessment.auto_approvable
+                )
+            ):
+                approved = True
+                approval_automatic = True
+        else:
+            approved = approval_decision
+            approval_automatic = False
+        if not approved and approval_decision is None:
             if session is not None:
                 session.set_status(SessionStatus.WAITING_FOR_APPROVAL)
                 self._persist(session, messages, usage)
@@ -1457,6 +1505,34 @@ class AgentRunner:
         if self.approval_callback is None:
             return False
         return bool(self.approval_callback(tool, arguments))
+
+    def _ask_batch_approval(
+        self,
+        items: list[tuple[Tool, dict[str, Any]]],
+    ) -> bool:
+        if self.batch_approval_callback is None:
+            return False
+        return bool(self.batch_approval_callback(items))
+
+    def _requires_interactive_approval(
+        self,
+        tool: Tool,
+        arguments: dict[str, Any],
+    ) -> bool:
+        if tool.risk == RiskLevel.READ:
+            return False
+        command_assessment = (
+            assess_command(str(arguments.get("command", "")))
+            if tool.name == "run_command"
+            else None
+        )
+        if command_assessment is not None and command_assessment.level == CommandRisk.READ_ONLY:
+            return False
+        if self.config.approval_policy == ApprovalPolicy.AUTO and (
+            command_assessment is None or command_assessment.auto_approvable
+        ):
+            return False
+        return True
 
     def _persist(
         self,
