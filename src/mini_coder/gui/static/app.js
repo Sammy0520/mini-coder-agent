@@ -13,14 +13,13 @@ const state = {
   pendingApproval: null,
   folderPath: null,
   folderParent: null,
-  modalMode: "new",
   startAfterSetup: false,
   codeDetail: null,
   codeTab: "diff",
 };
 
 const elementIds = [
-  "newSessionButton", "projectName", "projectPath", "editProjectButton", "sessionCount", "sessionList",
+  "newSessionButton", "sessionCount", "sessionList",
   "connectionDot", "connectionLabel", "conversationEyebrow", "conversationTitle", "conversationProject",
   "detailsToggleButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
   "welcomeState", "messageList", "task", "composerHint", "runButton", "inspector", "closeInspectorButton",
@@ -42,8 +41,7 @@ bindEvents();
 bootstrap();
 
 function bindEvents() {
-  els.newSessionButton.addEventListener("click", () => openSessionModal("new"));
-  els.editProjectButton.addEventListener("click", () => openSessionModal("project"));
+  els.newSessionButton.addEventListener("click", () => openSessionModal());
   els.sessionModalClose.addEventListener("click", closeSessionModal);
   els.sessionModalCancel.addEventListener("click", closeSessionModal);
   els.sessionModalConfirm.addEventListener("click", confirmSessionSetup);
@@ -100,7 +98,10 @@ async function bootstrap() {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem("mini-coder-project") || "{}"); } catch (_) { saved = {}; }
     state.workspace = saved.workspace || data.default_workspace || "";
-    state.configPath = saved.configPath || data.default_config_path || "agent.toml";
+    const legacyProjectConfig = saved.workspace ? joinPath(saved.workspace, "agent.toml") : "";
+    state.configPath = saved.configPath && !samePath(saved.configPath, legacyProjectConfig)
+      ? saved.configPath
+      : (data.default_config_path || "agent.toml");
     updateProjectDisplay();
     resetDraft();
     await loadSessions();
@@ -110,22 +111,18 @@ async function bootstrap() {
   }
 }
 
-function openSessionModal(mode, startAfterSetup = false) {
-  state.modalMode = mode;
+function openSessionModal(startAfterSetup = false) {
   state.startAfterSetup = startAfterSetup;
-  const isNew = mode === "new";
-  els.sessionDialogEyebrow.textContent = isNew ? "新建会话" : "编辑项目";
-  els.sessionDialogTitle.textContent = isNew ? "设置会话与项目" : "选择要使用的项目";
-  els.sessionTitleField.classList.toggle("hidden", !isNew);
-  els.sessionTitleInput.value = isNew
-    ? (state.sessionTitle || suggestedTitle(els.task.value))
-    : "";
+  els.sessionDialogEyebrow.textContent = "新建会话";
+  els.sessionDialogTitle.textContent = "设置会话与工作文件夹";
+  els.sessionTitleField.classList.remove("hidden");
+  els.sessionTitleInput.value = state.sessionTitle || suggestedTitle(els.task.value);
   els.workspace.value = state.workspace;
   els.configPath.value = state.configPath;
-  els.sessionModalConfirm.textContent = isNew ? "进入会话" : "切换项目";
+  els.sessionModalConfirm.textContent = "进入会话";
   els.sessionModal.classList.remove("hidden");
   document.body.classList.add("modal-open");
-  window.setTimeout(() => (isNew ? els.sessionTitleInput : els.workspace).focus(), 0);
+  window.setTimeout(() => els.sessionTitleInput.focus(), 0);
 }
 
 function closeSessionModal() {
@@ -141,10 +138,10 @@ async function confirmSessionSetup() {
   const configPath = els.configPath.value.trim();
   const title = els.sessionTitleInput.value.trim();
   if (!workspace) {
-    toast("请先选择项目文件夹。", true);
+    toast("请先选择工作文件夹。", true);
     return;
   }
-  if (state.modalMode === "new" && !title) {
+  if (!title) {
     toast("请为这次会话起一个容易识别的名称。", true);
     els.sessionTitleInput.focus();
     return;
@@ -152,11 +149,11 @@ async function confirmSessionSetup() {
   const shouldStart = state.startAfterSetup;
   state.workspace = workspace;
   state.configPath = configPath || "agent.toml";
-  if (state.modalMode === "new") state.sessionTitle = title;
+  state.sessionTitle = title;
   saveProject();
   updateProjectDisplay();
   closeSessionModal();
-  resetDraft({keepTitle: state.modalMode === "new"});
+  resetDraft({keepTitle: true});
   await loadSessions();
   if (shouldStart) startRun();
 }
@@ -173,21 +170,17 @@ function saveProject() {
 }
 
 function updateProjectDisplay() {
-  const name = pathName(state.workspace) || "未选择项目";
-  els.projectName.textContent = name;
-  els.projectPath.textContent = state.workspace || "选择一个项目文件夹";
-  els.conversationProject.textContent = state.workspace || "尚未选择项目";
-  els.composerHint.textContent = state.workspace ? `当前项目：${state.workspace}` : "请先选择项目";
+  els.conversationProject.textContent = state.workspace || "尚未选择工作文件夹";
+  els.composerHint.textContent = state.workspace
+    ? `工作文件夹：${state.workspace}`
+    : "新建会话时选择工作文件夹";
 }
 
 async function loadSessions() {
   els.sessionList.innerHTML = '<div class="sidebar-empty">正在读取会话…</div>';
-  if (!state.workspace) {
-    renderSessions([]);
-    return;
-  }
   try {
-    const response = await fetch(`/api/sessions?workspace=${encodeURIComponent(state.workspace)}`);
+    const query = state.workspace ? `?workspace=${encodeURIComponent(state.workspace)}` : "";
+    const response = await fetch(`/api/sessions${query}`);
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.detail || "无法读取会话");
     renderSessions(data.sessions || []);
@@ -201,7 +194,7 @@ function renderSessions(sessions) {
   els.sessionCount.textContent = String(sessions.length);
   els.sessionList.replaceChildren();
   if (!sessions.length) {
-    els.sessionList.innerHTML = '<div class="sidebar-empty">这个项目还没有会话</div>';
+    els.sessionList.innerHTML = '<div class="sidebar-empty">还没有会话</div>';
     return;
   }
   sessions.forEach((session) => {
@@ -210,7 +203,7 @@ function renderSessions(sessions) {
     button.className = `session-item${state.sessionId === session.session_id ? " active" : ""}`;
     button.innerHTML = `
       <span class="session-item-icon">${sessionIcon(session.status)}</span>
-      <span><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(sessionTime(session.updated_at))} · ${escapeHtml(labelStatus(session.status))}</small></span>`;
+      <span><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(pathName(session.workspace))} · ${escapeHtml(sessionTime(session.updated_at))} · ${escapeHtml(labelStatus(session.status))}</small></span>`;
     button.addEventListener("click", () => loadSession(session.session_id));
     els.sessionList.appendChild(button);
   });
@@ -223,10 +216,11 @@ async function loadSession(sessionId) {
   }
   try {
     setConnection("正在打开会话", "busy");
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}?workspace=${encodeURIComponent(state.workspace)}`);
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.detail || "无法打开会话");
     state.draft = false;
+    state.workspace = data.workspace || state.workspace;
     state.sessionId = data.session_id;
     state.sessionTitle = data.title || "未命名会话";
     state.eventCount = 0;
@@ -306,7 +300,7 @@ async function startRun() {
     return;
   }
   if (!state.workspace || !state.sessionTitle) {
-    openSessionModal("new", true);
+    openSessionModal(true);
     return;
   }
   prepareRunningView(task);
@@ -649,7 +643,7 @@ async function openChange(change) {
   try {
     let detail;
     if (change.change_id && state.sessionId && !change.previewOnly) {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/changes/${encodeURIComponent(change.change_id)}?workspace=${encodeURIComponent(state.workspace)}`);
+      const response = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/changes/${encodeURIComponent(change.change_id)}`);
       detail = await readJson(response);
       if (!response.ok) throw new Error(detail.detail || "无法读取完整代码");
     } else {
@@ -729,11 +723,8 @@ function closeFolderBrowser() {
 function chooseCurrentFolder() {
   if (!state.folderPath) return;
   els.workspace.value = state.folderPath;
-  if (!els.configPath.value.trim() || els.configPath.value.trim() === state.configPath) {
-    els.configPath.value = joinPath(state.folderPath, "agent.toml");
-  }
   closeFolderBrowser();
-  toast("已选择项目文件夹");
+  toast("已选择工作文件夹");
 }
 
 async function loadDirectory(path) {
@@ -961,6 +952,11 @@ function pathName(path) {
 function joinPath(root, child) {
   const separator = String(root).includes("\\") ? "\\" : "/";
   return `${String(root).replace(/[\\/]+$/, "")}${separator}${child}`;
+}
+
+function samePath(left, right) {
+  return String(left || "").replace(/[\\/]+$/, "").toLowerCase()
+    === String(right || "").replace(/[\\/]+$/, "").toLowerCase();
 }
 
 function diffClass(line) {

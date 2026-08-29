@@ -61,12 +61,16 @@ def _unused_port() -> int:
 
 class GuiHttpTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.catalog_directory = tempfile.TemporaryDirectory()
         self.controller = RunController(
             runner_factory=lambda request, event, approval: HttpFakeRunner(event)
         )
         self.port = _unused_port()
         config = uvicorn.Config(
-            create_app(self.controller),
+            create_app(
+                self.controller,
+                catalog_path=Path(self.catalog_directory.name) / "workspaces.json",
+            ),
             host="127.0.0.1",
             port=self.port,
             log_level="error",
@@ -83,6 +87,7 @@ class GuiHttpTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.should_exit = True
         self.thread.join(timeout=5)
+        self.catalog_directory.cleanup()
 
     def test_static_page_run_api_and_sse_form_one_vertical_slice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -197,6 +202,15 @@ class GuiHttpTests(unittest.TestCase):
                 final_text="Updated the greeting.\n\nOutcome: internal diagnostics",
             )
             SessionStore.for_workspace(workspace).save(session)
+            second_workspace = workspace / "second-workspace"
+            second_workspace.mkdir()
+            second_session = AgentSession.create(
+                task="Inspect another folder",
+                title="Second folder session",
+                workspace=second_workspace,
+                model={"model": "fake"},
+            )
+            SessionStore.for_workspace(second_workspace).save(second_session)
 
             base = f"http://127.0.0.1:{self.port}"
             workspace_query = urllib.parse.urlencode({"workspace": directory})
@@ -204,17 +218,28 @@ class GuiHttpTests(unittest.TestCase):
                 f"{base}/api/sessions?{workspace_query}", timeout=3
             ) as response:
                 listing = json.load(response)
+            second_query = urllib.parse.urlencode({"workspace": second_workspace})
             with urllib.request.urlopen(
-                f"{base}/api/sessions/{session.session_id}?{workspace_query}", timeout=3
+                f"{base}/api/sessions?{second_query}", timeout=3
+            ):
+                pass
+            with urllib.request.urlopen(f"{base}/api/sessions", timeout=3) as response:
+                global_listing = json.load(response)
+            with urllib.request.urlopen(
+                f"{base}/api/sessions/{session.session_id}", timeout=3
             ) as response:
                 detail = json.load(response)
             with urllib.request.urlopen(
-                f"{base}/api/sessions/{session.session_id}/changes/{change.change_id}?{workspace_query}",
+                f"{base}/api/sessions/{session.session_id}/changes/{change.change_id}",
                 timeout=3,
             ) as response:
                 code = json.load(response)
 
             self.assertEqual(listing["sessions"][0]["title"], "Friendly greeting")
+            self.assertEqual(
+                {item["title"] for item in global_listing["sessions"]},
+                {"Friendly greeting", "Second folder session"},
+            )
             self.assertEqual(detail["conversation"][0]["content"], "Update the greeting")
             reply = detail["conversation"][1]["content"]
             self.assertIn("已经完成了", reply)

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mini Coder Agent</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260829-3">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260829-5">
 </head>
 <body>
   <div class="app-layout">
@@ -15,12 +15,8 @@
       </div>
       <button id="newSessionButton" class="new-session-button" type="button"><span>＋</span> 新建会话</button>
       <section class="project-section">
-        <div class="project-header">
-          <div class="project-identity"><span class="project-icon">▰</span><div><strong id="projectName">Code Agent</strong><span id="projectPath">D:\Code Agent</span></div></div>
-          <button id="editProjectButton" class="sidebar-icon-button" type="button" aria-label="编辑项目">✎</button>
-        </div>
-        <div class="session-section-label"><span>会话</span><span id="sessionCount">0</span></div>
-        <div id="sessionList" class="session-list"><div class="sidebar-empty">这个项目还没有会话</div></div>
+        <div class="session-section-label global-session-label"><span>所有会话</span><span id="sessionCount">0</span></div>
+        <div id="sessionList" class="session-list"><div class="sidebar-empty">还没有会话</div></div>
       </section>
       <div class="sidebar-footer"><span id="connectionDot" class="connection-dot"></span><span id="connectionLabel">已就绪</span></div>
     </aside>
@@ -39,7 +35,7 @@
       <section id="conversation" class="conversation" aria-live="polite">
         <div id="welcomeState" class="welcome-state">
           <div class="welcome-mark"><span></span></div><p class="eyebrow">开始协作</p><h3>你想让 Agent 完成什么？</h3>
-          <p>描述目标和验收标准。Agent 会先了解项目，修改前向你确认，完成后运行本地检查。</p>
+          <p>描述目标和验收标准。Agent 会先了解文件夹中的内容，修改前向你确认，完成后运行本地检查。</p>
           <div class="prompt-suggestions">
             <button type="button" data-prompt="阅读这个项目，补充一份清晰的中文快速开始说明，并检查文档中的命令是否正确。">完善项目文档</button>
             <button type="button" data-prompt="检查现有测试失败的原因，修复问题并运行测试验证。">修复测试问题</button>
@@ -71,8 +67,8 @@
       <div class="folder-dialog-header"><div><p id="sessionDialogEyebrow" class="eyebrow">新建会话</p><h2 id="sessionDialogTitle">设置会话与项目</h2></div><button id="sessionModalClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
       <div class="setup-form">
         <div id="sessionTitleField" class="field"><label for="sessionTitleInput">会话名称 <span class="required">必填</span></label><input id="sessionTitleInput" maxlength="120" placeholder="例如：实现用户登录"></div>
-        <div class="field"><label for="workspace">项目文件夹 <span class="required">必填</span></label><div class="input-with-action"><input id="workspace" autocomplete="off" spellcheck="false"><button id="selectWorkspaceButton" class="folder-button" type="button">选择文件夹</button></div><p class="field-help">Agent 只会读取和修改这个文件夹中的内容。</p></div>
-        <div class="field"><label for="configPath">模型配置文件 <span class="optional">通常不用改</span></label><input id="configPath" autocomplete="off" spellcheck="false"><p class="field-help">API Key 不会显示或保存在页面中。</p></div>
+        <div class="field"><label for="workspace">工作文件夹 <span class="required">必填</span></label><div class="input-with-action"><input id="workspace" autocomplete="off" spellcheck="false"><button id="selectWorkspaceButton" class="folder-button" type="button">选择文件夹</button></div><p class="field-help">这是本次会话允许 Agent 读取和修改的文件夹。</p></div>
+        <div class="field"><label for="configPath">公共模型配置 <span class="optional">通常不用改</span></label><input id="configPath" autocomplete="off" spellcheck="false"><p class="field-help">更换工作文件夹不会改变这里；API Key 也不会显示在页面中。</p></div>
       </div>
       <div class="dialog-footer"><button id="sessionModalCancel" class="secondary-button" type="button">取消</button><button id="sessionModalConfirm" class="primary-button" type="button">进入会话</button></div>
     </section>
@@ -80,7 +76,7 @@
 
   <div id="folderModal" class="modal-backdrop hidden" role="presentation">
     <section class="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folderDialogTitle">
-      <div class="folder-dialog-header"><div><p class="eyebrow">选择项目</p><h2 id="folderDialogTitle">选择 Agent 要处理的文件夹</h2></div><button id="folderCloseButton" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="folder-dialog-header"><div><p class="eyebrow">选择文件夹</p><h2 id="folderDialogTitle">选择本次会话要处理的文件夹</h2></div><button id="folderCloseButton" class="icon-button" type="button" aria-label="关闭">×</button></div>
       <div id="folderRoots" class="folder-roots" aria-label="磁盘"></div>
       <div class="folder-path-row"><button id="folderUpButton" class="folder-nav-button" type="button">← 上一级</button><input id="folderPath" aria-label="当前文件夹路径" autocomplete="off" spellcheck="false"><button id="folderGoButton" class="folder-nav-button" type="button">前往</button></div>
       <div id="folderList" class="folder-list" aria-live="polite"></div>
@@ -98,6 +94,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/assets/app.js?v=20260829-3" defer></script>
+  <script src="/assets/app.js?v=20260829-5" defer></script>
 </body>
 </html>

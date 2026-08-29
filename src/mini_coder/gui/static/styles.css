@@ -48,6 +48,7 @@ button { color: inherit; }
 .project-identity div span { margin-top: 2px; color: var(--muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-icon-button, .icon-button { flex: 0 0 auto; width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); background: #fff; cursor: pointer; }
 .session-section-label { display: flex; justify-content: space-between; padding: 14px 8px 7px; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.global-session-label { padding-top: 15px; border-top: 1px solid var(--border); }
 .session-list { min-height: 0; flex: 1; overflow-y: auto; }
 .session-item { width: 100%; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 8px; padding: 9px 8px; border: 0; border-radius: 10px; background: transparent; cursor: pointer; text-align: left; }
 .session-item:hover { background: #f0f3fa; }

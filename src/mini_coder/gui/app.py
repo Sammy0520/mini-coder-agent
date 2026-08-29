@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import string
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -28,6 +29,58 @@ class StartRunBody(BaseModel):
 
 class ApprovalBody(BaseModel):
     approved: bool
+
+
+class WorkspaceCatalog:
+    """Remember GUI workspaces so sessions can be listed independently of projects."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser().resolve()
+        self._lock = threading.Lock()
+
+    def register(self, workspace: str | Path) -> Path:
+        root = Path(workspace).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError("项目文件夹不存在")
+        with self._lock:
+            values = self._read_locked()
+            rendered = str(root)
+            if rendered not in values:
+                values.append(rendered)
+                self._write_locked(values)
+        return root
+
+    def workspaces(self) -> list[Path]:
+        with self._lock:
+            values = self._read_locked()
+        roots: list[Path] = []
+        for value in values:
+            try:
+                root = Path(value).expanduser().resolve()
+            except (OSError, RuntimeError):
+                continue
+            if root.is_dir():
+                roots.append(root)
+        return roots
+
+    def _read_locked(self) -> list[str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return []
+        values = data.get("workspaces") if isinstance(data, dict) else None
+        if not isinstance(values, list):
+            return []
+        return [item for item in values if isinstance(item, str) and item]
+
+    def _write_locked(self, values: list[str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps({"workspaces": values}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, self.path)
 
 
 def _available_roots() -> list[str]:
@@ -210,8 +263,35 @@ def _resolve_session(workspace: str, session_id: str):
     return session
 
 
-def create_app(controller: RunController | None = None) -> FastAPI:
+def _all_sessions(catalog: WorkspaceCatalog) -> list:
+    sessions = []
+    for root in catalog.workspaces():
+        for session in SessionStore.for_workspace(root).list_sessions():
+            if Path(session.workspace).resolve() == root:
+                sessions.append(session)
+    sessions.sort(key=lambda item: item.updated_at, reverse=True)
+    return sessions
+
+
+def _resolve_catalog_session(catalog: WorkspaceCatalog, session_id: str):
+    for root in catalog.workspaces():
+        try:
+            return _resolve_session(str(root), session_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    raise HTTPException(status_code=404, detail="找不到这个会话")
+
+
+def create_app(
+    controller: RunController | None = None,
+    *,
+    catalog_path: str | Path | None = None,
+) -> FastAPI:
     active_controller = controller or RunController()
+    catalog = WorkspaceCatalog(
+        catalog_path or (Path.cwd() / ".mini-coder" / "gui-workspaces.json")
+    )
     static_dir = Path(__file__).with_name("static")
     app = FastAPI(
         title="Mini Coder Agent GUI",
@@ -270,20 +350,18 @@ def create_app(controller: RunController | None = None) -> FastAPI:
         }
 
     @app.get("/api/sessions")
-    def list_sessions(workspace: str) -> dict:
-        root = Path(workspace).expanduser().resolve()
-        if not root.is_dir():
-            raise HTTPException(status_code=400, detail="项目文件夹不存在")
-        sessions = [
-            item
-            for item in SessionStore.for_workspace(root).list_sessions()
-            if Path(item.workspace).resolve() == root
-        ]
-        return {"workspace": str(root), "sessions": [_session_summary(item) for item in sessions]}
+    def list_sessions(workspace: str | None = None) -> dict:
+        if workspace:
+            try:
+                catalog.register(workspace)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        sessions = _all_sessions(catalog)
+        return {"sessions": [_session_summary(item) for item in sessions]}
 
     @app.get("/api/sessions/{session_id}")
-    def get_session(session_id: str, workspace: str) -> dict:
-        session = _resolve_session(workspace, session_id)
+    def get_session(session_id: str) -> dict:
+        session = _resolve_catalog_session(catalog, session_id)
         conversation = [{"role": "user", "content": session.task}]
         if session.final_text:
             conversation.append(
@@ -314,8 +392,8 @@ def create_app(controller: RunController | None = None) -> FastAPI:
         }
 
     @app.get("/api/sessions/{session_id}/changes/{change_id}")
-    def get_change(session_id: str, change_id: str, workspace: str) -> dict:
-        session = _resolve_session(workspace, session_id)
+    def get_change(session_id: str, change_id: str) -> dict:
+        session = _resolve_catalog_session(catalog, session_id)
         change = next((item for item in session.changes if item.change_id == change_id), None)
         if change is None:
             raise HTTPException(status_code=404, detail="找不到这项代码变更")
@@ -359,6 +437,7 @@ def create_app(controller: RunController | None = None) -> FastAPI:
     @app.post("/api/runs", status_code=202)
     def start_run(body: StartRunBody) -> dict:
         try:
+            catalog.register(body.workspace)
             return active_controller.start(
                 RunRequest(
                     task=body.task,
