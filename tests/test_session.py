@@ -119,6 +119,7 @@ class SessionModelTests(unittest.TestCase):
             restored = AgentSession.from_dict(session.to_dict())
 
             self.assertEqual(restored.session_id, session.session_id)
+            self.assertEqual(restored.title, "Inspect the project")
             self.assertEqual(restored.status, SessionStatus.INTERRUPTED)
             self.assertEqual(restored.messages, session.messages)
             self.assertEqual(
@@ -224,6 +225,30 @@ class SessionModelTests(unittest.TestCase):
             self.assertEqual(restored.failed_tool_call_count, 0)
             self.assertEqual(restored.invalid_tool_call_count, 0)
             self.assertEqual(restored.repeated_read_hint_count, 0)
+
+    def test_migrates_schema_v5_session_to_derived_title(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 5
+            data.pop("title")
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.title, "Inspect the project")
+
+    def test_explicit_session_title_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = AgentSession.create(
+                task="Build a small application",
+                title="Zero-to-one demo",
+                workspace=directory,
+                model={"model": "fake"},
+            )
+
+            restored = AgentSession.from_dict(session.to_dict())
+
+            self.assertEqual(restored.title, "Zero-to-one demo")
 
     def test_rejects_invalid_tool_execution_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

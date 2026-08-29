@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from mini_coder.agent import AgentRunResult
+from mini_coder.gui.controller import RunController, RunRequest
+from mini_coder.tools.base import RiskLevel, Tool, ToolContext, ToolResult
+
+
+class DummyWriteTool(Tool):
+    name = "write_file"
+    description = "Write a file"
+    parameters = {"type": "object", "properties": {}}
+    risk = RiskLevel.WRITE
+
+    def execute(self, arguments: dict, context: ToolContext) -> ToolResult:
+        return ToolResult(True, "unused")
+
+
+class FakeRunner:
+    def __init__(self, event_callback, approval_callback, *, request_approval: bool) -> None:
+        self.event_callback = event_callback
+        self.approval_callback = approval_callback
+        self.request_approval = request_approval
+
+    def run(self, task: str) -> AgentRunResult:
+        self.event_callback("run_started", {"task_preview": task[:30]})
+        if self.request_approval:
+            approved = self.approval_callback(
+                DummyWriteTool(),
+                {"path": "answer.txt", "content": "done\n"},
+            )
+            self.event_callback(
+                "tool_call_completed",
+                {"tool": "write_file", "ok": approved, "content": "decision recorded"},
+            )
+            if not approved:
+                return AgentRunResult("denied", "The write was denied.", 1)
+        self.event_callback("run_completed", {"verification_status": "passed"})
+        return AgentRunResult(
+            "completed",
+            "The requested change is complete.",
+            2,
+            total_usage={"total_tokens": 12},
+            session_id="session-test",
+        )
+
+
+def wait_until(predicate, timeout: float = 2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.01)
+    raise AssertionError("condition was not reached before timeout")
+
+
+class RunControllerTests(unittest.TestCase):
+    def test_completed_run_exposes_ordered_events_and_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = RunController(
+                runner_factory=lambda request, event, approval: FakeRunner(
+                    event,
+                    approval,
+                    request_approval=False,
+                )
+            )
+
+            started = controller.start(
+                RunRequest(task="Inspect the project", workspace=directory)
+            )
+            finished = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))["status"]
+                    == "completed"
+                    else None
+                )
+            )
+            events = controller.events_after(started["run_id"])
+
+            self.assertEqual(finished["result"]["session_id"], "session-test")
+            self.assertEqual(finished["result"]["total_usage"]["total_tokens"], 12)
+            self.assertEqual(
+                [item["sequence"] for item in events],
+                list(range(1, len(events) + 1)),
+            )
+            self.assertEqual(events[0]["event"], "controller_run_created")
+            self.assertEqual(events[-1]["event"], "controller_run_finished")
+
+    def test_safe_run_waits_for_browser_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = RunController(
+                runner_factory=lambda request, event, approval: FakeRunner(
+                    event,
+                    approval,
+                    request_approval=True,
+                ),
+                approval_timeout_seconds=2,
+            )
+            started = controller.start(
+                RunRequest(task="Create answer.txt", workspace=directory)
+            )
+            waiting = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))["status"]
+                    == "waiting_for_approval"
+                    else None
+                )
+            )
+            pending = waiting["pending_approval"]
+
+            self.assertEqual(pending["tool"], "write_file")
+            self.assertEqual(pending["risk"], "write")
+            self.assertEqual(pending["arguments"]["path"], "answer.txt")
+
+            controller.decide_approval(
+                started["run_id"],
+                pending["approval_id"],
+                True,
+            )
+            finished = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))["status"]
+                    == "completed"
+                    else None
+                )
+            )
+
+            self.assertIsNone(finished["pending_approval"])
+            names = [item["event"] for item in controller.events_after(started["run_id"])]
+            self.assertIn("approval_required", names)
+            self.assertIn("approval_resolved", names)
+
+    def test_rejected_approval_finishes_as_failed_without_hanging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = RunController(
+                runner_factory=lambda request, event, approval: FakeRunner(
+                    event,
+                    approval,
+                    request_approval=True,
+                ),
+                approval_timeout_seconds=2,
+            )
+            started = controller.start(
+                RunRequest(task="Create answer.txt", workspace=directory)
+            )
+            waiting = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))[
+                        "pending_approval"
+                    ]
+                    else None
+                )
+            )
+            controller.decide_approval(
+                started["run_id"],
+                waiting["pending_approval"]["approval_id"],
+                False,
+            )
+            finished = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))["status"]
+                    == "failed"
+                    else None
+                )
+            )
+
+            self.assertEqual(finished["result"]["status"], "denied")
+
+    def test_start_rejects_empty_task_and_missing_workspace(self) -> None:
+        controller = RunController(
+            runner_factory=lambda request, event, approval: FakeRunner(
+                event,
+                approval,
+                request_approval=False,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "task must not be empty"):
+            controller.start(RunRequest(task=" ", workspace="."))
+        with self.assertRaisesRegex(ValueError, "workspace is not a directory"):
+            controller.start(
+                RunRequest(task="Do work", workspace="definitely-not-a-real-directory")
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

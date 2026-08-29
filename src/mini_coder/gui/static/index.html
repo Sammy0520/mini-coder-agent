@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Coder Agent</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=20260829-5">
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="brand compact-brand">
+        <div class="brand-mark" aria-hidden="true"><span></span></div>
+        <div><p class="eyebrow">LOCAL AGENT</p><h1>Mini Coder</h1></div>
+      </div>
+      <button id="newSessionButton" class="new-session-button" type="button"><span>＋</span> 新建会话</button>
+      <section class="project-section">
+        <div class="session-section-label global-session-label"><span>所有会话</span><span id="sessionCount">0</span></div>
+        <div id="sessionList" class="session-list"><div class="sidebar-empty">还没有会话</div></div>
+      </section>
+      <div class="sidebar-footer"><span id="connectionDot" class="connection-dot"></span><span id="connectionLabel">已就绪</span></div>
+    </aside>
+
+    <main class="main-pane">
+      <header class="conversation-header">
+        <div><p class="eyebrow" id="conversationEyebrow">新会话</p><h2 id="conversationTitle">准备开始一个任务</h2><p id="conversationProject" class="conversation-project">D:\Code Agent</p></div>
+        <div class="header-actions"><button id="detailsToggleButton" class="outline-button" type="button">执行详情</button></div>
+      </header>
+      <section class="status-strip compact-status">
+        <div><span class="status-label">运行状态</span><strong id="runStatus" class="status-value">尚未开始</strong></div>
+        <div><span class="status-label">会话</span><strong id="sessionName" class="status-value">新会话</strong></div>
+        <div><span class="status-label">验证结果</span><strong id="verificationStatus" class="status-value">等待运行</strong></div>
+        <div><span class="status-label">修改文件</span><strong id="changeCount" class="status-value">0</strong></div>
+      </section>
+      <section id="conversation" class="conversation" aria-live="polite">
+        <div id="welcomeState" class="welcome-state">
+          <div class="welcome-mark"><span></span></div><p class="eyebrow">开始协作</p><h3>你想让 Agent 完成什么？</h3>
+          <p>描述目标和验收标准。Agent 会先了解文件夹中的内容，修改前向你确认，完成后运行本地检查。</p>
+          <div class="prompt-suggestions">
+            <button type="button" data-prompt="阅读这个项目，补充一份清晰的中文快速开始说明，并检查文档中的命令是否正确。">完善项目文档</button>
+            <button type="button" data-prompt="检查现有测试失败的原因，修复问题并运行测试验证。">修复测试问题</button>
+            <button type="button" data-prompt="从零创建一个带测试的简单命令行待办事项应用。">从零创建小项目</button>
+          </div>
+        </div>
+        <div id="messageList" class="message-list"></div>
+      </section>
+      <footer class="composer-shell">
+        <div class="composer"><textarea id="task" rows="3" placeholder="描述你希望 Agent 完成的任务…"></textarea><div class="composer-footer"><span id="composerHint">当前项目：D:\Code Agent</span><button id="runButton" class="send-button" type="button"><span>▶</span> 开始执行</button></div></div>
+      </footer>
+    </main>
+
+    <aside id="inspector" class="inspector">
+      <div class="inspector-header"><div><p class="eyebrow">任务详情</p><h2>执行与变更</h2></div><button id="closeInspectorButton" class="icon-button" type="button" aria-label="关闭详情">×</button></div>
+      <article id="approvalPanel" class="detail-card approval-card hidden">
+        <div class="detail-card-header"><div><p class="eyebrow warning">需要你的确认</p><h3 id="approvalHeading">允许这次操作吗？</h3></div><span id="approvalRisk" class="risk-badge">WRITE</span></div>
+        <p id="approvalTitle" class="approval-title"></p><details class="technical-details"><summary>查看技术参数</summary><pre id="approvalArguments" class="code-block"></pre></details>
+        <div class="approval-actions"><button id="denyButton" class="secondary-button" type="button">拒绝</button><button id="approveButton" class="primary-button" type="button">允许操作</button></div>
+      </article>
+      <article class="detail-card"><div class="detail-card-header"><div><p class="eyebrow">代码变更</p><h3>修改的文件</h3></div><span id="diffStats" class="diff-stats">暂无修改</span></div><div id="changeList" class="change-list"><div class="detail-empty">Agent 修改文件后会显示在这里</div></div></article>
+      <article class="detail-card"><div class="detail-card-header"><div><p class="eyebrow">本地验证</p><h3>任务验收</h3></div><span id="verificationBadge" class="verification-badge neutral">未运行</span></div><p id="verificationMessage" class="verification-message">完成修改后，Agent 会运行项目内的检查命令。</p></article>
+      <article class="detail-card execution-card"><div class="detail-card-header"><div><p class="eyebrow">执行过程</p><h3>Agent 做了什么</h3></div><span id="eventCount" class="panel-count">0 项</span></div><div id="executionList" class="execution-list"><div class="detail-empty">执行步骤会以简明方式显示</div></div></article>
+    </aside>
+  </div>
+
+  <div id="sessionModal" class="modal-backdrop hidden" role="presentation">
+    <section class="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="sessionDialogTitle">
+      <div class="folder-dialog-header"><div><p id="sessionDialogEyebrow" class="eyebrow">新建会话</p><h2 id="sessionDialogTitle">设置会话与项目</h2></div><button id="sessionModalClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="setup-form">
+        <div id="sessionTitleField" class="field"><label for="sessionTitleInput">会话名称 <span class="required">必填</span></label><input id="sessionTitleInput" maxlength="120" placeholder="例如：实现用户登录"></div>
+        <div class="field"><label for="workspace">工作文件夹 <span class="required">必填</span></label><div class="input-with-action"><input id="workspace" autocomplete="off" spellcheck="false"><button id="selectWorkspaceButton" class="folder-button" type="button">选择文件夹</button></div><p class="field-help">这是本次会话允许 Agent 读取和修改的文件夹。</p></div>
+        <div class="field"><label for="configPath">公共模型配置 <span class="optional">通常不用改</span></label><input id="configPath" autocomplete="off" spellcheck="false"><p class="field-help">更换工作文件夹不会改变这里；API Key 也不会显示在页面中。</p></div>
+      </div>
+      <div class="dialog-footer"><button id="sessionModalCancel" class="secondary-button" type="button">取消</button><button id="sessionModalConfirm" class="primary-button" type="button">进入会话</button></div>
+    </section>
+  </div>
+
+  <div id="folderModal" class="modal-backdrop hidden" role="presentation">
+    <section class="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folderDialogTitle">
+      <div class="folder-dialog-header"><div><p class="eyebrow">选择文件夹</p><h2 id="folderDialogTitle">选择本次会话要处理的文件夹</h2></div><button id="folderCloseButton" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div id="folderRoots" class="folder-roots" aria-label="磁盘"></div>
+      <div class="folder-path-row"><button id="folderUpButton" class="folder-nav-button" type="button">← 上一级</button><input id="folderPath" aria-label="当前文件夹路径" autocomplete="off" spellcheck="false"><button id="folderGoButton" class="folder-nav-button" type="button">前往</button></div>
+      <div id="folderList" class="folder-list" aria-live="polite"></div>
+      <div class="folder-dialog-footer"><span id="folderCurrentHint" class="folder-current-hint"></span><div><button id="folderCancelButton" class="secondary-button" type="button">取消</button><button id="folderChooseButton" class="primary-button" type="button">选择当前文件夹</button></div></div>
+    </section>
+  </div>
+
+  <div id="codeModal" class="modal-backdrop hidden" role="presentation">
+    <section class="code-dialog" role="dialog" aria-modal="true" aria-labelledby="codeDialogTitle">
+      <div class="folder-dialog-header"><div><p class="eyebrow">完整代码</p><h2 id="codeDialogTitle">代码变更</h2><p id="codeVersionWarning" class="code-warning hidden">文件后来又发生了变化，以下内容是当前磁盘版本。</p></div><button id="codeModalClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="code-tabs"><button id="diffTabButton" class="code-tab active" type="button">修改对比</button><button id="afterTabButton" class="code-tab" type="button">修改后完整文件</button><button id="beforeTabButton" class="code-tab" type="button">修改前</button></div>
+      <pre id="fullCodeView" class="full-code-view"><code></code></pre>
+      <div class="dialog-footer"><span id="fullCodeStats"></span><button id="codeModalDone" class="primary-button" type="button">完成</button></div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/assets/app.js?v=20260829-5" defer></script>
+</body>
+</html>

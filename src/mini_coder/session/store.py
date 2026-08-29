@@ -84,6 +84,18 @@ class SessionStore:
             )
         return session
 
+    def list_sessions(self) -> list[AgentSession]:
+        if not self.root.is_dir():
+            return []
+        sessions: list[AgentSession] = []
+        for path in self.root.glob("*.json"):
+            try:
+                sessions.append(self.load(path))
+            except SessionError:
+                continue
+        sessions.sort(key=lambda item: item.updated_at, reverse=True)
+        return sessions
+
     def resolve(self, identifier: str | Path) -> Path:
         candidate = Path(identifier).expanduser()
         if candidate.is_absolute() or candidate.parent != Path(".") or candidate.suffix == ".json":
