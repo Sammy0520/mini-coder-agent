@@ -45,19 +45,21 @@ def _select_directory(initial_directory: str | None = None) -> str | None:
 
     script = r"""
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = '选择 Agent 要处理的项目文件夹'
-$dialog.ShowNewFolderButton = $true
 $initial = $env:MINI_CODER_INITIAL_DIRECTORY
-if (Test-Path -LiteralPath $initial -PathType Container) {
-    $dialog.SelectedPath = $initial
+$shell = New-Object -ComObject Shell.Application
+try {
+    $folder = $shell.BrowseForFolder(
+        0,
+        '选择 Agent 要处理的项目文件夹',
+        65,
+        $initial
+    )
+    if ($null -ne $folder) {
+        [Console]::Write($folder.Self.Path)
+    }
+} finally {
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
 }
-$result = $dialog.ShowDialog()
-if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::Write($dialog.SelectedPath)
-}
-$dialog.Dispose()
 """
     encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     environment = os.environ.copy()
@@ -66,10 +68,7 @@ $dialog.Dispose()
         [
             powershell,
             "-NoProfile",
-            "-NonInteractive",
             "-STA",
-            "-WindowStyle",
-            "Hidden",
             "-EncodedCommand",
             encoded_script,
         ],
@@ -79,12 +78,12 @@ $dialog.Dispose()
         errors="replace",
         timeout=300,
         env=environment,
-        creationflags=subprocess.CREATE_NO_WINDOW,
         check=False,
     )
     if completed.returncode != 0:
-        detail = completed.stderr.strip() or "Windows 文件夹选择器启动失败"
-        raise RuntimeError(detail)
+        raise RuntimeError(
+            "Windows 文件夹选择器意外关闭，请重试或直接输入项目路径"
+        )
     selected = completed.stdout.strip().lstrip("\ufeff")
     return str(Path(selected).resolve()) if selected else None
 
