@@ -79,6 +79,7 @@ class AgentRunner:
         approval_callback: ApprovalCallback | None = None,
         event_callback: EventCallback | None = None,
         session_store: SessionStore | None = None,
+        session_title: str | None = None,
     ) -> None:
         self.model = model
         self.registry = registry
@@ -87,6 +88,7 @@ class AgentRunner:
         self.approval_callback = approval_callback
         self.event_callback = event_callback
         self.session_store = session_store
+        self.session_title = session_title
         self.context = ContextManager(config.max_context_chars)
         self.change_tracker = ChangeTracker(config.workspace)
         self.verification_tracker = VerificationTracker()
@@ -133,6 +135,7 @@ class AgentRunner:
             if self.session_store is not None:
                 session = AgentSession.create(
                     task=task,
+                    title=self.session_title,
                     workspace=self.config.workspace,
                     model=self._model_summary(),
                     messages=messages,

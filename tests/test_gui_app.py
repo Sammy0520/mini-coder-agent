@@ -13,8 +13,10 @@ from pathlib import Path
 import uvicorn
 
 from mini_coder.agent import AgentRunResult
+from mini_coder.changes import ChangeTracker
 from mini_coder.gui.app import create_app
 from mini_coder.gui.controller import RunController
+from mini_coder.session import AgentSession, SessionStore
 
 
 class HttpFakeRunner:
@@ -96,6 +98,7 @@ class GuiHttpTests(unittest.TestCase):
 
             body = json.dumps(
                 {
+                    "title": "Create answer file",
                     "task": "Create answer.txt",
                     "workspace": directory,
                     "config_path": None,
@@ -137,8 +140,61 @@ class GuiHttpTests(unittest.TestCase):
             self.assertIn('"event": "verification_completed"', event_stream)
             self.assertIn('"event": "controller_run_finished"', event_stream)
             self.assertEqual(snapshot["status"], "completed")
+            self.assertEqual(snapshot["title"], "Create answer file")
             self.assertEqual(snapshot["result"]["session_id"], "http-session")
             self.assertEqual(Path(snapshot["workspace"]), Path(directory).resolve())
+
+    def test_session_history_and_full_change_api(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / "greeting.py"
+            target.write_text('message = "hello"\n', encoding="utf-8")
+            tracker = ChangeTracker(workspace)
+            prepared = tracker.prepare(
+                "edit_file",
+                {
+                    "path": "greeting.py",
+                    "old_text": 'message = "hello"',
+                    "new_text": 'message = "hello world"',
+                },
+                "execution-1",
+            )
+            change = tracker.apply(prepared)
+            session = AgentSession.create(
+                task="Update the greeting",
+                title="Friendly greeting",
+                workspace=workspace,
+                model={"model": "fake"},
+            )
+            session.changes.append(change)
+            session.refresh_verification_status()
+            session.final_text = "Updated the greeting.\n\nOutcome: internal diagnostics"
+            SessionStore.for_workspace(workspace).save(session)
+
+            base = f"http://127.0.0.1:{self.port}"
+            workspace_query = urllib.parse.urlencode({"workspace": directory})
+            with urllib.request.urlopen(
+                f"{base}/api/sessions?{workspace_query}", timeout=3
+            ) as response:
+                listing = json.load(response)
+            with urllib.request.urlopen(
+                f"{base}/api/sessions/{session.session_id}?{workspace_query}", timeout=3
+            ) as response:
+                detail = json.load(response)
+            with urllib.request.urlopen(
+                f"{base}/api/sessions/{session.session_id}/changes/{change.change_id}?{workspace_query}",
+                timeout=3,
+            ) as response:
+                code = json.load(response)
+
+            self.assertEqual(listing["sessions"][0]["title"], "Friendly greeting")
+            self.assertEqual(detail["conversation"][0]["content"], "Update the greeting")
+            self.assertEqual(detail["conversation"][1]["content"], "Updated the greeting.")
+            self.assertEqual(detail["changes"][0]["change_id"], change.change_id)
+            self.assertEqual(code["before"].splitlines(), ['message = "hello"'])
+            self.assertEqual(code["after"].splitlines(), ['message = "hello world"'])
+            self.assertIn('+message = "hello world"', code["diff"])
+            self.assertTrue(code["matches_agent_version"])
 
 
 if __name__ == "__main__":

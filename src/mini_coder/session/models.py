@@ -18,7 +18,7 @@ from ..verification import (
     VerificationTracker,
 )
 
-CURRENT_SESSION_SCHEMA = 5
+CURRENT_SESSION_SCHEMA = 6
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -304,6 +304,7 @@ class AgentSession:
     workspace: str
     created_at: str
     updated_at: str
+    title: str = ""
     status: SessionStatus = SessionStatus.CREATED
     schema_version: int = CURRENT_SESSION_SCHEMA
     current_step: int = 0
@@ -341,6 +342,9 @@ class AgentSession:
             )
         if not self.task.strip():
             raise SessionError("session task must not be empty")
+        self.title = self.title.strip() or _derive_session_title(self.task)
+        if len(self.title) > 120:
+            raise SessionError("session title must not exceed 120 characters")
         if not self.workspace:
             raise SessionError("session workspace must not be empty")
         if self.current_step < 0:
@@ -398,6 +402,7 @@ class AgentSession:
         *,
         task: str,
         workspace: str | Path,
+        title: str | None = None,
         model: dict[str, Any] | None = None,
         messages: list[dict[str, Any]] | None = None,
         workspace_baseline: dict[str, Any] | None = None,
@@ -406,6 +411,7 @@ class AgentSession:
         return cls(
             session_id=uuid.uuid4().hex,
             task=task.strip(),
+            title=(title or "").strip() or _derive_session_title(task),
             workspace=str(Path(workspace).expanduser().resolve()),
             created_at=now,
             updated_at=now,
@@ -477,6 +483,7 @@ class AgentSession:
             "schema_version": self.schema_version,
             "session_id": self.session_id,
             "task": self.task,
+            "title": self.title,
             "workspace": self.workspace,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -561,6 +568,7 @@ class AgentSession:
             schema_version=version,
             session_id=_required_string(data, "session_id"),
             task=_required_string(data, "task"),
+            title=_required_string(data, "title"),
             workspace=_required_string(data, "workspace"),
             created_at=_required_string(data, "created_at"),
             updated_at=_required_string(data, "updated_at"),
@@ -628,7 +636,7 @@ class AgentSession:
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version not in {1, 2, 3, 4}:
+    if version not in {1, 2, 3, 4, 5}:
         return data
     migrated = copy.deepcopy(data)
     if version == 1:
@@ -704,7 +712,19 @@ def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
         )
         migrated.setdefault("invalid_tool_call_count", 0)
         migrated.setdefault("repeated_read_hint_count", 0)
+        version = 5
+    if version == 5:
+        migrated["schema_version"] = 6
+        task = str(migrated.get("task") or "")
+        migrated.setdefault("title", _derive_session_title(task))
     return migrated
+
+
+def _derive_session_title(task: str) -> str:
+    compact = " ".join(str(task).strip().split())
+    if not compact:
+        return "未命名会话"
+    return compact if len(compact) <= 40 else compact[:39].rstrip() + "…"
 
 
 def _validate_model_summary(model: Any) -> None:

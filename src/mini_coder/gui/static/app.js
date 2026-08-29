@@ -1,72 +1,728 @@
 const state = {
   runId: null,
   source: null,
+  workspace: "",
+  configPath: "",
+  sessionTitle: "",
+  sessionId: null,
+  draft: true,
   eventCount: 0,
-  changes: new Set(),
+  executionGroups: [],
+  readGroup: null,
+  changes: new Map(),
   pendingApproval: null,
   folderPath: null,
   folderParent: null,
+  modalMode: "new",
+  startAfterSetup: false,
+  codeDetail: null,
+  codeTab: "diff",
 };
 
-const els = Object.fromEntries([
-  "workspace", "selectWorkspaceButton", "configPath", "task", "runButton", "connectionDot", "connectionLabel",
-  "runStatus", "sessionId", "verificationStatus", "changeCount", "eventCount",
-  "timeline", "approvalPanel", "approvalRisk", "approvalTitle", "approvalArguments",
-  "approveButton", "denyButton", "diffStats", "diffMeta", "diffView",
-  "verificationBadge", "verificationMessage", "summaryPanel", "summaryText", "toast",
-  "folderModal", "folderCloseButton", "folderCancelButton", "folderChooseButton",
-  "folderRoots", "folderUpButton", "folderPath", "folderGoButton", "folderList",
-  "folderCurrentHint",
-].map((id) => [id, document.getElementById(id)]));
-
+const elementIds = [
+  "newSessionButton", "projectName", "projectPath", "editProjectButton", "sessionCount", "sessionList",
+  "connectionDot", "connectionLabel", "conversationEyebrow", "conversationTitle", "conversationProject",
+  "detailsToggleButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
+  "welcomeState", "messageList", "task", "composerHint", "runButton", "inspector", "closeInspectorButton",
+  "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
+  "denyButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount",
+  "executionList", "sessionModal", "sessionModalClose", "sessionModalCancel", "sessionModalConfirm",
+  "sessionDialogEyebrow", "sessionDialogTitle", "sessionTitleField", "sessionTitleInput", "workspace",
+  "selectWorkspaceButton", "configPath", "folderModal", "folderCloseButton", "folderCancelButton",
+  "folderChooseButton", "folderRoots", "folderUpButton", "folderPath", "folderGoButton", "folderList",
+  "folderCurrentHint", "codeModal", "codeModalClose", "codeModalDone", "codeDialogTitle",
+  "codeVersionWarning", "diffTabButton", "afterTabButton", "beforeTabButton", "fullCodeView",
+  "fullCodeStats", "toast",
+];
+const els = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 const terminalEvents = new Set(["controller_run_finished", "controller_run_failed"]);
+const readTools = new Set(["read_file", "list_files", "search_text"]);
 
-els.runButton.addEventListener("click", startRun);
-els.selectWorkspaceButton.addEventListener("click", openFolderBrowser);
-els.folderCloseButton.addEventListener("click", closeFolderBrowser);
-els.folderCancelButton.addEventListener("click", closeFolderBrowser);
-els.folderChooseButton.addEventListener("click", chooseCurrentFolder);
-els.folderUpButton.addEventListener("click", () => loadDirectory(state.folderParent));
-els.folderGoButton.addEventListener("click", () => loadDirectory(els.folderPath.value.trim()));
-els.folderPath.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") loadDirectory(els.folderPath.value.trim());
-});
-els.folderModal.addEventListener("click", (event) => {
-  if (event.target === els.folderModal) closeFolderBrowser();
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !els.folderModal.classList.contains("hidden")) closeFolderBrowser();
-});
-els.approveButton.addEventListener("click", () => decideApproval(true));
-els.denyButton.addEventListener("click", () => decideApproval(false));
-loadDefaults();
+bindEvents();
+bootstrap();
 
-async function loadDefaults() {
+function bindEvents() {
+  els.newSessionButton.addEventListener("click", () => openSessionModal("new"));
+  els.editProjectButton.addEventListener("click", () => openSessionModal("project"));
+  els.sessionModalClose.addEventListener("click", closeSessionModal);
+  els.sessionModalCancel.addEventListener("click", closeSessionModal);
+  els.sessionModalConfirm.addEventListener("click", confirmSessionSetup);
+  els.sessionModal.addEventListener("click", (event) => {
+    if (event.target === els.sessionModal) closeSessionModal();
+  });
+  els.selectWorkspaceButton.addEventListener("click", openFolderBrowser);
+  els.folderCloseButton.addEventListener("click", closeFolderBrowser);
+  els.folderCancelButton.addEventListener("click", closeFolderBrowser);
+  els.folderChooseButton.addEventListener("click", chooseCurrentFolder);
+  els.folderUpButton.addEventListener("click", () => loadDirectory(state.folderParent));
+  els.folderGoButton.addEventListener("click", () => loadDirectory(els.folderPath.value.trim()));
+  els.folderPath.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") loadDirectory(els.folderPath.value.trim());
+  });
+  els.folderModal.addEventListener("click", (event) => {
+    if (event.target === els.folderModal) closeFolderBrowser();
+  });
+  els.runButton.addEventListener("click", startRun);
+  els.task.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startRun();
+  });
+  document.querySelectorAll("[data-prompt]").forEach((button) => {
+    button.addEventListener("click", () => {
+      els.task.value = button.dataset.prompt || "";
+      els.task.focus();
+    });
+  });
+  els.detailsToggleButton.addEventListener("click", () => els.inspector.classList.add("open"));
+  els.closeInspectorButton.addEventListener("click", () => els.inspector.classList.remove("open"));
+  els.approveButton.addEventListener("click", () => decideApproval(true));
+  els.denyButton.addEventListener("click", () => decideApproval(false));
+  els.codeModalClose.addEventListener("click", closeCodeModal);
+  els.codeModalDone.addEventListener("click", closeCodeModal);
+  els.codeModal.addEventListener("click", (event) => {
+    if (event.target === els.codeModal) closeCodeModal();
+  });
+  els.diffTabButton.addEventListener("click", () => selectCodeTab("diff"));
+  els.afterTabButton.addEventListener("click", () => selectCodeTab("after"));
+  els.beforeTabButton.addEventListener("click", () => selectCodeTab("before"));
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!els.codeModal.classList.contains("hidden")) closeCodeModal();
+    else if (!els.folderModal.classList.contains("hidden")) closeFolderBrowser();
+    else if (!els.sessionModal.classList.contains("hidden")) closeSessionModal();
+  });
+}
+
+async function bootstrap() {
   try {
     const response = await fetch("/api/bootstrap");
     const data = await readJson(response);
-    if (!response.ok) return;
-    if (!els.workspace.value) els.workspace.value = data.default_workspace || "";
-    if (!els.configPath.value) els.configPath.value = data.default_config_path || "agent.toml";
+    if (!response.ok) throw new Error(data.detail || "无法读取启动信息");
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem("mini-coder-project") || "{}"); } catch (_) { saved = {}; }
+    state.workspace = saved.workspace || data.default_workspace || "";
+    state.configPath = saved.configPath || data.default_config_path || "agent.toml";
+    updateProjectDisplay();
+    resetDraft();
+    await loadSessions();
+  } catch (error) {
+    setConnection("启动信息读取失败", "error");
+    toast(error.message, true);
+  }
+}
+
+function openSessionModal(mode, startAfterSetup = false) {
+  state.modalMode = mode;
+  state.startAfterSetup = startAfterSetup;
+  const isNew = mode === "new";
+  els.sessionDialogEyebrow.textContent = isNew ? "新建会话" : "编辑项目";
+  els.sessionDialogTitle.textContent = isNew ? "设置会话与项目" : "选择要使用的项目";
+  els.sessionTitleField.classList.toggle("hidden", !isNew);
+  els.sessionTitleInput.value = isNew
+    ? (state.sessionTitle || suggestedTitle(els.task.value))
+    : "";
+  els.workspace.value = state.workspace;
+  els.configPath.value = state.configPath;
+  els.sessionModalConfirm.textContent = isNew ? "进入会话" : "切换项目";
+  els.sessionModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => (isNew ? els.sessionTitleInput : els.workspace).focus(), 0);
+}
+
+function closeSessionModal() {
+  els.sessionModal.classList.add("hidden");
+  if (els.folderModal.classList.contains("hidden") && els.codeModal.classList.contains("hidden")) {
+    document.body.classList.remove("modal-open");
+  }
+  state.startAfterSetup = false;
+}
+
+async function confirmSessionSetup() {
+  const workspace = els.workspace.value.trim();
+  const configPath = els.configPath.value.trim();
+  const title = els.sessionTitleInput.value.trim();
+  if (!workspace) {
+    toast("请先选择项目文件夹。", true);
+    return;
+  }
+  if (state.modalMode === "new" && !title) {
+    toast("请为这次会话起一个容易识别的名称。", true);
+    els.sessionTitleInput.focus();
+    return;
+  }
+  const shouldStart = state.startAfterSetup;
+  state.workspace = workspace;
+  state.configPath = configPath || "agent.toml";
+  if (state.modalMode === "new") state.sessionTitle = title;
+  saveProject();
+  updateProjectDisplay();
+  closeSessionModal();
+  resetDraft({keepTitle: state.modalMode === "new"});
+  await loadSessions();
+  if (shouldStart) startRun();
+}
+
+function saveProject() {
+  try {
+    localStorage.setItem("mini-coder-project", JSON.stringify({
+      workspace: state.workspace,
+      configPath: state.configPath,
+    }));
   } catch (_) {
-    // Fields remain editable if startup information is temporarily unavailable.
+    // The page remains usable when browser storage is unavailable.
+  }
+}
+
+function updateProjectDisplay() {
+  const name = pathName(state.workspace) || "未选择项目";
+  els.projectName.textContent = name;
+  els.projectPath.textContent = state.workspace || "选择一个项目文件夹";
+  els.conversationProject.textContent = state.workspace || "尚未选择项目";
+  els.composerHint.textContent = state.workspace ? `当前项目：${state.workspace}` : "请先选择项目";
+}
+
+async function loadSessions() {
+  els.sessionList.innerHTML = '<div class="sidebar-empty">正在读取会话…</div>';
+  if (!state.workspace) {
+    renderSessions([]);
+    return;
+  }
+  try {
+    const response = await fetch(`/api/sessions?workspace=${encodeURIComponent(state.workspace)}`);
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法读取会话");
+    renderSessions(data.sessions || []);
+  } catch (error) {
+    els.sessionList.innerHTML = `<div class="sidebar-empty">${escapeHtml(error.message)}</div>`;
+    els.sessionCount.textContent = "0";
+  }
+}
+
+function renderSessions(sessions) {
+  els.sessionCount.textContent = String(sessions.length);
+  els.sessionList.replaceChildren();
+  if (!sessions.length) {
+    els.sessionList.innerHTML = '<div class="sidebar-empty">这个项目还没有会话</div>';
+    return;
+  }
+  sessions.forEach((session) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `session-item${state.sessionId === session.session_id ? " active" : ""}`;
+    button.innerHTML = `
+      <span class="session-item-icon">${sessionIcon(session.status)}</span>
+      <span><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(sessionTime(session.updated_at))} · ${escapeHtml(labelStatus(session.status))}</small></span>`;
+    button.addEventListener("click", () => loadSession(session.session_id));
+    els.sessionList.appendChild(button);
+  });
+}
+
+async function loadSession(sessionId) {
+  if (state.source) {
+    toast("当前任务仍在运行，请等待完成后再切换会话。", true);
+    return;
+  }
+  try {
+    setConnection("正在打开会话", "busy");
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}?workspace=${encodeURIComponent(state.workspace)}`);
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法打开会话");
+    state.draft = false;
+    state.sessionId = data.session_id;
+    state.sessionTitle = data.title || "未命名会话";
+    state.eventCount = 0;
+    state.executionGroups = [];
+    state.readGroup = null;
+    state.changes = new Map();
+    (data.changes || []).filter((item) => item.undo_status === "active").forEach((item) => {
+      state.changes.set(item.change_id, {...item, key: item.change_id});
+    });
+    els.welcomeState.classList.add("hidden");
+    els.messageList.replaceChildren();
+    (data.conversation || []).forEach((message) => addMessage(message.role, message.content));
+    els.conversationEyebrow.textContent = "历史会话";
+    els.conversationTitle.textContent = state.sessionTitle;
+    els.sessionName.textContent = state.sessionTitle;
+    els.runStatus.textContent = labelStatus(data.status);
+    setVerificationFromSession(data.verification_status, data.verifications || []);
+    renderChanges();
+    renderExecutionGroups("历史会话只展示结果；新的执行过程会在运行时显示。 ");
+    els.task.value = "";
+    els.task.disabled = true;
+    els.task.placeholder = "当前版本暂不支持继续已完成会话，请新建会话开始新任务。";
+    els.runButton.disabled = true;
+    els.composerHint.textContent = "这是已完成的历史会话；点击“新建会话”开始新任务";
+    updateProjectDisplay();
+    els.composerHint.textContent = "这是已完成的历史会话；点击“新建会话”开始新任务";
+    await loadSessions();
+    setConnection("已就绪");
+  } catch (error) {
+    setConnection("打开失败", "error");
+    toast(error.message, true);
+  }
+}
+
+function resetDraft(options = {}) {
+  if (state.source) state.source.close();
+  state.runId = null;
+  state.source = null;
+  state.sessionId = null;
+  state.draft = true;
+  state.eventCount = 0;
+  state.executionGroups = [];
+  state.readGroup = null;
+  state.changes = new Map();
+  state.pendingApproval = null;
+  if (!options.keepTitle) state.sessionTitle = "";
+  els.conversationEyebrow.textContent = "新会话";
+  els.conversationTitle.textContent = state.sessionTitle || "准备开始一个任务";
+  els.sessionName.textContent = state.sessionTitle || "新会话";
+  els.runStatus.textContent = "尚未开始";
+  els.welcomeState.classList.remove("hidden");
+  els.messageList.replaceChildren();
+  els.task.disabled = false;
+  els.task.placeholder = "描述你希望 Agent 完成的任务…";
+  els.runButton.disabled = false;
+  els.runButton.innerHTML = "<span>▶</span> 开始执行";
+  els.approvalPanel.classList.add("hidden");
+  renderChanges();
+  setVerification("neutral", "未运行", "完成修改后，Agent 会运行项目内的检查命令。");
+  renderExecutionGroups();
+  updateProjectDisplay();
+  setConnection("已就绪");
+}
+
+async function startRun() {
+  if (!state.draft) return;
+  const task = els.task.value.trim();
+  if (!task) {
+    toast("请先描述希望 Agent 完成的任务。", true);
+    els.task.focus();
+    return;
+  }
+  if (!state.workspace || !state.sessionTitle) {
+    openSessionModal("new", true);
+    return;
+  }
+  prepareRunningView(task);
+  try {
+    const response = await fetch("/api/runs", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        title: state.sessionTitle,
+        task,
+        workspace: state.workspace,
+        config_path: state.configPath || null,
+        auto: false,
+      }),
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法开始执行任务");
+    state.runId = data.run_id;
+    els.runStatus.textContent = labelStatus(data.status);
+    connectEvents(data.run_id);
+  } catch (error) {
+    markProgressDone("任务未能启动");
+    setConnection("启动失败", "error");
+    els.runStatus.textContent = "启动失败";
+    els.runButton.disabled = false;
+    toast(error.message, true);
+  }
+}
+
+function prepareRunningView(task) {
+  state.eventCount = 0;
+  state.executionGroups = [];
+  state.readGroup = null;
+  state.changes = new Map();
+  state.pendingApproval = null;
+  els.welcomeState.classList.add("hidden");
+  els.messageList.replaceChildren();
+  addMessage("user", task);
+  addProgressMessage();
+  els.conversationEyebrow.textContent = "正在协作";
+  els.conversationTitle.textContent = state.sessionTitle;
+  els.sessionName.textContent = state.sessionTitle;
+  els.runStatus.textContent = "正在启动";
+  els.task.disabled = true;
+  els.runButton.disabled = true;
+  els.runButton.innerHTML = "<span>●</span> 执行中";
+  els.approvalPanel.classList.add("hidden");
+  renderChanges();
+  setVerification("neutral", "等待运行", "Agent 完成修改后会运行本地检查。");
+  renderExecutionGroups();
+  setConnection("正在启动", "busy");
+}
+
+function connectEvents(runId) {
+  if (state.source) state.source.close();
+  const source = new EventSource(`/api/runs/${runId}/events`);
+  state.source = source;
+  source.addEventListener("open", () => setConnection("正在执行", "busy"));
+  source.addEventListener("run-event", (message) => {
+    const envelope = JSON.parse(message.data);
+    handleEvent(envelope);
+    if (terminalEvents.has(envelope.event)) {
+      source.close();
+      state.source = null;
+      refreshSnapshot(runId);
+    }
+  });
+  source.onerror = () => {
+    if (state.source) setConnection("正在重新连接…", "busy");
+  };
+}
+
+function handleEvent(envelope) {
+  const name = envelope.event;
+  const payload = envelope.payload || {};
+  const timestamp = envelope.timestamp;
+  if (name === "session_created") {
+    state.sessionId = payload.session_id || state.sessionId;
+    loadSessions();
+  } else if (name === "workspace_overview_generated") {
+    addExecution("已了解项目结构", overviewDetail(payload), timestamp, "⌁");
+  } else if (name === "tool_call_requested") {
+    handleToolRequest(payload, timestamp);
+  } else if (name === "approval_required") {
+    showApproval(payload);
+  } else if (name === "approval_resolved" || name === "approval_expired") {
+    hideApproval(payload.approved, name === "approval_expired");
+  } else if (name === "change_preview") {
+    rememberChangePreview(payload);
+  } else if (name === "change_applied") {
+    rememberAppliedChange(payload);
+  } else if (name === "verification_completed") {
+    const title = payload.passed ? "本地检查已通过" : "本地检查未通过";
+    addExecution(title, verificationDetail(payload), timestamp, payload.passed ? "✓" : "!");
+    setVerification(payload.passed ? "passed" : "failed", payload.passed ? "已通过" : "未通过", friendlyVerification(payload));
+  } else if (name === "verification_invalidated") {
+    setVerification("neutral", "需要重跑", "代码又发生了变化，需要重新运行检查。 ");
+  } else if (name === "tool_call_denied") {
+    addExecution("操作已被拒绝", friendlyToolName(payload.tool), timestamp, "×");
+  } else if (name === "model_error") {
+    addExecution("模型请求遇到问题", payload.error || "稍后可以重新尝试", timestamp, "!");
+  } else if (name === "context_compacted") {
+    addExecution("已整理较长的上下文", "保留重要信息后继续执行", timestamp, "·");
+  } else if (name === "controller_run_finished") {
+    finishRun(payload);
+  } else if (name === "controller_run_failed") {
+    failRun(payload.error || "本次执行失败");
+  }
+}
+
+function handleToolRequest(payload, timestamp) {
+  const tool = payload.tool || "tool";
+  const args = payload.arguments || {};
+  if (readTools.has(tool)) {
+    const detail = args.path || args.query || friendlyToolName(tool);
+    if (state.readGroup) {
+      state.readGroup.count += 1;
+      state.readGroup.title = `查看项目文件（${state.readGroup.count} 项）`;
+      state.readGroup.details.push(`${friendlyToolName(tool)}：${detail}`);
+      renderExecutionGroups();
+    } else {
+      state.readGroup = addExecution("查看项目文件", `${friendlyToolName(tool)}：${detail}`, timestamp, "⌕", true);
+    }
+    return;
+  }
+  state.readGroup = null;
+  if (tool === "write_file" || tool === "edit_file") {
+    addExecution(`准备修改 ${args.path || "项目文件"}`, technicalToolDetail(tool, args), timestamp, "Δ");
+  } else if (tool === "run_command") {
+    addExecution("运行项目检查", args.command || "执行本地命令", timestamp, "▶");
+    setVerification("running", "验证中", "正在运行项目内的检查命令…");
+  } else {
+    addExecution(`调用工具：${friendlyToolName(tool)}`, technicalToolDetail(tool, args), timestamp, "↳");
+  }
+}
+
+function addExecution(title, detail, timestamp, icon = "✓", mergeableRead = false) {
+  const group = {
+    title,
+    details: detail ? [String(detail)] : [],
+    time: formatTime(timestamp),
+    icon,
+    count: 1,
+    mergeableRead,
+  };
+  state.executionGroups.push(group);
+  state.eventCount = state.executionGroups.length;
+  renderExecutionGroups();
+  renderProgressSteps();
+  return group;
+}
+
+function renderExecutionGroups(emptyMessage = "执行步骤会以简明方式显示") {
+  els.eventCount.textContent = `${state.executionGroups.length} 项`;
+  els.executionList.replaceChildren();
+  if (!state.executionGroups.length) {
+    els.executionList.innerHTML = `<div class="detail-empty">${escapeHtml(emptyMessage)}</div>`;
+    return;
+  }
+  state.executionGroups.forEach((group) => {
+    const details = document.createElement("details");
+    details.className = "execution-item";
+    details.innerHTML = `
+      <summary><span class="execution-icon">${escapeHtml(group.icon)}</span><span>${escapeHtml(group.title)}</span><span class="execution-time">${escapeHtml(group.time)}</span></summary>
+      <pre class="execution-details">${escapeHtml(group.details.join("\n"))}</pre>`;
+    els.executionList.appendChild(details);
+  });
+  els.executionList.scrollTop = els.executionList.scrollHeight;
+}
+
+function addProgressMessage() {
+  const wrapper = document.createElement("div");
+  wrapper.className = "message agent progress-message";
+  wrapper.id = "activeProgressMessage";
+  wrapper.innerHTML = `
+    <div class="message-author"><span class="author-dot">AI</span><span>Mini Coder</span></div>
+    <div id="activeProgressCard" class="progress-card">
+      <div class="progress-card-header"><span class="progress-spinner"></span><span id="progressTitle">正在了解项目并完成任务…</span></div>
+      <div id="progressSteps" class="progress-steps"><div class="progress-step"><span class="progress-step-icon">·</span><span>准备开始</span></div></div>
+    </div>`;
+  els.messageList.appendChild(wrapper);
+  scrollConversation();
+}
+
+function renderProgressSteps() {
+  const target = document.getElementById("progressSteps");
+  if (!target) return;
+  target.replaceChildren();
+  const visible = state.executionGroups.slice(-6);
+  if (!visible.length) {
+    target.innerHTML = '<div class="progress-step"><span class="progress-step-icon">·</span><span>准备开始</span></div>';
+    return;
+  }
+  visible.forEach((group) => {
+    const item = document.createElement("div");
+    item.className = "progress-step";
+    const technical = group.details.join("\n");
+    item.innerHTML = `<span class="progress-step-icon">${escapeHtml(group.icon)}</span><div><span>${escapeHtml(group.title)}</span>${technical ? `<details><summary>查看详情</summary><pre>${escapeHtml(technical)}</pre></details>` : ""}</div>`;
+    target.appendChild(item);
+  });
+  scrollConversation();
+}
+
+function markProgressDone(title = "任务执行结束") {
+  const card = document.getElementById("activeProgressCard");
+  const heading = document.getElementById("progressTitle");
+  if (card) card.classList.add("done");
+  if (heading) heading.textContent = title;
+}
+
+function addMessage(role, content) {
+  const normalizedRole = role === "assistant" ? "agent" : "user";
+  const wrapper = document.createElement("div");
+  wrapper.className = `message ${normalizedRole}`;
+  const author = normalizedRole === "agent" ? "Mini Coder" : "你";
+  const mark = normalizedRole === "agent" ? "AI" : "你";
+  wrapper.innerHTML = `<div class="message-author"><span class="author-dot">${mark}</span><span>${author}</span></div><div class="message-bubble">${escapeHtml(content || "任务已结束。")}</div>`;
+  els.messageList.appendChild(wrapper);
+  scrollConversation();
+}
+
+function finishRun(payload) {
+  const completed = payload.result_status === "completed";
+  markProgressDone(completed ? "任务已完成" : "任务已停止");
+  addMessage("assistant", friendlyFinalText(payload.final_text || (completed ? "任务已经完成。" : "任务没有完成。")));
+  els.conversationEyebrow.textContent = completed ? "会话已完成" : "会话已停止";
+  els.runStatus.textContent = completed ? "已完成" : labelStatus(payload.result_status);
+  els.task.disabled = true;
+  els.runButton.disabled = true;
+  els.runButton.innerHTML = "<span>✓</span> 已结束";
+  state.draft = false;
+  setConnection(completed ? "执行完成" : "已停止", completed ? "" : "error");
+  loadSessions();
+}
+
+function failRun(message) {
+  markProgressDone("执行遇到问题");
+  addMessage("assistant", `这次任务没有顺利完成：${friendlyError(message)}`);
+  els.conversationEyebrow.textContent = "会话已停止";
+  els.runStatus.textContent = "执行失败";
+  els.runButton.disabled = true;
+  state.draft = false;
+  setConnection("发生错误", "error");
+  loadSessions();
+}
+
+function showApproval(payload) {
+  state.pendingApproval = payload;
+  const args = payload.arguments || {};
+  const tool = payload.tool || "tool";
+  els.approvalRisk.textContent = friendlyRisk(payload.risk);
+  els.approvalHeading.textContent = "Agent 需要你的确认";
+  if (tool === "edit_file" || tool === "write_file") {
+    els.approvalTitle.textContent = `Agent 想修改 ${args.path || "一个项目文件"}。确认后才会真正写入。`;
+  } else if (tool === "run_command") {
+    els.approvalTitle.textContent = "Agent 想运行一条本地命令，用来检查项目或完成任务。";
+  } else {
+    els.approvalTitle.textContent = `Agent 想执行“${friendlyToolName(tool)}”。`;
+  }
+  els.approvalArguments.textContent = JSON.stringify(args, null, 2);
+  els.approvalPanel.classList.remove("hidden");
+  els.inspector.classList.add("open");
+  els.runStatus.textContent = "等待你的确认";
+  setConnection("等待确认", "busy");
+}
+
+function hideApproval(approved, expired = false) {
+  state.pendingApproval = null;
+  els.approvalPanel.classList.add("hidden");
+  if (expired) toast("确认等待超时，Agent 已停止这项操作。", true);
+  else if (approved === false) toast("已拒绝这项操作。 ");
+  els.runStatus.textContent = "正在执行";
+  setConnection("正在执行", "busy");
+}
+
+async function decideApproval(approved) {
+  const pending = state.pendingApproval;
+  if (!pending || !state.runId) return;
+  els.approveButton.disabled = true;
+  els.denyButton.disabled = true;
+  try {
+    const response = await fetch(`/api/runs/${state.runId}/approvals/${pending.approval_id}`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({approved}),
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法提交确认结果");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    els.approveButton.disabled = false;
+    els.denyButton.disabled = false;
+  }
+}
+
+function rememberChangePreview(payload) {
+  const key = payload.tool_execution_id || `preview:${payload.path}`;
+  state.changes.set(key, {...payload, key, previewOnly: true});
+  renderChanges();
+}
+
+function rememberAppliedChange(payload) {
+  const previewKey = payload.tool_execution_id || `preview:${payload.path}`;
+  const preview = state.changes.get(previewKey) || {};
+  if (previewKey !== payload.change_id) state.changes.delete(previewKey);
+  const key = payload.change_id || previewKey;
+  state.changes.set(key, {...preview, ...payload, key, previewOnly: false});
+  renderChanges();
+}
+
+function renderChanges() {
+  const changes = [...state.changes.values()];
+  els.changeCount.textContent = String(new Set(changes.map((item) => item.path)).size);
+  const additions = changes.reduce((sum, item) => sum + Number(item.additions || 0), 0);
+  const deletions = changes.reduce((sum, item) => sum + Number(item.deletions || 0), 0);
+  els.diffStats.textContent = changes.length ? `+${additions} / -${deletions}` : "暂无修改";
+  els.changeList.replaceChildren();
+  if (!changes.length) {
+    els.changeList.innerHTML = '<div class="detail-empty">Agent 修改文件后会显示在这里</div>';
+    return;
+  }
+  changes.forEach((change) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "change-item";
+    button.innerHTML = `
+      <span class="change-icon">&lt;/&gt;</span>
+      <span><strong>${escapeHtml(change.path || "项目文件")}</strong><small>${change.previewOnly ? "等待确认" : "点击查看完整代码"}</small></span>
+      <span class="change-stats">+${Number(change.additions || 0)} / -${Number(change.deletions || 0)}</span>`;
+    button.addEventListener("click", () => openChange(change));
+    els.changeList.appendChild(button);
+  });
+}
+
+async function openChange(change) {
+  try {
+    let detail;
+    if (change.change_id && state.sessionId && !change.previewOnly) {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/changes/${encodeURIComponent(change.change_id)}?workspace=${encodeURIComponent(state.workspace)}`);
+      detail = await readJson(response);
+      if (!response.ok) throw new Error(detail.detail || "无法读取完整代码");
+    } else {
+      detail = {
+        path: change.path,
+        diff: change.diff || "",
+        before: null,
+        after: null,
+        additions: change.additions || 0,
+        deletions: change.deletions || 0,
+        matches_agent_version: true,
+      };
+    }
+    state.codeDetail = detail;
+    state.codeTab = "diff";
+    els.codeDialogTitle.textContent = detail.path || "代码变更";
+    els.codeVersionWarning.classList.toggle("hidden", detail.matches_agent_version !== false);
+    els.codeModal.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+    selectCodeTab("diff");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function selectCodeTab(tab) {
+  const detail = state.codeDetail;
+  if (!detail) return;
+  if ((tab === "after" && detail.after === null) || (tab === "before" && detail.before === null)) {
+    toast("这项修改尚未写入，目前只能查看修改对比。 ");
+    tab = "diff";
+  }
+  state.codeTab = tab;
+  const buttons = {diff: els.diffTabButton, after: els.afterTabButton, before: els.beforeTabButton};
+  Object.entries(buttons).forEach(([name, button]) => button.classList.toggle("active", name === tab));
+  els.afterTabButton.disabled = detail.after === null;
+  els.beforeTabButton.disabled = detail.before === null;
+  const content = tab === "diff" ? detail.diff : tab === "after" ? detail.after : detail.before;
+  renderCode(content || "", tab === "diff");
+  els.fullCodeStats.textContent = `新增 ${Number(detail.additions || 0)} 行 · 删除 ${Number(detail.deletions || 0)} 行`;
+}
+
+function renderCode(content, isDiff) {
+  const code = document.createElement("code");
+  String(content).split("\n").forEach((line) => {
+    const span = document.createElement("span");
+    span.className = `code-line${isDiff ? ` ${diffClass(line)}` : ""}`;
+    span.textContent = line || " ";
+    code.appendChild(span);
+  });
+  els.fullCodeView.replaceChildren(code);
+  els.fullCodeView.scrollTop = 0;
+  els.fullCodeView.scrollLeft = 0;
+}
+
+function closeCodeModal() {
+  els.codeModal.classList.add("hidden");
+  state.codeDetail = null;
+  if (els.folderModal.classList.contains("hidden") && els.sessionModal.classList.contains("hidden")) {
+    document.body.classList.remove("modal-open");
   }
 }
 
 function openFolderBrowser() {
   els.folderModal.classList.remove("hidden");
   document.body.classList.add("modal-open");
-  loadDirectory(els.workspace.value.trim() || null);
+  loadDirectory(els.workspace.value.trim() || state.workspace || null);
 }
 
 function closeFolderBrowser() {
   els.folderModal.classList.add("hidden");
-  document.body.classList.remove("modal-open");
+  if (els.sessionModal.classList.contains("hidden") && els.codeModal.classList.contains("hidden")) {
+    document.body.classList.remove("modal-open");
+  }
 }
 
 function chooseCurrentFolder() {
   if (!state.folderPath) return;
   els.workspace.value = state.folderPath;
+  if (!els.configPath.value.trim() || els.configPath.value.trim() === state.configPath) {
+    els.configPath.value = joinPath(state.folderPath, "agent.toml");
+  }
   closeFolderBrowser();
   toast("已选择项目文件夹");
 }
@@ -79,7 +735,7 @@ async function loadDirectory(path) {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
     const response = await fetch(`/api/directories${query}`);
     const data = await readJson(response);
-    if (!response.ok) throw new Error(data.detail || "无法读取这个文件夹。");
+    if (!response.ok) throw new Error(data.detail || "无法读取这个文件夹");
     state.folderPath = data.current;
     state.folderParent = data.parent;
     els.folderPath.value = data.current;
@@ -101,7 +757,7 @@ function renderRoots(roots, current) {
   roots.forEach((root) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `root-button${current.toLowerCase().startsWith(root.toLowerCase()) ? " active" : ""}`;
+    button.className = `root-button${String(current).toLowerCase().startsWith(String(root).toLowerCase()) ? " active" : ""}`;
     button.textContent = root;
     button.addEventListener("click", () => loadDirectory(root));
     els.folderRoots.appendChild(button);
@@ -118,187 +774,19 @@ function renderDirectories(directories) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "folder-item";
-    const icon = document.createElement("span");
-    icon.className = "folder-icon";
-    icon.textContent = "▰";
-    const label = document.createElement("span");
-    label.textContent = directory.name;
-    button.append(icon, label);
+    button.innerHTML = `<span class="folder-icon">▰</span><span>${escapeHtml(directory.name)}</span>`;
     button.addEventListener("click", () => loadDirectory(directory.path));
     els.folderList.appendChild(button);
   });
 }
 
-async function startRun() {
-  const task = els.task.value.trim();
-  const workspace = els.workspace.value.trim();
-  const configPath = els.configPath.value.trim();
-  if (!task || !workspace) {
-    toast("请先选择项目文件夹，并填写要完成的任务。", true);
-    return;
-  }
-  resetRunView();
-  setBusy(true, "正在启动 Agent…");
-  try {
-    const response = await fetch("/api/runs", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({task, workspace, config_path: configPath || null, auto: false}),
-    });
-    const data = await readJson(response);
-    if (!response.ok) throw new Error(data.detail || "无法开始执行任务。");
-    state.runId = data.run_id;
-    els.runStatus.textContent = labelStatus(data.status);
-    connectEvents(data.run_id);
-  } catch (error) {
-    setBusy(false, "发生错误");
-    els.runStatus.textContent = "启动失败";
-    toast(error.message, true);
-  }
-}
-
-function connectEvents(runId) {
-  if (state.source) state.source.close();
-  const source = new EventSource(`/api/runs/${runId}/events`);
-  state.source = source;
-  source.addEventListener("open", () => setBusy(true, "正在执行"));
-  source.addEventListener("run-event", (message) => {
-    const envelope = JSON.parse(message.data);
-    renderEvent(envelope);
-    if (terminalEvents.has(envelope.event)) {
-      source.close();
-      state.source = null;
-      refreshSnapshot(runId);
-    }
-  });
-  source.onerror = () => {
-    if (!state.source) return;
-    els.connectionLabel.textContent = "正在重新连接…";
-    els.connectionDot.className = "connection-dot busy";
-  };
-}
-
-function renderEvent(envelope) {
-  state.eventCount += 1;
-  els.eventCount.textContent = `${state.eventCount} 条记录`;
-  if (state.eventCount === 1) els.timeline.innerHTML = "";
-  const payload = envelope.payload || {};
-  const presentation = describeEvent(envelope.event, payload);
-  const item = document.createElement("div");
-  item.className = "timeline-event";
-  item.innerHTML = `
-    <div class="event-icon ${presentation.tone}">${presentation.icon}</div>
-    <div class="event-body">
-      <div class="event-head">
-        <p class="event-title">${escapeHtml(presentation.title)}</p>
-        <span class="event-time">${formatTime(envelope.timestamp)}</span>
-      </div>
-      <p class="event-detail">${escapeHtml(presentation.detail)}</p>
-    </div>`;
-  els.timeline.appendChild(item);
-  els.timeline.scrollTop = els.timeline.scrollHeight;
-  updatePanels(envelope.event, payload);
-}
-
-function describeEvent(name, payload) {
-  const tool = payload.tool || "tool";
-  const map = {
-    controller_run_created: ["01", "任务已创建", `项目：${payload.workspace || ""}`, ""],
-    session_created: ["S", "会话已保存", shortId(payload.session_id), "success"],
-    workspace_overview_generated: ["⌁", "已理解项目结构", overviewDetail(payload), ""],
-    run_started: ["▶", "Agent 已启动", payload.resumed ? "继续已有会话" : "开始新的会话", ""],
-    model_request_started: ["AI", "正在请求模型", `第 ${payload.step || ""} 步`, ""],
-    model_response_received: ["AI", "模型已响应", modelDetail(payload), ""],
-    tool_call_requested: ["↳", `调用工具：${tool}`, toolDetail(payload), ""],
-    approval_required: ["!", "需要确认操作", `${tool} · ${payload.risk || "write"}`, "warning"],
-    approval_resolved: [payload.approved ? "✓" : "×", payload.approved ? "已允许" : "已拒绝", tool, payload.approved ? "success" : "error"],
-    change_preview: ["Δ", `准备修改：${payload.path || "文件"}`, `新增 ${payload.additions || 0} 行 / 删除 ${payload.deletions || 0} 行`, "warning"],
-    change_applied: ["✓", `已修改：${payload.path || "文件"}`, `新增 ${payload.additions || 0} 行 / 删除 ${payload.deletions || 0} 行`, "success"],
-    phase_changed: ["→", `进入阶段：${payload.phase || "working"}`, `${payload.previous || "start"} → ${payload.phase || "working"}`, ""],
-    verification_started: ["V", "开始本地验证", payload.command || "正在运行项目检查", ""],
-    verification_completed: [payload.passed ? "✓" : "×", payload.passed ? "验证通过" : "验证失败", verificationDetail(payload), payload.passed ? "success" : "error"],
-    run_completed: ["✓", "Agent 已完成任务", `状态：${payload.verification_status || payload.result_status || "completed"}`, "success"],
-    run_failed: ["×", "Agent 执行失败", payload.stop_reason || payload.result_status || "执行失败", "error"],
-    controller_run_finished: ["✓", "本次执行已结束", `共 ${payload.steps || 0} 个模型步骤`, payload.result_status === "completed" ? "success" : "error"],
-    controller_run_failed: ["×", "运行控制器出错", payload.error || "发生未知错误", "error"],
-  };
-  const value = map[name] || ["·", humanize(name), compactPayload(payload), ""];
-  return {icon: value[0], title: value[1], detail: value[2] || "", tone: value[3] || ""};
-}
-
-function updatePanels(name, payload) {
-  if (payload.session_id) els.sessionId.textContent = shortId(payload.session_id);
-  if (name === "approval_required") showApproval(payload);
-  if (name === "approval_resolved" || name === "approval_expired") hideApproval();
-  if (name === "change_preview") showDiff(payload);
-  if (name === "change_applied") {
-    if (payload.path) state.changes.add(payload.path);
-    els.changeCount.textContent = state.changes.size;
-  }
-  if (name === "verification_started") setVerification("running", "验证中", payload.command || "正在运行项目检查…");
-  if (name === "verification_completed") {
-    setVerification(payload.passed ? "passed" : "failed", payload.passed ? "已通过" : "未通过", verificationDetail(payload));
-  }
-  if (name === "controller_run_finished") {
-    const completed = payload.result_status === "completed";
-    els.runStatus.textContent = completed ? "已完成" : labelStatus(payload.result_status);
-    setBusy(false, completed ? "执行完成" : "已停止");
-    showSummary(payload.final_text || "本次执行已结束。");
-  }
-  if (name === "controller_run_failed") {
-    els.runStatus.textContent = "执行失败";
-    setBusy(false, "发生错误", true);
-    showSummary(payload.error || "本次执行失败。");
-  }
-}
-
-function showApproval(payload) {
-  state.pendingApproval = payload;
-  els.approvalRisk.textContent = payload.risk || "write";
-  els.approvalTitle.textContent = `允许 Agent 执行 ${payload.tool || "这项操作"} 吗？`;
-  els.approvalArguments.textContent = JSON.stringify(payload.arguments || {}, null, 2);
-  els.approvalPanel.classList.remove("hidden");
-  els.runStatus.textContent = "等待你的确认";
-}
-
-function hideApproval() {
-  state.pendingApproval = null;
-  els.approvalPanel.classList.add("hidden");
-  els.runStatus.textContent = "正在执行";
-}
-
-async function decideApproval(approved) {
-  const pending = state.pendingApproval;
-  if (!pending || !state.runId) return;
-  els.approveButton.disabled = true;
-  els.denyButton.disabled = true;
-  try {
-    const response = await fetch(`/api/runs/${state.runId}/approvals/${pending.approval_id}`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({approved}),
-    });
-    const data = await readJson(response);
-    if (!response.ok) throw new Error(data.detail || "无法提交确认结果。");
-  } catch (error) {
-    toast(error.message, true);
-  } finally {
-    els.approveButton.disabled = false;
-    els.denyButton.disabled = false;
-  }
-}
-
-function showDiff(payload) {
-  els.diffStats.textContent = `+${payload.additions || 0} / -${payload.deletions || 0}`;
-  els.diffMeta.textContent = `${payload.path || "文件"}${payload.diff_truncated ? " · 预览已截断" : ""}`;
-  const code = document.createElement("code");
-  String(payload.diff || "").split("\n").forEach((line) => {
-    const span = document.createElement("span");
-    span.className = `diff-line ${diffClass(line)}`;
-    span.textContent = line || " ";
-    code.appendChild(span);
-  });
-  els.diffView.replaceChildren(code);
+function setVerificationFromSession(status, records) {
+  const latest = records.length ? records[records.length - 1] : null;
+  if (status === "passed") setVerification("passed", "已通过", latest ? friendlyVerification(latest) : "项目检查已通过。 ");
+  else if (status === "failed") setVerification("failed", "未通过", latest ? friendlyVerification(latest) : "项目检查未通过。 ");
+  else if (status === "stale") setVerification("neutral", "需要重跑", "检查完成后代码又发生了变化。 ");
+  else if (status === "unverified") setVerification("neutral", "未验证", "修改尚未通过本地检查。 ");
+  else setVerification("neutral", "无需验证", "这次会话没有需要运行的项目检查。 ");
 }
 
 function setVerification(tone, label, message) {
@@ -308,78 +796,123 @@ function setVerification(tone, label, message) {
   els.verificationMessage.textContent = message;
 }
 
-function showSummary(text) {
-  els.summaryText.textContent = text;
-  els.summaryPanel.classList.remove("hidden");
-}
-
 async function refreshSnapshot(runId) {
   try {
     const response = await fetch(`/api/runs/${runId}`);
     const data = await readJson(response);
     if (!response.ok) return;
-    els.runStatus.textContent = labelStatus(data.status);
-    if (data.result?.session_id) els.sessionId.textContent = shortId(data.result.session_id);
-    if (data.result?.final_text) showSummary(data.result.final_text);
-    if (data.error) showSummary(data.error);
+    if (data.result?.session_id) state.sessionId = data.result.session_id;
+    await loadSessions();
   } catch (_) {
-    // The event stream already contains the useful result; snapshot refresh is best effort.
+    // The event stream already delivered the user-facing result.
   }
 }
 
-function resetRunView() {
-  if (state.source) state.source.close();
-  state.runId = null;
-  state.source = null;
-  state.eventCount = 0;
-  state.changes = new Set();
-  state.pendingApproval = null;
-  els.eventCount.textContent = "0 条记录";
-  els.changeCount.textContent = "0";
-  els.sessionId.textContent = "—";
-  els.runStatus.textContent = "正在启动";
-  els.timeline.innerHTML = "";
-  els.approvalPanel.classList.add("hidden");
-  els.summaryPanel.classList.add("hidden");
-  els.diffStats.textContent = "暂无修改";
-  els.diffMeta.textContent = "Agent 准备写入文件时，会先在这里展示修改内容。";
-  els.diffView.innerHTML = '<code><span class="diff-placeholder">等待 Agent 准备修改…</span></code>';
-  setVerification("neutral", "未运行", "Agent 完成修改后，会运行项目内的检查命令，用真实结果判断任务是否成功。");
+function setConnection(label, tone = "") {
+  els.connectionLabel.textContent = label;
+  els.connectionDot.className = `connection-dot${tone ? ` ${tone}` : ""}`;
 }
 
-function setBusy(busy, label, error = false) {
-  els.runButton.disabled = busy;
-  els.connectionLabel.textContent = label;
-  els.connectionDot.className = `connection-dot${error ? " error" : busy ? " busy" : ""}`;
+function friendlyToolName(tool) {
+  const names = {
+    read_file: "读取文件",
+    list_files: "查看文件列表",
+    search_text: "搜索项目内容",
+    edit_file: "编辑文件",
+    write_file: "写入文件",
+    run_command: "运行本地命令",
+  };
+  return names[tool] || String(tool || "工具").replaceAll("_", " ");
+}
+
+function technicalToolDetail(tool, args) {
+  if (tool === "run_command") return args.command || "";
+  if (args.path) return `${friendlyToolName(tool)}：${args.path}`;
+  return JSON.stringify(args || {}, null, 2);
+}
+
+function friendlyRisk(risk) {
+  const risks = {read: "只读", write: "写入", execute: "运行", elevated: "高风险", dangerous: "高风险"};
+  return risks[String(risk || "write").toLowerCase()] || "需确认";
 }
 
 function overviewDetail(payload) {
-  const files = [...(payload.manifests || []), ...(payload.entry_points || [])];
-  return files.length ? files.slice(0, 5).join(" · ") : "已生成项目概览";
-}
-
-function modelDetail(payload) {
-  const tools = payload.tool_calls || [];
-  const content = String(payload.content || "").trim();
-  if (tools.length) return `准备调用：${tools.join(", ")}`;
-  return content.slice(0, 220) || "模型已返回结果";
-}
-
-function toolDetail(payload) {
-  if (payload.tool === "run_command" && payload.arguments?.command) return payload.arguments.command;
-  if (payload.arguments?.path) return payload.arguments.path;
-  return compactPayload(payload.arguments || {});
+  const files = [...(payload.manifests || []), ...(payload.entry_points || []), ...(payload.test_paths || [])];
+  return files.length ? `发现：${files.slice(0, 6).join("、")}` : "已查看主要目录和项目入口";
 }
 
 function verificationDetail(payload) {
-  const exitCode = payload.exit_code ?? "?";
   const duration = Number(payload.duration_seconds || 0).toFixed(2);
-  return `退出码 ${exitCode} · ${duration} 秒${payload.command ? ` · ${payload.command}` : ""}`;
+  return `${payload.command || "项目检查"}\n退出码：${payload.exit_code ?? "?"} · 用时：${duration} 秒`;
 }
 
-function compactPayload(value) {
-  const text = JSON.stringify(value || {});
-  return text.length > 220 ? `${text.slice(0, 217)}…` : text;
+function friendlyVerification(payload) {
+  const duration = Number(payload.duration_seconds || 0).toFixed(1);
+  return payload.passed
+    ? `检查成功完成（${duration} 秒）。`
+    : `检查返回了问题（退出码 ${payload.exit_code ?? "?"}，${duration} 秒）。`;
+}
+
+function friendlyFinalText(text) {
+  let result = String(text || "").trim();
+  for (const marker of ["\n\nOutcome:", "\n\nLocal change summary:"]) {
+    if (result.includes(marker)) result = result.split(marker, 1)[0].trim();
+  }
+  return result || "任务已经结束。 ";
+}
+
+function friendlyError(message) {
+  const text = String(message || "发生未知问题");
+  if (text.includes("API") || text.includes("model")) return "模型服务暂时无法完成请求，请检查配置后重试。";
+  return text;
+}
+
+function labelStatus(status) {
+  const labels = {
+    created: "已创建",
+    running: "正在执行",
+    waiting_for_approval: "等待确认",
+    completed: "已完成",
+    completed_verified: "已完成",
+    completed_unverified: "已完成（未验证）",
+    verification_failed: "验证未通过",
+    failed: "执行失败",
+    denied: "已拒绝",
+    interrupted: "已中断",
+    cancelled: "已取消",
+  };
+  return labels[String(status || "")] || String(status || "未知状态").replaceAll("_", " ");
+}
+
+function sessionIcon(status) {
+  if (String(status).startsWith("completed")) return "✓";
+  if (status === "running" || status === "waiting_for_approval") return "●";
+  if (status === "failed" || status === "verification_failed") return "!";
+  return "○";
+}
+
+function sessionTime(value) {
+  try {
+    const date = new Date(value);
+    const now = new Date();
+    if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+    return date.toLocaleDateString([], {month: "2-digit", day: "2-digit"});
+  } catch (_) { return ""; }
+}
+
+function suggestedTitle(task) {
+  const compact = String(task || "").replace(/\s+/g, " ").trim();
+  return compact.length > 28 ? `${compact.slice(0, 28)}…` : compact;
+}
+
+function pathName(path) {
+  const normalized = String(path || "").replace(/[\\/]+$/, "");
+  return normalized.split(/[\\/]/).pop() || normalized;
+}
+
+function joinPath(root, child) {
+  const separator = String(root).includes("\\") ? "\\" : "/";
+  return `${String(root).replace(/[\\/]+$/, "")}${separator}${child}`;
 }
 
 function diffClass(line) {
@@ -390,29 +923,30 @@ function diffClass(line) {
   return "";
 }
 
-function labelStatus(status) {
-  const value = String(status || "unknown");
-  const labels = {
-    created: "已创建",
-    running: "正在执行",
-    waiting_for_approval: "等待确认",
-    completed: "已完成",
-    failed: "执行失败",
-    denied: "已拒绝",
-    interrupted: "已中断",
-    unknown: "未知状态",
-  };
-  return labels[value] || value.replaceAll("_", " ");
+function formatTime(value) {
+  try { return new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
+  catch (_) { return ""; }
 }
 
-function humanize(name) { return labelStatus(name); }
-function shortId(value) { return value ? `${String(value).slice(0, 8)}…` : "—"; }
-function formatTime(value) { try { return new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}); } catch (_) { return ""; } }
-function escapeHtml(value) { const node = document.createElement("span"); node.textContent = String(value ?? ""); return node.innerHTML; }
-async function readJson(response) { try { return await response.json(); } catch (_) { return {}; } }
+function scrollConversation() {
+  window.requestAnimationFrame(() => { els.conversation.scrollTop = els.conversation.scrollHeight; });
+}
 
+function escapeHtml(value) {
+  const node = document.createElement("span");
+  node.textContent = String(value ?? "");
+  return node.innerHTML;
+}
+
+async function readJson(response) {
+  try { return await response.json(); }
+  catch (_) { return {}; }
+}
+
+let toastTimer = null;
 function toast(message, error = false) {
+  window.clearTimeout(toastTimer);
   els.toast.textContent = message;
   els.toast.className = `toast show${error ? " error" : ""}`;
-  window.setTimeout(() => { els.toast.className = "toast"; }, 3400);
+  toastTimer = window.setTimeout(() => { els.toast.className = "toast"; }, 3400);
 }

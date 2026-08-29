@@ -27,6 +27,7 @@ def _utc_now() -> str:
 class RunRequest:
     task: str
     workspace: str
+    title: str = ""
     config_path: str | None = None
     auto: bool = False
 
@@ -105,9 +106,13 @@ class RunController:
         if not workspace.is_dir():
             raise ValueError(f"workspace is not a directory: {workspace}")
         config_path = self._resolve_config_path(request.config_path)
+        title = request.title.strip() or (task[:39].rstrip() + "…" if len(task) > 40 else task)
+        if len(title) > 120:
+            raise ValueError("session title must not exceed 120 characters")
         normalized = RunRequest(
             task=task,
             workspace=str(workspace),
+            title=title,
             config_path=str(config_path) if config_path is not None else None,
             auto=request.auto,
         )
@@ -119,6 +124,7 @@ class RunController:
                 "controller_run_created",
                 {
                     "workspace": normalized.workspace,
+                    "title": normalized.title,
                     "approval_policy": "auto" if normalized.auto else "safe",
                 },
             )
@@ -296,6 +302,7 @@ class RunController:
             "run_id": record.run_id,
             "status": record.status,
             "task": record.request.task,
+            "title": record.request.title,
             "workspace": record.request.workspace,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
@@ -364,4 +371,5 @@ class RunController:
             approval_callback=approval_callback,
             event_callback=event_callback,
             session_store=SessionStore.for_workspace(config.workspace),
+            session_title=request.title,
         )
