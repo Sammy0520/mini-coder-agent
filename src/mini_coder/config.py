@@ -68,6 +68,7 @@ class AgentConfig:
     max_total_tool_output_chars: int = 200_000
     max_total_tokens: int = 500_000
     max_context_chars: int = 80_000
+    max_context_tokens: int = 20_000
     repeated_call_limit: int = 3
     max_model_retries: int = 2
     retry_base_seconds: float = 0.5
@@ -85,6 +86,7 @@ class AgentConfig:
             "max_total_tool_output_chars": self.max_total_tool_output_chars,
             "max_total_tokens": self.max_total_tokens,
             "max_context_chars": self.max_context_chars,
+            "max_context_tokens": self.max_context_tokens,
         }
         for name, value in positive_fields.items():
             if value < 1:
@@ -216,6 +218,7 @@ class AgentConfig:
                 else _env_int("CODING_AGENT_MAX_TOTAL_TOKENS", 500_000)
             ),
             max_context_chars=_env_int("CODING_AGENT_CONTEXT_CHARS", 80_000),
+            max_context_tokens=_env_int("CODING_AGENT_CONTEXT_TOKENS", 20_000),
             repeated_call_limit=_env_int("CODING_AGENT_REPEATED_CALL_LIMIT", 3, minimum=2),
             max_model_retries=(
                 max_model_retries

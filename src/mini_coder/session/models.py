@@ -18,7 +18,7 @@ from ..verification import (
     VerificationTracker,
 )
 
-CURRENT_SESSION_SCHEMA = 6
+CURRENT_SESSION_SCHEMA = 7
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -34,6 +34,7 @@ _SAFE_MODEL_FIELDS = {
     "max_tool_output_chars",
     "max_total_tool_output_chars",
     "max_total_tokens",
+    "max_context_tokens",
 }
 
 
@@ -332,6 +333,10 @@ class AgentSession:
     last_error: str | None = None
     previous_call_signature: str | None = None
     repeated_call_count: int = 0
+    turn_count: int = 1
+    conversation: list[dict[str, Any]] = field(default_factory=list)
+    working_memory: dict[str, Any] = field(default_factory=dict)
+    model_call_records: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         validate_session_id(self.session_id)
@@ -351,6 +356,8 @@ class AgentSession:
             raise SessionError("session current_step must not be negative")
         if self.repeated_call_count < 0:
             raise SessionError("session repeated_call_count must not be negative")
+        if self.turn_count < 1:
+            raise SessionError("session turn_count must be positive")
         if self.change_revision < 0:
             raise SessionError("session change_revision must not be negative")
         if self.run_duration_seconds < 0:
@@ -378,6 +385,13 @@ class AgentSession:
             isinstance(item, dict) for item in self.messages
         ):
             raise SessionError("session messages must be a list of objects")
+        _validate_conversation(self.conversation)
+        if not isinstance(self.working_memory, dict):
+            raise SessionError("session working_memory must be an object")
+        if not isinstance(self.model_call_records, list) or not all(
+            isinstance(item, dict) for item in self.model_call_records
+        ):
+            raise SessionError("session model_call_records must be a list of objects")
         if not isinstance(self.total_usage, dict) or not all(
             isinstance(name, str)
             and isinstance(value, int)
@@ -418,7 +432,38 @@ class AgentSession:
             model=copy.deepcopy(model or {}),
             messages=copy.deepcopy(messages or []),
             workspace_baseline=copy.deepcopy(workspace_baseline or {}),
+            conversation=[{"role": "user", "content": task.strip()}],
         )
+
+    def start_follow_up(self, task: str) -> None:
+        follow_up = task.strip()
+        if not follow_up:
+            raise SessionError("follow-up task must not be empty")
+        if self.status not in {
+            SessionStatus.COMPLETED_VERIFIED,
+            SessionStatus.COMPLETED_UNVERIFIED,
+            SessionStatus.FAILED,
+            SessionStatus.DENIED,
+        }:
+            raise SessionError("only a finished session can receive a follow-up task")
+        self.task = follow_up
+        self.turn_count += 1
+        self.current_step = 0
+        self.phase = TaskPhase.ANALYZE
+        self.stop_reason = None
+        self.final_text = ""
+        self.last_error = None
+        self.previous_call_signature = None
+        self.repeated_call_count = 0
+        self.conversation.append({"role": "user", "content": follow_up})
+        self.messages.append({"role": "user", "content": follow_up})
+        self.set_status(SessionStatus.RUNNING)
+
+    def finish_turn(self, content: str) -> None:
+        text = content.strip()
+        if text:
+            self.conversation.append({"role": "assistant", "content": text})
+        self.touch()
 
     def set_status(
         self,
@@ -515,6 +560,10 @@ class AgentSession:
             "last_error": self.last_error,
             "previous_call_signature": self.previous_call_signature,
             "repeated_call_count": self.repeated_call_count,
+            "turn_count": self.turn_count,
+            "conversation": copy.deepcopy(self.conversation),
+            "working_memory": copy.deepcopy(self.working_memory),
+            "model_call_records": copy.deepcopy(self.model_call_records),
         }
 
     @classmethod
@@ -556,6 +605,16 @@ class AgentSession:
         workspace_baseline = data.get("workspace_baseline")
         if not isinstance(workspace_baseline, dict):
             raise SessionError("session workspace_baseline must be an object")
+        conversation = data.get("conversation")
+        _validate_conversation(conversation)
+        working_memory = data.get("working_memory")
+        if not isinstance(working_memory, dict):
+            raise SessionError("session working_memory must be an object")
+        model_call_records = data.get("model_call_records")
+        if not isinstance(model_call_records, list) or not all(
+            isinstance(item, dict) for item in model_call_records
+        ):
+            raise SessionError("session model_call_records must be a list of objects")
         try:
             phase = TaskPhase(data.get("phase"))
             verification_status = VerificationStatus(data.get("verification_status"))
@@ -614,6 +673,10 @@ class AgentSession:
             last_error=_optional_string(data, "last_error"),
             previous_call_signature=_optional_string(data, "previous_call_signature"),
             repeated_call_count=_required_int(data, "repeated_call_count", minimum=0),
+            turn_count=_required_int(data, "turn_count", minimum=1),
+            conversation=copy.deepcopy(conversation),
+            working_memory=copy.deepcopy(working_memory),
+            model_call_records=copy.deepcopy(model_call_records),
         )
         derived_verification = VerificationTracker.evaluate(
             session.verification_records,
@@ -636,7 +699,7 @@ class AgentSession:
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version not in {1, 2, 3, 4, 5}:
+    if version not in {1, 2, 3, 4, 5, 6}:
         return data
     migrated = copy.deepcopy(data)
     if version == 1:
@@ -717,7 +780,30 @@ def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated["schema_version"] = 6
         task = str(migrated.get("task") or "")
         migrated.setdefault("title", _derive_session_title(task))
+        version = 6
+    if version == 6:
+        migrated["schema_version"] = 7
+        conversation = [{"role": "user", "content": str(migrated.get("task") or "")}]
+        final_text = str(migrated.get("final_text") or "").strip()
+        if final_text:
+            conversation.append({"role": "assistant", "content": final_text})
+        migrated.setdefault("turn_count", 1)
+        migrated.setdefault("conversation", conversation)
+        migrated.setdefault("working_memory", {})
+        migrated.setdefault("model_call_records", [])
     return migrated
+
+
+def _validate_conversation(value: Any) -> None:
+    if not isinstance(value, list):
+        raise SessionError("session conversation must be a list")
+    for item in value:
+        if not isinstance(item, dict):
+            raise SessionError("session conversation entries must be objects")
+        if item.get("role") not in {"user", "assistant"}:
+            raise SessionError("session conversation role must be user or assistant")
+        if not isinstance(item.get("content"), str) or not item["content"].strip():
+            raise SessionError("session conversation content must be non-empty")
 
 
 def _derive_session_title(task: str) -> str:

@@ -7,6 +7,8 @@ const state = {
   sessionId: null,
   draft: true,
   eventCount: 0,
+  modelCalls: 0,
+  totalUsage: {},
   executionGroups: [],
   readGroup: null,
   changes: new Map(),
@@ -24,7 +26,7 @@ const elementIds = [
   "detailsToggleButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
   "welcomeState", "messageList", "task", "composerHint", "runButton", "inspector", "closeInspectorButton",
   "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
-  "denyButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount",
+  "denyButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "usageSummary",
   "executionList", "sessionModal", "sessionModalClose", "sessionModalCancel", "sessionModalConfirm",
   "sessionDialogEyebrow", "sessionDialogTitle", "sessionTitleField", "sessionTitleInput", "workspace",
   "selectWorkspaceButton", "configPath", "folderModal", "folderCloseButton", "folderCancelButton",
@@ -219,11 +221,13 @@ async function loadSession(sessionId) {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.detail || "无法打开会话");
-    state.draft = false;
+    state.draft = true;
     state.workspace = data.workspace || state.workspace;
     state.sessionId = data.session_id;
     state.sessionTitle = data.title || "未命名会话";
     state.eventCount = 0;
+    state.modelCalls = Number(data.model_calls || 0);
+    state.totalUsage = data.usage || {};
     state.executionGroups = (data.execution || []).map((item) => ({
       title: item.title,
       details: item.details || [],
@@ -246,13 +250,15 @@ async function loadSession(sessionId) {
     setVerificationFromSession(data.verification_status, data.verifications || []);
     renderChanges();
     renderExecutionGroups("这个会话没有保存可展示的执行过程。 ");
+    renderUsageSummary();
     els.task.value = "";
-    els.task.disabled = true;
-    els.task.placeholder = "当前版本暂不支持继续已完成会话，请新建会话开始新任务。";
-    els.runButton.disabled = true;
-    els.composerHint.textContent = "这是已完成的历史会话；点击“新建会话”开始新任务";
+    els.task.disabled = false;
+    els.task.placeholder = "继续告诉 Agent 接下来要做什么…";
+    els.runButton.disabled = false;
+    els.runButton.innerHTML = "<span>▶</span> 继续执行";
+    els.composerHint.textContent = "可以在这个会话中继续提出修改或追问";
     updateProjectDisplay();
-    els.composerHint.textContent = "这是已完成的历史会话；点击“新建会话”开始新任务";
+    els.composerHint.textContent = "可以在这个会话中继续提出修改或追问";
     await loadSessions();
     setConnection("已就绪");
   } catch (error) {
@@ -268,6 +274,8 @@ function resetDraft(options = {}) {
   state.sessionId = null;
   state.draft = true;
   state.eventCount = 0;
+  state.modelCalls = 0;
+  state.totalUsage = {};
   state.executionGroups = [];
   state.readGroup = null;
   state.changes = new Map();
@@ -287,6 +295,7 @@ function resetDraft(options = {}) {
   renderChanges();
   setVerification("neutral", "未运行", "完成修改后，Agent 会运行项目内的检查命令。");
   renderExecutionGroups();
+  renderUsageSummary();
   updateProjectDisplay();
   setConnection("已就绪");
 }
@@ -299,7 +308,7 @@ async function startRun() {
     els.task.focus();
     return;
   }
-  if (!state.workspace || !state.sessionTitle) {
+  if (!state.workspace || (!state.sessionTitle && !state.sessionId)) {
     openSessionModal(true);
     return;
   }
@@ -310,6 +319,7 @@ async function startRun() {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         title: state.sessionTitle,
+        session_id: state.sessionId || null,
         task,
         workspace: state.workspace,
         config_path: state.configPath || null,
@@ -331,13 +341,14 @@ async function startRun() {
 }
 
 function prepareRunningView(task) {
+  const continuing = Boolean(state.sessionId);
   state.eventCount = 0;
   state.executionGroups = [];
   state.readGroup = null;
-  state.changes = new Map();
+  if (!continuing) state.changes = new Map();
   state.pendingApproval = null;
   els.welcomeState.classList.add("hidden");
-  els.messageList.replaceChildren();
+  if (!continuing) els.messageList.replaceChildren();
   addMessage("user", task);
   addProgressMessage();
   els.conversationEyebrow.textContent = "正在协作";
@@ -364,6 +375,7 @@ function connectEvents(runId) {
     handleEvent(envelope);
     if (terminalEvents.has(envelope.event)) {
       source.close();
+      state.source = null;
       state.source = null;
       refreshSnapshot(runId);
     }
@@ -400,11 +412,25 @@ function handleEvent(envelope) {
     setVerification("neutral", "需要重跑", "代码又发生了变化，需要重新运行检查。 ");
   } else if (name === "tool_call_denied") {
     addExecution("操作已被拒绝", friendlyToolName(payload.tool), timestamp, "×");
+  } else if (name === "model_response_received") {
+    state.modelCalls += 1;
+    Object.entries(payload.usage || {}).forEach(([key, value]) => {
+      if (Number.isFinite(Number(value))) {
+        state.totalUsage[key] = Number(state.totalUsage[key] || 0) + Number(value);
+      }
+    });
+    renderUsageSummary();
   } else if (name === "model_error") {
     addExecution("模型请求遇到问题", payload.error || "稍后可以重新尝试", timestamp, "!");
   } else if (name === "context_compacted") {
     addExecution("已整理较长的上下文", "保留重要信息后继续执行", timestamp, "·");
+  } else if (name === "run_completed" || name === "run_failed" || name === "run_cancelled") {
+    state.modelCalls = Number(payload.model_calls || state.modelCalls);
+    state.totalUsage = payload.total_usage || state.totalUsage;
+    renderUsageSummary();
   } else if (name === "controller_run_finished") {
+    state.totalUsage = payload.total_usage || state.totalUsage;
+    renderUsageSummary();
     finishRun(payload);
   } else if (name === "controller_run_failed") {
     failRun(payload.error || "本次执行失败");
@@ -529,12 +555,29 @@ function finishRun(payload) {
   addMessage("assistant", conversationalFinalText(payload.final_text, completed));
   els.conversationEyebrow.textContent = completed ? "会话已完成" : "会话已停止";
   els.runStatus.textContent = completed ? "已完成" : labelStatus(payload.result_status);
-  els.task.disabled = true;
-  els.runButton.disabled = true;
-  els.runButton.innerHTML = "<span>✓</span> 已结束";
-  state.draft = false;
+  els.task.value = "";
+  els.task.disabled = false;
+  els.task.placeholder = "继续告诉 Agent 接下来要做什么…";
+  els.runButton.disabled = false;
+  els.runButton.innerHTML = "<span>▶</span> 继续执行";
+  state.draft = true;
+  els.composerHint.textContent = "可以继续提出修改、追问或新的验收要求";
   setConnection(completed ? "执行完成" : "已停止", completed ? "" : "error");
   loadSessions();
+}
+
+function renderUsageSummary() {
+  const total = Number(state.totalUsage.total_tokens || 0);
+  const input = Number(state.totalUsage.input_tokens || state.totalUsage.prompt_tokens || 0);
+  const tokenText = total ? `${formatCompactNumber(total)} Token` : (input ? `${formatCompactNumber(input)} 输入 Token` : "用量等待模型返回");
+  els.usageSummary.textContent = state.modelCalls
+    ? `模型调用 ${state.modelCalls} 次 · ${tokenText}`
+    : "还没有调用模型";
+}
+
+function formatCompactNumber(value) {
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 1 : 2).replace(/\.0$/, "")}k`;
+  return String(value);
 }
 
 function failRun(message) {
@@ -542,8 +585,10 @@ function failRun(message) {
   addMessage("assistant", `这次任务没有顺利完成：${friendlyError(message)}`);
   els.conversationEyebrow.textContent = "会话已停止";
   els.runStatus.textContent = "执行失败";
-  els.runButton.disabled = true;
-  state.draft = false;
+  els.task.disabled = false;
+  els.runButton.disabled = false;
+  els.runButton.innerHTML = "<span>▶</span> 继续执行";
+  state.draft = true;
   setConnection("发生错误", "error");
   loadSessions();
 }

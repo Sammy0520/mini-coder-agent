@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mini_coder.agent import AgentRunResult
 from mini_coder.gui.controller import RunController, RunRequest
+from mini_coder.session import AgentSession, SessionStatus, SessionStore
 from mini_coder.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
 
@@ -60,6 +61,40 @@ def wait_until(predicate, timeout: float = 2.0):
 
 
 class RunControllerTests(unittest.TestCase):
+    def test_follow_up_request_reuses_saved_session_title_and_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session = AgentSession.create(
+                task="First task",
+                title="Shared conversation",
+                workspace=directory,
+                model={"model": "fake"},
+            )
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(SessionStatus.COMPLETED_UNVERIFIED, final_text="done")
+            SessionStore.for_workspace(directory).save(session)
+            captured = []
+
+            def factory(request, event, approval):
+                captured.append(request)
+                return FakeRunner(event, approval, request_approval=False)
+
+            controller = RunController(runner_factory=factory)
+            started = controller.start(
+                RunRequest(
+                    task="Add another feature",
+                    workspace=directory,
+                    title="ignored title",
+                    session_id=session.session_id,
+                )
+            )
+            wait_until(
+                lambda: controller.snapshot(started["run_id"])["status"] == "completed"
+            )
+
+            self.assertEqual(captured[0].session_id, session.session_id)
+            self.assertEqual(captured[0].title, "Shared conversation")
+            self.assertEqual(Path(captured[0].workspace), Path(directory).resolve())
+
     def test_completed_run_exposes_ordered_events_and_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             controller = RunController(

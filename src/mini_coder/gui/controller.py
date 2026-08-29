@@ -28,12 +28,22 @@ class RunRequest:
     task: str
     workspace: str
     title: str = ""
+    session_id: str | None = None
     config_path: str | None = None
     auto: bool = False
 
 
 class RunnerLike(Protocol):
     def run(self, task: str) -> AgentRunResult: ...
+
+
+@dataclass(slots=True)
+class _SessionBoundRunner:
+    runner: AgentRunner
+    session: Any | None = None
+
+    def run(self, task: str) -> AgentRunResult:
+        return self.runner.run(task, session=self.session)
 
 
 RunnerFactory = Callable[
@@ -106,18 +116,31 @@ class RunController:
         if not workspace.is_dir():
             raise ValueError(f"workspace is not a directory: {workspace}")
         config_path = self._resolve_config_path(request.config_path)
+        session_id = request.session_id.strip() if request.session_id else None
         title = request.title.strip() or (task[:39].rstrip() + "…" if len(task) > 40 else task)
+        if session_id:
+            session = SessionStore.for_workspace(workspace).load(session_id)
+            if Path(session.workspace).resolve() != workspace:
+                raise ValueError("session workspace does not match the selected workspace")
+            title = session.title
         if len(title) > 120:
             raise ValueError("session title must not exceed 120 characters")
         normalized = RunRequest(
             task=task,
             workspace=str(workspace),
             title=title,
+            session_id=session_id,
             config_path=str(config_path) if config_path is not None else None,
             auto=request.auto,
         )
         record = RunRecord(run_id=uuid.uuid4().hex, request=normalized)
         with self._condition:
+            if session_id and any(
+                item.request.session_id == session_id
+                and item.status not in self.TERMINAL_STATUSES
+                for item in self._runs.values()
+            ):
+                raise ValueError("this session is already running")
             self._runs[record.run_id] = record
             self._append_event_locked(
                 record,
@@ -126,6 +149,7 @@ class RunController:
                     "workspace": normalized.workspace,
                     "title": normalized.title,
                     "approval_policy": "auto" if normalized.auto else "safe",
+                    "session_id": normalized.session_id,
                 },
             )
         thread = threading.Thread(
@@ -304,6 +328,7 @@ class RunController:
             "task": record.request.task,
             "title": record.request.title,
             "workspace": record.request.workspace,
+            "session_id": record.request.session_id,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
             "latest_sequence": record.next_sequence - 1,
@@ -347,7 +372,7 @@ class RunController:
         request: RunRequest,
         event_callback: Callable[[str, dict[str, Any]], None],
         approval_callback: Callable[[Tool, dict[str, Any]], bool],
-    ) -> AgentRunner:
+    ) -> RunnerLike:
         policy = ApprovalPolicy.AUTO if request.auto else ApprovalPolicy.SAFE
         config = AgentConfig.from_env(
             request.workspace,
@@ -364,7 +389,7 @@ class RunController:
             verbosity=config.model_verbosity,
             timeout_seconds=config.model_timeout_seconds,
         )
-        return AgentRunner(
+        runner = AgentRunner(
             model=model,
             registry=create_default_registry(),
             config=config,
@@ -373,3 +398,9 @@ class RunController:
             session_store=SessionStore.for_workspace(config.workspace),
             session_title=request.title,
         )
+        session = (
+            SessionStore.for_workspace(config.workspace).load(request.session_id)
+            if request.session_id
+            else None
+        )
+        return _SessionBoundRunner(runner, session)

@@ -258,6 +258,14 @@ class CliSessionTests(unittest.TestCase):
         self.assertEqual(args.task, [])
         self.assertIsNone(args.workspace)
 
+    def test_parser_accepts_follow_up_task_with_resume(self) -> None:
+        args = build_parser().parse_args(
+            ["--resume", "session-1", "Add", "another", "feature"]
+        )
+
+        self.assertEqual(args.resume, "session-1")
+        self.assertEqual(args.task, ["Add", "another", "feature"])
+
     def test_loads_resume_from_explicit_path_and_uses_saved_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
