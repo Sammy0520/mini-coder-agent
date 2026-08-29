@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Sammy0520/mini-coder-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Sammy0520/mini-coder-agent/actions/workflows/ci.yml)
 
-一个不依赖 Agent 框架、控制逻辑可检查、能够修改并验证真实代码的本地编程智能体，提供稳定 CLI 和开发中的浏览器控制台。模型只负责选择下一步；项目自行实现会话、工具执行、Diff、审批、安全边界、失败恢复、验证状态和可重复 Eval。
+一个不依赖 Agent 框架、控制逻辑可检查、能够修改并验证真实代码的本地编程智能体，提供 CLI 和本地浏览器控制台。模型只负责选择下一步；项目自行实现多轮会话、工具执行、Diff、审批、安全边界、失败恢复、验证状态和可重复 Eval。
 
 **30 秒了解差异点：**
 
@@ -32,12 +32,12 @@
 - 安全控制：工作区路径限制、常见敏感文件过滤、写入防误覆盖、精确文本替换、命令风险分级、子进程树清理和统一脱敏。
 - 跨平台执行：向模型说明实际操作系统与默认 shell，文件搜索和修改优先使用内置工具；子命令中的 `python`/`pip` 默认跟随启动 Agent 的虚拟环境。
 - 运行控制：最大步骤、总时间、模型/工具调用、单次/累计工具输出和 provider token 预算；连续重复调用检测、上下文压缩与可恢复中断。
-- Session：每次 CLI 运行原子保存版本化 Session；支持 `--resume`，保留 Responses provider items、工具执行状态、审批结果和累计 usage，并阻止不确定副作用被自动重放。
+- Session：原子保存版本化 Session；支持中断恢复和同一会话追加多轮任务，保留 Responses provider items、工具执行状态、审批结果、会话内工作记忆和累计 usage，并阻止不确定副作用被自动重放。
 - ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
 - 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、退出码、耗时和输出摘要；最终状态由本地事实决定。
 - 项目理解：启动时注入有界工作区概览，识别清单、入口、测试、验证命令、项目说明和 Git 起始状态，并跳过依赖、缓存与构建目录。
 - 工具体验：文件列表和搜索支持分页，读取支持明确的继续行号，搜索返回过滤原因；失败结果包含稳定错误码和下一步建议。
-- 本地 GUI（`v0.2.0` 开发中）：浏览器页面与 CLI 复用同一个 `AgentRunner`，通过线程安全 RunController、SSE 事件流和页面审批展示真实运行时间线、Diff 与验证结果。
+- 本地 GUI：浏览器页面与 CLI 复用同一个 `AgentRunner`，支持全局会话列表、同会话连续对话、线程安全 RunController、SSE 事件流、页面审批、完整文件查看、运行时间线、Diff、验证结果和 Token 用量摘要。
 - 错误恢复：认证、权限、限流、超时、网络、服务端、请求和响应解析错误分类；只对可恢复错误做带抖动和硬上限的有限重试。
 - 权限模式：默认 `safe`；命令按 `read_only`、`workspace_write`、`external_effect`、`dangerous`、`unknown` 分级，`--auto` 也不会自动批准后三类。
 
@@ -72,7 +72,7 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
-本地 GUI 使用可选依赖，开发分支安装方式为：
+本地 GUI 使用可选依赖，安装方式为：
 
 ```powershell
 python -m pip install -e ".[gui]"
@@ -150,7 +150,7 @@ mini-coder --config agent.toml --workspace D:\path\to\project "修复失败的�
 mini-coder --config agent.toml --auto --workspace examples\demo_project "修复折扣计算的边界错误并运行测试"
 ```
 
-### 本地 GUI（开发中）
+### 本地 GUI
 
 安装 `gui` 可选依赖后启动：
 
@@ -160,7 +160,7 @@ mini-coder-gui
 
 服务默认只监听 `http://127.0.0.1:8765`，并自动打开浏览器；服务器环境可以使用 `mini-coder-gui --no-browser`。页面提交的任务仍由现有 `AgentRunner`、工具、Session、Diff 和验证逻辑真实执行。默认使用 `safe` 审批模式，写入或有副作用的命令会在页面等待批准；API key 继续从环境变量或本地 `auth.json` 加载，不会显示在页面。
 
-当前 GUI 纵向切片已经包含：任务和工作区输入、后台真实运行、结构化事件时间线、SSE 实时推送、Diff、页面审批、验证状态和最终摘要。Session 列表/恢复、停止运行、Changed Files 详情和 Undo 仍属于下一轮，不应把当前页面描述成完整 IDE。
+当前 GUI 已包含：新建会话时选择工作文件夹、跨文件夹的全局会话列表、同一会话连续追加任务、后台真实运行、结构化事件时间线、SSE 实时推送、Diff、完整文件查看、页面审批、验证状态、Token 摘要和自然语言结果。页面仍不是完整 IDE，主动停止运行和 Undo 继续由后续版本补齐。
 
 可通过 `--log agent-events.jsonl` 保存可选的本地 JSONL 事件日志。每项事件包含 schema 版本、UTC 时间、run/session ID、step 和运行时长。日志写入失败只产生可见警告，不会中断主任务。事件内容会经过统一凭据脱敏，但仍可能含有代码或命令输出，因此默认关闭，也不应提交。
 
@@ -227,7 +227,13 @@ mini-coder --config agent.toml --resume "D:\path\to\workspace\.mini-coder\sessio
 mini-coder --config agent.toml --workspace "D:\path\to\workspace" --resume <session-id>
 ```
 
-恢复时不能同时提供新任务。当前配置的 provider、model 和 wire API 必须与保存值一致，API Key 仍从当前环境变量或本地 `auth.json` 重新加载，不会从 Session 恢复。
+中断中的 Session 使用上述命令恢复，不能同时更换任务。已经结束的 Session 可以在 GUI 里直接继续输入，也可以在 CLI 中把新任务和 `--resume` 一起提供，从而开始同一会话的下一轮；不同 Session 之间不会共享工作记忆。当前配置的 provider、model 和 wire API 必须与保存值一致，API Key 仍从当前环境变量或本地 `auth.json` 重新加载，不会从 Session 恢复。
+
+```powershell
+mini-coder --config agent.toml --resume "<session-file>" "继续在刚才的实现上增加导出功能并验证"
+```
+
+每次模型请求都会记录本轮消息数、发送消息数、本地 Token 估算、工具 schema 大小、耗时和 provider usage。原始消息仍完整落盘以便审计；进入下一轮时只发送本 Session 的结构化工作记忆、上一轮结论和最新用户请求，不重放旧工具日志。单轮内部也会停止重复发送已经过时的加密 reasoning 项，并压缩较早的超长工具结果。
 
 工具调用按 `requested`、`approved`、`running`、`completed`、`failed`、`denied` 和 `uncertain` 记录：
 
@@ -251,7 +257,7 @@ mini-coder --config agent.toml --resume "<session-file>" `
 
 一次真实 Responses 跨进程恢复的脱敏验收结果见 [`docs/runs/session-resume-run.md`](docs/runs/session-resume-run.md)。
 
-当前 Session schema 为 v5，增加有界工作区/Git 基线、失败和非法工具计数，以及重复读取提示计数；v4 中的模型调用、usage、工具输出和命令结果字段继续保留。v1～v4 Session 会逐级在内存中迁移并在下一次保存时写成 v5，不会丢失原有消息、工具执行或变更记录。
+当前 Session schema 为 v7，增加会话轮次、面向用户的对话记录、仅限当前 Session 的结构化工作记忆和逐次模型调用统计。v1～v6 Session 会逐级在内存中迁移并在下一次保存时写成 v7，不会丢失原有消息、工具执行或变更记录。
 
 ## Diff、变更历史与 Undo
 
@@ -307,7 +313,7 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 Agent 工具循环、审批与风险分类、有限重试和 `Retry-After`、运行预算、集中脱敏、事件 envelope、日志故障隔离、进程树超时/Ctrl+C 清理、路径逃逸、敏感文件、命令执行、上下文压缩、Responses 历史重放、Session 原子保存/迁移/恢复、ChangeTracker、Undo、本地验证完成规则以及 Eval/发布脚本。
+测试覆盖 Agent 工具循环、审批与风险分类、有限重试和 `Retry-After`、运行预算、集中脱敏、事件 envelope、日志故障隔离、进程树超时/Ctrl+C 清理、路径逃逸、敏感文件、命令执行、Token-aware 上下文压缩、同会话多轮、Responses 历史重放、Session 原子保存/迁移/恢复、ChangeTracker、Undo、本地验证完成规则以及 Eval/发布脚本。
 
 ## Eval 与可重复证据
 
@@ -372,7 +378,7 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 - 当前只有 `OpenAICompatibleClient`，支持 Responses 与 Chat Completions function calling；其他厂商可通过 `ModelClient` 扩展，但尚无内置适配器。
 - ChangeTracker 追踪 `write_file`/`edit_file`，不声称可以撤销命令、依赖安装、Git 或网络副作用。
 - 文本修改采用可审计的精确替换，不提供 AST 重构或模糊补丁；单个受追踪文本文件上限为 2 MB。
-- 当前 GUI 是复用真实 Agent 内核的本地展示控制台，不是完整代码编辑器或 IDE；尚未在页面提供 Session 恢复、停止运行和 Undo。
+- 当前 GUI 是复用真实 Agent 内核的本地展示控制台，不是完整代码编辑器或 IDE；尚未在页面提供主动停止运行和 Undo。
 - 项目不包含多 Agent、向量数据库、通用 RAG、MCP 生态或自动 commit/push/PR；这些不属于当前考核核心闭环。
 - Eval 能证明预先声明场景的行为，不能保证模型在任意仓库中都成功；真实模型结果会受 provider、模型版本和网络状态影响。
 
@@ -383,8 +389,8 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 ## 下一步
 
 - `v0.1.0` 作为首个公开版本发布，代码、测试、Eval、CI 和全新环境复现证据见本页及发布候选审计记录。
-- `v0.2.0` 优先完成适合视频展示的真实本地 GUI：运行时间线、Diff 审批、验证、Session Resume 和 Undo。
-- GUI 主链稳定后进入未知任务盲测，用成功率、无关修改、工具调用、token 和耗时决定下一项效率优化。
+- `v0.2.0` 已形成适合视频展示的真实本地 GUI，并支持同一会话连续协作。
+- 下一步用固定真实任务比较优化前后的成功率、无关修改、模型调用、Token 和耗时，再决定是否增加服务端续接或自适应 reasoning 档位。
 
 完整实现顺序、验收标准和可勾选任务见 [`ROADMAP.md`](ROADMAP.md)。
 

@@ -152,6 +152,7 @@ button { color: inherit; }
 .execution-item:last-child { border-bottom: 0; }
 .execution-item summary { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 7px; padding: 9px 12px; cursor: pointer; list-style: none; font-size: 10px; }
 .execution-item summary::-webkit-details-marker { display: none; }
+.usage-summary { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; font-weight: 500; }
 .execution-icon { color: var(--green); font-weight: 900; }
 .execution-time { color: #929bad; font-size: 8px; }
 .execution-details { margin: 0; padding: 0 12px 10px 39px; color: var(--muted); font: 8px/1.55 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }

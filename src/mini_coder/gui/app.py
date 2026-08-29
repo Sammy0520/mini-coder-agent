@@ -23,6 +23,7 @@ class StartRunBody(BaseModel):
     task: str = Field(min_length=1, max_length=20_000)
     workspace: str = Field(min_length=1, max_length=2_000)
     title: str = Field(default="", max_length=120)
+    session_id: str | None = Field(default=None, max_length=128)
     config_path: str | None = Field(default=None, max_length=2_000)
     auto: bool = False
 
@@ -104,6 +105,7 @@ def _session_summary(session) -> dict:
         "changed_files": len({item.path for item in session.changes if item.undo_status == "active"}),
         "created_at": session.created_at,
         "updated_at": session.updated_at,
+        "turn_count": session.turn_count,
     }
 
 
@@ -362,8 +364,16 @@ def create_app(
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str) -> dict:
         session = _resolve_catalog_session(catalog, session_id)
-        conversation = [{"role": "user", "content": session.task}]
-        if session.final_text:
+        conversation = []
+        for item in session.conversation:
+            content = str(item.get("content") or "")
+            if item.get("role") == "assistant":
+                content = _friendly_final_text(content)
+            if content:
+                conversation.append({"role": item.get("role"), "content": content})
+        if session.final_text and (
+            not conversation or conversation[-1].get("role") != "assistant"
+        ):
             conversation.append(
                 {"role": "assistant", "content": _natural_session_reply(session)}
             )
@@ -375,6 +385,8 @@ def create_app(
             "model_calls": session.model_call_count,
             "tool_calls": len(session.tool_executions),
             "run_duration_seconds": session.run_duration_seconds,
+            "model_call_records": session.model_call_records,
+            "working_memory": session.working_memory,
             "execution": _session_execution_history(session),
             "changes": [
                 {
@@ -443,11 +455,12 @@ def create_app(
                     task=body.task,
                     workspace=body.workspace,
                     title=body.title,
+                    session_id=body.session_id or None,
                     config_path=body.config_path or None,
                     auto=body.auto,
                 )
             )
-        except ValueError as exc:
+        except (ValueError, SessionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/runs/{run_id}")
