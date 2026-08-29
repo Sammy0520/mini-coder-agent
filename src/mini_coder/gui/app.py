@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -29,24 +33,59 @@ class SelectDirectoryBody(BaseModel):
 
 
 def _select_directory(initial_directory: str | None = None) -> str | None:
-    import tkinter as tk
-    from tkinter import filedialog
-
     initial = Path(initial_directory).expanduser() if initial_directory else Path.cwd()
     if not initial.is_dir():
         initial = Path.cwd()
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        selected = filedialog.askdirectory(
-            parent=root,
-            initialdir=str(initial.resolve()),
-            title="选择 Agent 要处理的项目文件夹",
-            mustexist=True,
-        )
-    finally:
-        root.destroy()
+    if os.name != "nt":
+        raise RuntimeError("当前文件夹选择功能仅支持 Windows，请直接输入项目路径")
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        raise RuntimeError("找不到 Windows PowerShell，请直接输入项目路径")
+
+    script = r"""
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = '选择 Agent 要处理的项目文件夹'
+$dialog.ShowNewFolderButton = $true
+$initial = $env:MINI_CODER_INITIAL_DIRECTORY
+if (Test-Path -LiteralPath $initial -PathType Container) {
+    $dialog.SelectedPath = $initial
+}
+$result = $dialog.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Write($dialog.SelectedPath)
+}
+$dialog.Dispose()
+"""
+    encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    environment = os.environ.copy()
+    environment["MINI_CODER_INITIAL_DIRECTORY"] = str(initial.resolve())
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-STA",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            encoded_script,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        env=environment,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "Windows 文件夹选择器启动失败"
+        raise RuntimeError(detail)
+    selected = completed.stdout.strip().lstrip("\ufeff")
     return str(Path(selected).resolve()) if selected else None
 
 
