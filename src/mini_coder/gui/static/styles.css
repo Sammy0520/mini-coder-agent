@@ -30,6 +30,7 @@ body {
     linear-gradient(145deg, #f9faff 0%, #f3f6fb 54%, #f8fafc 100%);
   overflow-x: auto;
 }
+.modal-open { overflow: hidden; }
 
 button, input, textarea { font: inherit; }
 
@@ -277,6 +278,30 @@ button, input, textarea { font: inherit; }
 .verification-badge.failed { color: var(--red); background: rgba(255, 120, 145, 0.11); }
 .summary-text { color: #435067; max-height: 240px; overflow: auto; }
 
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(31, 42, 68, 0.28); backdrop-filter: blur(5px); }
+.folder-dialog { width: min(720px, 100%); max-height: min(720px, calc(100vh - 40px)); display: grid; grid-template-rows: auto auto auto minmax(220px, 1fr) auto; overflow: hidden; color: var(--text); border: 1px solid var(--border); border-radius: 18px; background: #fff; box-shadow: 0 30px 100px rgba(28, 43, 79, 0.24); }
+.folder-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 19px 21px; border-bottom: 1px solid var(--border); }
+.folder-dialog-header h2 { margin: 4px 0 0; font-size: 17px; }
+.icon-button { width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); background: #f7f8fb; cursor: pointer; font-size: 22px; line-height: 1; }
+.folder-roots { display: flex; gap: 7px; padding: 11px 20px 0; overflow-x: auto; }
+.root-button { flex: 0 0 auto; padding: 6px 11px; border: 1px solid #d8def0; border-radius: 8px; color: #4457b4; background: #f5f7ff; cursor: pointer; font-size: 11px; font-weight: 750; }
+.root-button.active { color: #fff; border-color: var(--blue); background: var(--blue); }
+.folder-path-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; padding: 12px 20px; }
+.folder-path-row input { min-width: 0; padding: 9px 11px; color: var(--text); border: 1px solid var(--border); border-radius: 9px; outline: none; background: #fbfcff; font: 11px "Cascadia Code", Consolas, monospace; }
+.folder-path-row input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(75, 102, 230, 0.1); }
+.folder-nav-button { padding: 8px 11px; color: #4e5c73; border: 1px solid var(--border); border-radius: 9px; background: #f5f7fa; cursor: pointer; font-size: 11px; font-weight: 700; }
+.folder-nav-button:disabled { cursor: default; opacity: 0.45; }
+.folder-list { min-height: 250px; overflow-y: auto; margin: 0 20px; border: 1px solid var(--border); border-radius: 11px; background: #fbfcfe; }
+.folder-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 13px; color: var(--text); border: 0; border-bottom: 1px solid #edf0f5; background: transparent; cursor: pointer; text-align: left; font-size: 12px; }
+.folder-item:last-child { border-bottom: 0; }
+.folder-item:hover, .folder-item:focus { outline: none; background: #eef3ff; }
+.folder-icon { width: 27px; height: 23px; display: grid; place-items: center; color: #5168d8; border-radius: 5px; background: #e6ebff; font-size: 12px; }
+.folder-empty { height: 100%; min-height: 248px; display: grid; place-items: center; padding: 30px; color: var(--muted); text-align: center; font-size: 12px; }
+.folder-loading { opacity: 0.7; }
+.folder-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 20px 19px; }
+.folder-dialog-footer > div { display: flex; gap: 9px; }
+.folder-current-hint { min-width: 0; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .hidden { display: none !important; }
 .toast { position: fixed; right: 24px; bottom: 24px; max-width: 420px; padding: 12px 15px; border: 1px solid var(--border); border-radius: 11px; color: var(--text); background: #ffffff; box-shadow: var(--shadow); transform: translateY(30px); opacity: 0; pointer-events: none; transition: 180ms ease; font-size: 12px; }
 .toast.show { opacity: 1; transform: translateY(0); }
@@ -321,4 +346,10 @@ button, input, textarea { font: inherit; }
   .status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .status-strip > div:nth-child(2) { border-right: 0; }
   .status-strip > div:nth-child(-n + 2) { border-bottom: 1px solid var(--border); }
+  .modal-backdrop { padding: 10px; }
+  .folder-dialog { max-height: calc(100vh - 20px); }
+  .folder-path-row { grid-template-columns: auto minmax(0, 1fr); }
+  .folder-path-row input { grid-column: 1 / -1; grid-row: 1; }
+  .folder-dialog-footer { align-items: stretch; flex-direction: column; }
+  .folder-dialog-footer > div { display: grid; grid-template-columns: 1fr 1fr; }
 }

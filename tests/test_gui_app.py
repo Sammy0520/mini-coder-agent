@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -57,10 +58,7 @@ class GuiHttpTests(unittest.TestCase):
         )
         self.port = _unused_port()
         config = uvicorn.Config(
-            create_app(
-                self.controller,
-                directory_picker=lambda initial: tempfile.gettempdir(),
-            ),
+            create_app(self.controller),
             host="127.0.0.1",
             port=self.port,
             log_level="error",
@@ -80,6 +78,8 @@ class GuiHttpTests(unittest.TestCase):
 
     def test_static_page_run_api_and_sse_form_one_vertical_slice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            child_directory = Path(directory) / "example-project"
+            child_directory.mkdir()
             base = f"http://127.0.0.1:{self.port}"
             with urllib.request.urlopen(f"{base}/api/health", timeout=3) as response:
                 health = json.load(response)
@@ -87,14 +87,12 @@ class GuiHttpTests(unittest.TestCase):
                 index = response.read().decode("utf-8")
             with urllib.request.urlopen(f"{base}/api/bootstrap", timeout=3) as response:
                 bootstrap = json.load(response)
-            picker_request = urllib.request.Request(
-                f"{base}/api/select-workspace",
-                data=json.dumps({"initial_directory": directory}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(picker_request, timeout=3) as response:
-                picker = json.load(response)
+            directory_query = urllib.parse.urlencode({"path": directory})
+            with urllib.request.urlopen(
+                f"{base}/api/directories?{directory_query}",
+                timeout=3,
+            ) as response:
+                directory_listing = json.load(response)
 
             body = json.dumps(
                 {
@@ -129,8 +127,11 @@ class GuiHttpTests(unittest.TestCase):
                 Path(bootstrap["default_config_path"]),
                 Path.cwd().resolve() / "agent.toml",
             )
-            self.assertTrue(picker["selected"])
-            self.assertEqual(Path(picker["workspace"]), Path(tempfile.gettempdir()))
+            self.assertEqual(Path(directory_listing["current"]), Path(directory).resolve())
+            self.assertIn(
+                str(child_directory.resolve()),
+                [item["path"] for item in directory_listing["directories"]],
+            )
             self.assertIn("event: run-event", event_stream)
             self.assertIn('"event": "change_preview"', event_stream)
             self.assertIn('"event": "verification_completed"', event_stream)

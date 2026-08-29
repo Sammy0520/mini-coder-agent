@@ -4,6 +4,8 @@ const state = {
   eventCount: 0,
   changes: new Set(),
   pendingApproval: null,
+  folderPath: null,
+  folderParent: null,
 };
 
 const els = Object.fromEntries([
@@ -12,12 +14,29 @@ const els = Object.fromEntries([
   "timeline", "approvalPanel", "approvalRisk", "approvalTitle", "approvalArguments",
   "approveButton", "denyButton", "diffStats", "diffMeta", "diffView",
   "verificationBadge", "verificationMessage", "summaryPanel", "summaryText", "toast",
+  "folderModal", "folderCloseButton", "folderCancelButton", "folderChooseButton",
+  "folderRoots", "folderUpButton", "folderPath", "folderGoButton", "folderList",
+  "folderCurrentHint",
 ].map((id) => [id, document.getElementById(id)]));
 
 const terminalEvents = new Set(["controller_run_finished", "controller_run_failed"]);
 
 els.runButton.addEventListener("click", startRun);
-els.selectWorkspaceButton.addEventListener("click", selectWorkspace);
+els.selectWorkspaceButton.addEventListener("click", openFolderBrowser);
+els.folderCloseButton.addEventListener("click", closeFolderBrowser);
+els.folderCancelButton.addEventListener("click", closeFolderBrowser);
+els.folderChooseButton.addEventListener("click", chooseCurrentFolder);
+els.folderUpButton.addEventListener("click", () => loadDirectory(state.folderParent));
+els.folderGoButton.addEventListener("click", () => loadDirectory(els.folderPath.value.trim()));
+els.folderPath.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loadDirectory(els.folderPath.value.trim());
+});
+els.folderModal.addEventListener("click", (event) => {
+  if (event.target === els.folderModal) closeFolderBrowser();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.folderModal.classList.contains("hidden")) closeFolderBrowser();
+});
 els.approveButton.addEventListener("click", () => decideApproval(true));
 els.denyButton.addEventListener("click", () => decideApproval(false));
 loadDefaults();
@@ -34,27 +53,80 @@ async function loadDefaults() {
   }
 }
 
-async function selectWorkspace() {
-  els.selectWorkspaceButton.disabled = true;
-  els.selectWorkspaceButton.textContent = "正在打开…";
+function openFolderBrowser() {
+  els.folderModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  loadDirectory(els.workspace.value.trim() || null);
+}
+
+function closeFolderBrowser() {
+  els.folderModal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+function chooseCurrentFolder() {
+  if (!state.folderPath) return;
+  els.workspace.value = state.folderPath;
+  closeFolderBrowser();
+  toast("已选择项目文件夹");
+}
+
+async function loadDirectory(path) {
+  els.folderList.classList.add("folder-loading");
+  els.folderList.innerHTML = '<div class="folder-empty">正在读取文件夹…</div>';
+  els.folderChooseButton.disabled = true;
   try {
-    const response = await fetch("/api/select-workspace", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({initial_directory: els.workspace.value.trim() || null}),
-    });
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const response = await fetch(`/api/directories${query}`);
     const data = await readJson(response);
-    if (!response.ok) throw new Error(data.detail || "无法打开文件夹选择窗口。");
-    if (data.selected && data.workspace) {
-      els.workspace.value = data.workspace;
-      toast("已选择项目文件夹");
-    }
+    if (!response.ok) throw new Error(data.detail || "无法读取这个文件夹。");
+    state.folderPath = data.current;
+    state.folderParent = data.parent;
+    els.folderPath.value = data.current;
+    els.folderCurrentHint.textContent = `当前：${data.current}`;
+    els.folderUpButton.disabled = !data.parent;
+    renderRoots(data.roots || [], data.current);
+    renderDirectories(data.directories || []);
+    els.folderChooseButton.disabled = false;
   } catch (error) {
+    els.folderList.innerHTML = `<div class="folder-empty">${escapeHtml(error.message)}</div>`;
     toast(error.message, true);
   } finally {
-    els.selectWorkspaceButton.disabled = false;
-    els.selectWorkspaceButton.innerHTML = '<span aria-hidden="true">⌕</span> 选择文件夹';
+    els.folderList.classList.remove("folder-loading");
   }
+}
+
+function renderRoots(roots, current) {
+  els.folderRoots.replaceChildren();
+  roots.forEach((root) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `root-button${current.toLowerCase().startsWith(root.toLowerCase()) ? " active" : ""}`;
+    button.textContent = root;
+    button.addEventListener("click", () => loadDirectory(root));
+    els.folderRoots.appendChild(button);
+  });
+}
+
+function renderDirectories(directories) {
+  els.folderList.replaceChildren();
+  if (!directories.length) {
+    els.folderList.innerHTML = '<div class="folder-empty">这个文件夹中没有子文件夹，可以直接选择当前文件夹。</div>';
+    return;
+  }
+  directories.forEach((directory) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "folder-item";
+    const icon = document.createElement("span");
+    icon.className = "folder-icon";
+    icon.textContent = "▰";
+    const label = document.createElement("span");
+    label.textContent = directory.name;
+    button.append(icon, label);
+    button.addEventListener("click", () => loadDirectory(directory.path));
+    els.folderList.appendChild(button);
+  });
 }
 
 async function startRun() {

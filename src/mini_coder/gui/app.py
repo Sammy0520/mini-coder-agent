@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
-import shutil
-import subprocess
+import string
 from pathlib import Path
-from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -28,72 +25,18 @@ class ApprovalBody(BaseModel):
     approved: bool
 
 
-class SelectDirectoryBody(BaseModel):
-    initial_directory: str | None = Field(default=None, max_length=2_000)
-
-
-def _select_directory(initial_directory: str | None = None) -> str | None:
-    initial = Path(initial_directory).expanduser() if initial_directory else Path.cwd()
-    if not initial.is_dir():
-        initial = Path.cwd()
+def _available_roots() -> list[str]:
     if os.name != "nt":
-        raise RuntimeError("当前文件夹选择功能仅支持 Windows，请直接输入项目路径")
-
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
-    if not powershell:
-        raise RuntimeError("找不到 Windows PowerShell，请直接输入项目路径")
-
-    script = r"""
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$initial = $env:MINI_CODER_INITIAL_DIRECTORY
-$shell = New-Object -ComObject Shell.Application
-try {
-    $folder = $shell.BrowseForFolder(
-        0,
-        '选择 Agent 要处理的项目文件夹',
-        65,
-        $initial
-    )
-    if ($null -ne $folder) {
-        [Console]::Write($folder.Self.Path)
-    }
-} finally {
-    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
-}
-"""
-    encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    environment = os.environ.copy()
-    environment["MINI_CODER_INITIAL_DIRECTORY"] = str(initial.resolve())
-    completed = subprocess.run(
-        [
-            powershell,
-            "-NoProfile",
-            "-STA",
-            "-EncodedCommand",
-            encoded_script,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=300,
-        env=environment,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            "Windows 文件夹选择器意外关闭，请重试或直接输入项目路径"
-        )
-    selected = completed.stdout.strip().lstrip("\ufeff")
-    return str(Path(selected).resolve()) if selected else None
+        return [str(Path("/").resolve())]
+    return [
+        f"{letter}:\\"
+        for letter in string.ascii_uppercase
+        if Path(f"{letter}:\\").is_dir()
+    ]
 
 
-def create_app(
-    controller: RunController | None = None,
-    directory_picker: Callable[[str | None], str | None] | None = None,
-) -> FastAPI:
+def create_app(controller: RunController | None = None) -> FastAPI:
     active_controller = controller or RunController()
-    active_directory_picker = directory_picker or _select_directory
     static_dir = Path(__file__).with_name("static")
     app = FastAPI(
         title="Mini Coder Agent GUI",
@@ -120,18 +63,36 @@ def create_app(
             "default_config_path": str(workspace / "agent.toml"),
         }
 
-    @app.post("/api/select-workspace")
-    def select_workspace(body: SelectDirectoryBody) -> dict[str, str | bool | None]:
+    @app.get("/api/directories")
+    def list_directories(path: str | None = None) -> dict:
+        if path and len(path) > 2_000:
+            raise HTTPException(status_code=400, detail="文件夹路径过长")
         try:
-            selected = active_directory_picker(body.initial_directory)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"无法打开文件夹选择窗口：{exc}",
-            ) from exc
-        if selected and not Path(selected).is_dir():
-            raise HTTPException(status_code=400, detail="选择的路径不是有效文件夹")
-        return {"selected": selected is not None, "workspace": selected}
+            current = Path(path).expanduser().resolve(strict=True) if path else Path.cwd().resolve()
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail="文件夹不存在或无法访问") from exc
+        if not current.is_dir():
+            raise HTTPException(status_code=400, detail="选择的路径不是文件夹")
+        try:
+            directories = []
+            for child in current.iterdir():
+                try:
+                    if child.is_dir():
+                        directories.append({"name": child.name, "path": str(child.resolve())})
+                except OSError:
+                    continue
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail="没有权限查看这个文件夹") from exc
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail="无法读取这个文件夹") from exc
+        directories.sort(key=lambda item: item["name"].casefold())
+        parent = None if current.parent == current else str(current.parent)
+        return {
+            "current": str(current),
+            "parent": parent,
+            "roots": _available_roots(),
+            "directories": directories,
+        }
 
     @app.post("/api/runs", status_code=202)
     def start_run(body: StartRunBody) -> dict:
