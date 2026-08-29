@@ -89,7 +89,10 @@ class AgentRunner:
         self.event_callback = event_callback
         self.session_store = session_store
         self.session_title = session_title
-        self.context = ContextManager(config.max_context_chars)
+        self.context = ContextManager(
+            config.max_context_chars,
+            max_tokens=config.max_context_tokens,
+        )
         self.change_tracker = ChangeTracker(config.workspace)
         self.verification_tracker = VerificationTracker()
         self._run_started_at = 0.0
@@ -97,6 +100,11 @@ class AgentRunner:
         self._active_session_id: str | None = None
         self._current_step = 0
         self._last_model_duration = 0.0
+        self._continuing_turn = False
+        self._run_model_call_start = 0
+        self._run_tool_call_start = 0
+        self._run_tool_output_start = 0
+        self._run_total_token_start = 0
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
@@ -172,6 +180,14 @@ class AgentRunner:
         else:
             self._active_session_id = session.session_id
             self._validate_resume(session, task)
+            self._continuing_turn = bool(task.strip()) and session.status in {
+                SessionStatus.COMPLETED_VERIFIED,
+                SessionStatus.COMPLETED_UNVERIFIED,
+                SessionStatus.FAILED,
+                SessionStatus.DENIED,
+            }
+            if self._continuing_turn:
+                session.start_follow_up(task)
             task = session.task
             messages = copy.deepcopy(session.messages)
             usage = dict(session.total_usage)
@@ -180,7 +196,7 @@ class AgentRunner:
 
             self._reconcile_workspace_state(session, messages, usage)
 
-            if session.status in {
+            if not self._continuing_turn and session.status in {
                 SessionStatus.COMPLETED_VERIFIED,
                 SessionStatus.COMPLETED_UNVERIFIED,
             }:
@@ -215,7 +231,7 @@ class AgentRunner:
             session.set_status(SessionStatus.RUNNING)
             self._persist(session, messages, usage)
             self._emit(
-                "session_resumed",
+                "session_turn_started" if self._continuing_turn else "session_resumed",
                 {
                     "session_id": session.session_id,
                     "path": (
@@ -225,8 +241,15 @@ class AgentRunner:
                     ),
                     "status": session.status.value,
                     "current_step": session.current_step,
+                    "turn": session.turn_count,
                 },
             )
+
+        if session is not None and self._continuing_turn:
+            self._run_model_call_start = session.model_call_count
+            self._run_tool_call_start = len(session.tool_executions)
+            self._run_tool_output_start = session.tool_output_chars
+            self._run_total_token_start = int(session.total_usage.get("total_tokens", 0))
 
         self._emit(
             "run_started",
@@ -286,8 +309,13 @@ class AgentRunner:
                             usage,
                             session,
                         )
-                prepared = self.context.prepare(messages)
-                if len(prepared) < len(messages):
+                prepared = self.context.prepare(
+                    messages,
+                    memory=session.working_memory if session is not None else None,
+                    follow_up=self._continuing_turn,
+                )
+                context_was_compacted = self._continuing_turn or len(prepared) < len(messages)
+                if context_was_compacted:
                     self._emit(
                         "context_compacted",
                         {
@@ -295,6 +323,8 @@ class AgentRunner:
                             "history_messages": len(messages),
                             "sent_messages": len(prepared),
                             "estimated_chars": self.context.estimate_chars(prepared),
+                            "estimated_tokens": self.context.estimate_tokens(prepared),
+                            "turn": session.turn_count if session is not None else 1,
                         },
                     )
                 if session is not None:
@@ -345,6 +375,9 @@ class AgentRunner:
                         "tool_calls": [call.name for call in response.tool_calls],
                         "finish_reason": response.finish_reason,
                         "duration_seconds": self._last_model_duration,
+                        "usage": dict(response.usage),
+                        "estimated_input_tokens": self.context.estimate_tokens(prepared),
+                        "turn": session.turn_count if session is not None else 1,
                     },
                 )
 
@@ -371,9 +404,9 @@ class AgentRunner:
                     session.repeated_call_count = repeated_count
                     self._persist(session, messages, usage)
 
-                if (
-                    session is not None
-                    and len(session.tool_executions) > self.config.max_tool_calls
+                if session is not None and (
+                    len(session.tool_executions) - self._run_tool_call_start
+                    > self.config.max_tool_calls
                 ):
                     return self._finish_budget(
                         "max_tool_calls",
@@ -516,8 +549,18 @@ class AgentRunner:
                 f"session workspace {expected_workspace} does not match configured workspace "
                 f"{self.config.workspace.resolve()}"
             )
-        if task and task != session.task:
-            raise SessionError("a resumed session cannot be given a different task")
+        if (
+            task
+            and task != session.task
+            and session.status
+            not in {
+                SessionStatus.COMPLETED_VERIFIED,
+                SessionStatus.COMPLETED_UNVERIFIED,
+                SessionStatus.FAILED,
+                SessionStatus.DENIED,
+            }
+        ):
+            raise SessionError("an unfinished session cannot be given a different task")
         if not session.messages:
             raise SessionError("session has no conversation messages to resume")
         if session.status == SessionStatus.CANCELLED:
@@ -602,6 +645,7 @@ class AgentRunner:
             "max_tool_output_chars": self.config.max_tool_output_chars,
             "max_total_tool_output_chars": self.config.max_total_tool_output_chars,
             "max_total_tokens": self.config.max_total_tokens,
+            "max_context_tokens": self.config.max_context_tokens,
         }
 
     @staticmethod
@@ -619,6 +663,10 @@ class AgentRunner:
         usage: dict[str, int],
     ) -> ModelResponse:
         retry_index = 0
+        tool_definitions = self.registry.definitions()
+        tool_schema_chars = len(
+            json.dumps(tool_definitions, ensure_ascii=False, default=str)
+        )
         while True:
             if session is not None:
                 budget_reason = self._budget_reason(session, before_model=True)
@@ -638,13 +686,32 @@ class AgentRunner:
                     "history_messages": len(messages),
                     "sent_messages": len(prepared),
                     "estimated_chars": self.context.estimate_chars(prepared),
+                    "estimated_tokens": self.context.estimate_tokens(prepared),
+                    "tool_schema_chars": tool_schema_chars,
                 },
             )
             try:
-                response = self.model.complete(prepared, self.registry.definitions())
+                response = self.model.complete(prepared, tool_definitions)
             except ModelError as exc:
                 if session is not None:
                     session.usage_missing_count += 1
+                    session.model_call_records.append(
+                        {
+                            "call": session.model_call_count,
+                            "turn": session.turn_count,
+                            "step": step,
+                            "attempt": retry_index + 1,
+                            "history_messages": len(messages),
+                            "sent_messages": len(prepared),
+                            "estimated_chars": self.context.estimate_chars(prepared),
+                            "estimated_tokens": self.context.estimate_tokens(prepared),
+                            "tool_schema_chars": tool_schema_chars,
+                            "compacted": self._continuing_turn or len(prepared) < len(messages),
+                            "duration_seconds": time.monotonic() - request_started,
+                            "usage": {},
+                            "error_category": exc.category.value,
+                        }
+                    )
                     self._persist(session, messages, usage)
                 max_retries = self.config.max_model_retries
                 if exc.category == ModelErrorCategory.RESPONSE_PARSE:
@@ -681,6 +748,22 @@ class AgentRunner:
             if session is not None:
                 if not isinstance(response.usage.get("total_tokens"), int):
                     session.usage_missing_count += 1
+                session.model_call_records.append(
+                    {
+                        "call": session.model_call_count,
+                        "turn": session.turn_count,
+                        "step": step,
+                        "attempt": retry_index + 1,
+                        "history_messages": len(messages),
+                        "sent_messages": len(prepared),
+                        "estimated_chars": self.context.estimate_chars(prepared),
+                        "estimated_tokens": self.context.estimate_tokens(prepared),
+                        "tool_schema_chars": tool_schema_chars,
+                        "compacted": self._continuing_turn or len(prepared) < len(messages),
+                        "duration_seconds": self._last_model_duration,
+                        "usage": dict(response.usage),
+                    }
+                )
                 self._persist(session, messages, usage)
             return response
 
@@ -700,14 +783,24 @@ class AgentRunner:
     ) -> str | None:
         if self._elapsed_total(session) >= self.config.max_seconds:
             return "max_seconds"
-        if before_model and session.model_call_count >= self.config.max_model_calls:
+        if (
+            before_model
+            and session.model_call_count - self._run_model_call_start
+            >= self.config.max_model_calls
+        ):
             return "max_model_calls"
-        if len(session.tool_executions) > self.config.max_tool_calls:
+        if len(session.tool_executions) - self._run_tool_call_start > self.config.max_tool_calls:
             return "max_tool_calls"
-        if session.tool_output_chars >= self.config.max_total_tool_output_chars:
+        if (
+            session.tool_output_chars - self._run_tool_output_start
+            >= self.config.max_total_tool_output_chars
+        ):
             return "max_total_tool_output"
         reported_total = session.total_usage.get("total_tokens")
-        if isinstance(reported_total, int) and reported_total >= self.config.max_total_tokens:
+        if (
+            isinstance(reported_total, int)
+            and reported_total - self._run_total_token_start >= self.config.max_total_tokens
+        ):
             return "max_total_tokens"
         return None
 
@@ -770,7 +863,7 @@ class AgentRunner:
             if self._run_started_at > 0
             else 0.0
         )
-        return session.run_duration_seconds + current
+        return current if self._continuing_turn else session.run_duration_seconds + current
 
     def _redact_model_response(self, response: ModelResponse) -> ModelResponse:
         secrets = (self.config.api_key,)
@@ -1348,6 +1441,7 @@ class AgentRunner:
         last_error: str | None = None,
     ) -> AgentRunResult:
         if session is not None:
+            turn_reply = final_text.strip()
             session.run_duration_seconds += self._current_run_duration()
             session.refresh_verification_status()
             final_text = self._with_local_report(
@@ -1365,6 +1459,8 @@ class AgentRunner:
                 final_text=final_text,
                 last_error=last_error,
             )
+            session.finish_turn(turn_reply)
+            self._refresh_working_memory(session, turn_reply)
             self._persist(session, messages, usage)
         if session_status in {
             SessionStatus.COMPLETED_VERIFIED,
@@ -1398,6 +1494,7 @@ class AgentRunner:
                 "model_calls": session.model_call_count if session is not None else None,
                 "tool_calls": len(session.tool_executions) if session is not None else None,
                 "retries": session.retry_count if session is not None else None,
+                "total_usage": dict(usage),
             },
         )
         return AgentRunResult(
@@ -1408,6 +1505,48 @@ class AgentRunner:
             usage,
             session.session_id if session is not None else None,
         )
+
+    @staticmethod
+    def _refresh_working_memory(session: AgentSession, turn_reply: str) -> None:
+        active_changes = [
+            item.path for item in session.changes if item.undo_status == "active"
+        ]
+        relevant_files: list[str] = []
+        for execution in session.tool_executions:
+            arguments = execution.arguments or {}
+            for name in ("path", "directory"):
+                value = arguments.get(name)
+                if isinstance(value, str) and value and value not in relevant_files:
+                    relevant_files.append(value)
+        latest_verification = next(
+            (
+                {
+                    "command": item.command,
+                    "status": "passed" if item.passed else "failed",
+                    "exit_code": item.exit_code,
+                }
+                for item in reversed(session.verification_records)
+                if item.is_current
+            ),
+            None,
+        )
+        requests = [
+            str(item.get("content") or "")[:800]
+            for item in session.conversation
+            if item.get("role") == "user"
+        ][-5:]
+        session.working_memory = {
+            "scope": "this session only",
+            "turn": session.turn_count,
+            "current_goal": session.task[:1_200],
+            "recent_user_requests": requests,
+            "active_changed_files": list(dict.fromkeys(active_changes))[-30:],
+            "relevant_files": relevant_files[-30:],
+            "verification": latest_verification,
+            "last_outcome": turn_reply[:1_200],
+            "session_status": session.status.value,
+            "unresolved_reason": session.last_error or session.stop_reason,
+        }
 
     @staticmethod
     def _call_signature(call: ToolCall) -> str:

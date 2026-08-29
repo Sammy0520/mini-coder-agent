@@ -369,6 +369,54 @@ class SessionStoreTests(unittest.TestCase):
 
 
 class SessionRunnerTests(unittest.TestCase):
+    def test_completed_session_accepts_follow_up_with_compact_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            first_model = SequenceModel(
+                [ModelResponse(content="First turn complete.", usage={"total_tokens": 10})]
+            )
+            first_runner = AgentRunner(
+                model=first_model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            first = first_runner.run("Create the initial version")
+            session = store.load(first.session_id or "")
+            session.messages.insert(
+                -1,
+                {"role": "tool", "tool_call_id": "old-call", "content": "old output " * 500},
+            )
+            store.save(session)
+            second_model = SequenceModel(
+                [ModelResponse(content="Second turn complete.", usage={"total_tokens": 12})]
+            )
+            second_runner = AgentRunner(
+                model=second_model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = second_runner.run("Now add a follow-up feature", session=session)
+            restored = store.load(session.session_id)
+            rendered_request = str(second_model.requests[0])
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(restored.turn_count, 2)
+            self.assertEqual(
+                [item["role"] for item in restored.conversation],
+                ["user", "assistant", "user", "assistant"],
+            )
+            self.assertIn("Session working memory", rendered_request)
+            self.assertIn("Now add a follow-up feature", rendered_request)
+            self.assertNotIn("old output", rendered_request)
+            self.assertEqual(restored.total_usage["total_tokens"], 22)
+            self.assertEqual([item["turn"] for item in restored.model_call_records], [1, 2])
+            self.assertTrue(restored.model_call_records[-1]["compacted"])
+
     def test_resume_invalidates_verification_after_external_file_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

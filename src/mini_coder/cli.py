@@ -116,8 +116,20 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigurationError(
                 "Do not combine --resolve-uncertain with --show-changes or --undo-last"
             )
-        if resumed_session is not None and args.task:
-            raise ConfigurationError("Do not provide a new task together with --resume")
+        if (
+            resumed_session is not None
+            and args.task
+            and resumed_session.status
+            not in {
+                SessionStatus.COMPLETED_VERIFIED,
+                SessionStatus.COMPLETED_UNVERIFIED,
+                SessionStatus.FAILED,
+                SessionStatus.DENIED,
+            }
+        ):
+            raise ConfigurationError(
+                "Only a finished session can receive a follow-up task with --resume"
+            )
         if resumed_session is not None and (args.show_changes or args.undo_last):
             event_callback = _event_handler(args.log)
             if args.undo_last:
@@ -170,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                     task = ""
             workspace = args.workspace or "."
         else:
-            task = ""
+            task = " ".join(args.task).strip()
             workspace = resumed_session.workspace
 
         config = AgentConfig.from_env(
