@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -237,6 +238,17 @@ class SessionModelTests(unittest.TestCase):
             self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
             self.assertEqual(restored.title, "Inspect the project")
 
+    def test_migrates_schema_v7_session_to_observation_cache_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 7
+            data.pop("observation_cache_hit_count")
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.observation_cache_hit_count, 0)
+
     def test_explicit_session_title_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             session = AgentSession.create(
@@ -342,6 +354,31 @@ class SessionStoreTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertEqual(list(store.root.glob("*.tmp")), [])
 
+    def test_atomic_replace_retries_brief_permission_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            session = make_session(workspace)
+            real_replace = os.replace
+            attempts = 0
+
+            def flaky_replace(source: str | Path, destination: str | Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError(5, "temporarily locked")
+                real_replace(source, destination)
+
+            with (
+                patch("mini_coder.session.store.os.replace", side_effect=flaky_replace),
+                patch("mini_coder.session.store.time.sleep") as sleep,
+            ):
+                path = store.save(session)
+
+            self.assertTrue(path.is_file())
+            self.assertEqual(attempts, 3)
+            self.assertEqual(sleep.call_count, 2)
+
     def test_load_rejects_corrupt_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory))
@@ -436,6 +473,7 @@ class SessionRunnerTests(unittest.TestCase):
 
             self.assertEqual(result.status, "completed")
             self.assertEqual(restored.turn_count, 2)
+            self.assertEqual(restored.task, "Create the initial version")
             self.assertEqual(
                 [item["role"] for item in restored.conversation],
                 ["user", "assistant", "user", "assistant"],

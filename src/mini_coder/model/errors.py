@@ -8,7 +8,7 @@ from ..exceptions import ModelError, ModelErrorCategory, ModelProtocolError
 from ..redaction import redact_sensitive_text
 
 
-_RETRYABLE_SERVER_CODES = {500, 502, 503, 504}
+_RETRYABLE_SERVER_CODES = {500, 502, 503, 504, 524}
 
 
 def classify_model_exception(
@@ -23,6 +23,8 @@ def classify_model_exception(
 
     status_code = _status_code(exc)
     name = type(exc).__name__.casefold()
+    diagnostic = redact_sensitive_text(str(exc), secrets=secrets)
+    diagnostic_folded = diagnostic.casefold()
     if status_code == 401:
         category = ModelErrorCategory.AUTHENTICATION
         retryable = False
@@ -44,14 +46,21 @@ def classify_model_exception(
     elif "timeout" in name or isinstance(exc, TimeoutError):
         category = ModelErrorCategory.TIMEOUT
         retryable = True
-    elif any(marker in name for marker in ("connection", "network", "transport")):
+    elif any(marker in name for marker in ("connection", "network", "transport")) or any(
+        marker in diagnostic_folded
+        for marker in (
+            "stream_read_error",
+            "stream read error",
+            "connection reset",
+            "connection closed",
+        )
+    ):
         category = ModelErrorCategory.NETWORK
         retryable = True
     else:
         category = ModelErrorCategory.UNKNOWN
         retryable = False
 
-    diagnostic = redact_sensitive_text(str(exc), secrets=secrets)
     status = f" HTTP {status_code}" if status_code is not None else ""
     return ModelError(
         f"Model request failed [{category.value}{status}]: {diagnostic}",

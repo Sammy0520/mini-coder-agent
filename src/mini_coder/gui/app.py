@@ -222,13 +222,26 @@ def _session_execution_history(session) -> list[dict]:
         elif execution.name == "run_command":
             verification = verifications.get(execution.execution_id)
             if verification is not None:
+                expected_rejection = verification.passed and verification.exit_code not in {0, None}
                 title = (
-                    "运行测试，确认功能可以正常使用"
-                    if verification.passed
-                    else "运行测试后发现还有问题"
+                    "确认程序会正确拒绝无效输入"
+                    if expected_rejection
+                    else (
+                        "运行测试，确认功能可以正常使用"
+                        if verification.passed
+                        else "运行测试后发现还有问题"
+                    )
                 )
                 details = [
-                    "测试已经通过。" if verification.passed else "测试没有通过，需要继续处理。",
+                    (
+                        f"程序按预期返回了退出码 {verification.exit_code}。"
+                        if expected_rejection
+                        else (
+                            "测试已经通过。"
+                            if verification.passed
+                            else "测试没有通过，需要继续处理。"
+                        )
+                    ),
                     f"运行内容：{verification.command}",
                 ]
                 icon = "✓" if verification.passed else "!"

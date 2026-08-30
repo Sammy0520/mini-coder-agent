@@ -103,7 +103,8 @@ class ContextManagerTests(unittest.TestCase):
 
         self.assertNotIn("secret-state", str(prepared))
         self.assertIn("latest-state", str(prepared))
-        self.assertIn("older tool output compacted", prepared[3]["content"])
+        self.assertIn("earlier completed tool batch", str(prepared))
+        self.assertNotIn("A" * 1_000, str(prepared))
         self.assertEqual(prepared[-1]["content"], "B" * 8_000)
         included_ids = {
             call["id"]
@@ -113,6 +114,113 @@ class ContextManagerTests(unittest.TestCase):
         for message in prepared:
             if message.get("role") == "tool":
                 self.assertIn(message["tool_call_id"], included_ids)
+
+    def test_older_completed_write_payload_is_replaced_with_summary(self) -> None:
+        old_content = "old source body\n" * 800
+        latest_content = "latest source body\n" * 300
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "build it"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "write-old",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": {"path": "old.py", "content": old_content},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "write-old",
+                "content": '{"ok": true, "path": "old.py", "additions": 800, "deletions": 0}',
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "write-latest",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": {"path": "latest.py", "content": latest_content},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "write-latest",
+                "content": '{"ok": true, "path": "latest.py", "additions": 300, "deletions": 0}',
+            },
+        ]
+
+        manager = ContextManager(max_chars=80_000, max_tokens=30_000)
+        prepared = manager.prepare(messages)
+        rendered = str(prepared)
+
+        self.assertNotIn(old_content, rendered)
+        self.assertIn("earlier completed tool batch", rendered)
+        self.assertIn("write_file old.py: completed (+800/-0)", rendered)
+        latest_message = next(
+            item
+            for item in prepared
+            if item.get("role") == "assistant" and item.get("tool_calls")
+        )
+        self.assertEqual(
+            latest_message["tool_calls"][0]["function"]["arguments"]["content"],
+            latest_content,
+        )
+        self.assertLess(manager.estimate_tokens(prepared), manager.estimate_tokens(messages))
+
+    def test_older_completed_read_and_search_batches_are_summarized(self) -> None:
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "read-old",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": {"path": "app.py", "start_line": 1},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "read-old",
+                "content": (
+                    '{"ok":true,"content":"' + "source " * 1000
+                    + '","start_line":1,"end_line":100,"total_lines":100,'
+                    '"content_hash":"abcdef1234567890"}'
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "latest", "function": {"name": "search_text", "arguments": {"query": "TODO"}}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "latest", "content": '{"ok":true,"matches":[]}'},
+        ]
+
+        prepared = ContextManager(max_chars=30_000, max_tokens=10_000).prepare(messages)
+        rendered = str(prepared)
+
+        self.assertNotIn("source source source", rendered)
+        self.assertIn("read_file app.py: completed (lines 1-100, 100 total, hash abcdef123456)", rendered)
+        self.assertEqual(prepared[-1]["tool_call_id"], "latest")
 
 
 if __name__ == "__main__":

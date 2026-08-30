@@ -31,10 +31,10 @@
 - 本地工具：`list_files`、`read_file`、`search_text`、`write_file`、`edit_file`、`run_command`。
 - 安全控制：工作区路径限制、常见敏感文件过滤、写入防误覆盖、精确文本替换、命令风险分级、子进程树清理和统一脱敏。
 - 跨平台执行：向模型说明实际操作系统与默认 shell，文件搜索和修改优先使用内置工具；子命令中的 `python`/`pip` 默认跟随启动 Agent 的虚拟环境。
-- 运行控制：最大步骤、总时间、模型/工具调用、单次/累计工具输出和 provider token 预算；连续重复调用检测、上下文压缩与可恢复中断。
+- 运行控制：最大步骤、总时间、模型/工具调用、单次/累计工具输出和 provider token 预算；连续重复调用检测、旧读取/搜索/写入压缩、重叠读取区间与等价搜索复用，以及可恢复中断。
 - Session：原子保存版本化 Session；支持中断恢复和同一会话追加多轮任务，保留 Responses provider items、工具执行状态、审批结果、会话内工作记忆和累计 usage，并阻止不确定副作用被自动重放。
 - ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
-- 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、退出码、耗时和输出摘要；最终状态由本地事实决定。
+- 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、覆盖路径/技术区域、退出码、耗时和输出摘要；相同且仍有效的检查直接复用，最终状态由本地事实决定。
 - 项目理解：启动时注入有界工作区概览，识别清单、入口、测试、验证命令、项目说明和 Git 起始状态，并跳过依赖、缓存与构建目录。
 - 工具体验：文件列表和搜索支持分页，读取支持明确的继续行号，搜索返回过滤原因；失败结果包含稳定错误码和下一步建议。
 - 本地 GUI：浏览器页面与 CLI 复用同一个 `AgentRunner`，支持全局会话列表、运行中自由切换会话、同会话连续对话、SSE 事件续接、对话内批量审批、协作式停止、整批或单文件安全 Undo、完整文件查看、运行时间线、Diff、验证结果和会话记忆提示。
@@ -93,6 +93,9 @@ model_provider = "aicode007"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_verbosity = "high"
+model_streaming = true
+prompt_cache_enabled = true
+prompt_cache_key = "mini-coder-agent-v1"
 
 [model_providers.aicode007]
 name = "aicode007"
@@ -130,9 +133,16 @@ $env:CODING_AGENT_MODEL = "支持 function calling 的模型名"
 $env:CODING_AGENT_WIRE_API = "responses"
 $env:CODING_AGENT_REASONING_EFFORT = "xhigh"
 $env:CODING_AGENT_VERBOSITY = "high"
+$env:CODING_AGENT_STREAMING = "true"
+$env:CODING_AGENT_PROMPT_CACHE = "true"
+$env:CODING_AGENT_PROMPT_CACHE_KEY = "mini-coder-agent-v1"
 ```
 
 命令行覆盖项优先于环境变量，API key 环境变量优先于本地 `auth.json`，其他环境变量优先于 TOML。`CODING_AGENT_BASE_URL` 可省略，此时客户端使用其默认服务地址。对本地兼容服务，也要把 API key 设置成服务端接受的值。
+
+Responses 默认优先使用流式传输，并发送稳定的 prompt cache key。兼容服务明确拒绝流式或缓存字段时，客户端只针对该能力回退，不会把普通超时误判为“不支持”。Session 会保存 provider 返回的 `cached_tokens`、`cache_write_tokens` 和 `reasoning_tokens`；供应方不返回这些字段时保持未知，不会伪造缓存命中率。
+
+复杂任务中，模型必须在下一轮看到最近一批工具的完整结果；更早且已经完成的 `write_file`/`edit_file` 批次则会被本地压缩为路径、成败和增删行摘要，不再反复重放工具参数中的整份源码。完整变更仍保存在 Session 和 ChangeTracker 中，需要核对时可以重新读取文件。这能降低多文件任务后半程的输入量，同时保持最近工具调用的 Responses 协议配对完整。
 
 其他可选变量见 `.env.example`。
 
@@ -164,11 +174,15 @@ mini-coder-gui
 
 可通过 `--log agent-events.jsonl` 保存可选的本地 JSONL 事件日志。每项事件包含 schema 版本、UTC 时间、run/session ID、step 和运行时长。日志写入失败只产生可见警告，不会中断主任务。事件内容会经过统一凭据脱敏，但仍可能含有代码或命令输出，因此默认关闭，也不应提交。
 
-`run_command` 会把启动 `mini-coder` 的 Python 环境放在子进程 `PATH` 最前面。因此从 `.venv` 启动时，模型执行普通的 `python` 或 `python -m pip` 也会使用同一个 `.venv`，而不是意外落到系统 Python 或 Anaconda。模型服务所用的 `OPENAI_API_KEY` 与 `CODING_AGENT_API_KEY` 不会自动传给项目子进程。命令超时或用户按下 Ctrl+C 时，Runner 会终止它启动的进程组/进程树，并把退出码、超时、耗时和输出截断状态保存到 Session。
+`run_command` 会把启动 `mini-coder` 的 Python 环境放在子进程 `PATH` 最前面。因此从 `.venv` 启动时，模型执行普通的 `python` 或 `python -m pip` 也会使用同一个 `.venv`，而不是意外落到系统 Python 或 Anaconda。模型服务所用的 `OPENAI_API_KEY` 与 `CODING_AGENT_API_KEY` 不会自动传给项目子进程。命令超时或用户按下 Ctrl+C 时，Runner 会终止它启动的进程组/进程树，并把退出码、预期退出码、超时、耗时和输出截断状态保存到 Session。负向验收可以声明 `expected_exit_codes`，例如程序正确拒绝非法输入并返回 2 时会记为通过，而不是误报任务失败。
+
+每次运行还会向项目命令提供 `MINI_CODER_RUNTIME_DIR`。需要临时数据库、导出文件或其他冒烟数据时，Agent 应把它们放在这个 Session 专用目录，而不是先通过 `write_file` 创建项目文件。这样运行时产物不会混入代码 Diff、Undo 或 ChangeTracker 冲突判断。
 
 ## 错误恢复与运行预算
 
-客户端关闭 SDK 内部的隐式重试，由 Runner 统一决定是否恢复：网络连接、超时、HTTP 429 和 500/502/503/504 可以有限重试；HTTP 400/401/403 不重试；响应解析错误最多重试一次。429 的 `Retry-After` 支持秒数和 HTTP 日期，指数退避带随机抖动，最终等待时间受硬上限约束。错误分类和诊断写入前会先脱敏。
+客户端关闭 SDK 内部的隐式重试，由 Runner 统一决定是否恢复：网络连接、HTTP 429 和 500/502/503 可以有限重试；HTTP 400/401/403 不重试；响应解析错误最多重试一次。超时以及 HTTP 504/524 不再原样连续重发，只允许一次缩小操作批次的恢复请求。429 的 `Retry-After` 支持秒数和 HTTP 日期，指数退避带随机抖动，最终等待时间受硬上限约束。错误分类和诊断写入前会先脱敏。
+
+复杂或从零构建的任务会被限制为小批次：默认每次模型响应最多 8 个工具调用，其中最多 3 个文件写入，总新增内容约 18,000 字符。超出的文件操作会被明确退回给模型，要求下一轮继续。可通过 `CODING_AGENT_MAX_RESPONSE_TOOL_CALLS`、`CODING_AGENT_MAX_RESPONSE_WRITE_CALLS` 和 `CODING_AGENT_MAX_RESPONSE_WRITE_CHARS` 调整。
 
 下面的上限都可以通过 CLI 覆盖：
 
@@ -233,7 +247,7 @@ mini-coder --config agent.toml --workspace "D:\path\to\workspace" --resume <sess
 mini-coder --config agent.toml --resume "<session-file>" "继续在刚才的实现上增加导出功能并验证"
 ```
 
-每次模型请求都会记录本轮消息数、发送消息数、本地 Token 估算、工具 schema 大小、耗时和 provider usage。原始消息仍完整落盘以便审计；进入下一轮时只发送本 Session 的结构化工作记忆、上一轮结论和最新用户请求，不重放旧工具日志。单轮内部也会停止重复发送已经过时的加密 reasoning 项，并压缩较早的超长工具结果。
+每次模型请求都会记录本轮消息数、发送消息数、本地 Token 估算、工具 schema 大小、耗时和 provider usage。原始消息仍完整落盘以便审计；进入下一轮时只发送本 Session 的结构化工作记忆、上一轮结论和最新用户请求，不重放旧工具日志。单轮内部也会停止重复发送已经过时的加密 reasoning 项，把较早的读取、搜索和写入批次压缩为文件、范围、结果与内容指纹摘要。文件读取会合并本轮已经看过的行号区间，重叠请求只返回尚未见过的行；大小写等价的普通搜索和已覆盖分页会复用先前结果。写入或可能改变工作区的命令会让目录级搜索缓存失效，文件读取则继续用内容指纹判断是否仍然有效。缓存命中次数会保存到 Session 和运行事件中。
 
 工具调用按 `requested`、`approved`、`running`、`completed`、`failed`、`denied` 和 `uncertain` 记录：
 
@@ -253,7 +267,7 @@ mini-coder --config agent.toml --resume "<session-file>" `
 
 执行 ID 会显示在恢复摘要中。这个选项不会重放原工具；它只记录人工检查结论并为模型补入对应工具结果。`completed` 表示副作用确实已经发生，`failed` 表示确认没有完成。不要在没有检查文件或外部状态时使用它。
 
-没有代码修改的只读或分析任务可以正常完成，而不会被要求运行无意义测试。发生文件修改后，只有针对当前修改版本的真实验证命令成功，Session 才会标记为 `completed_verified`；未运行验证或验证后又发生修改时为 `completed_unverified`，最近一次验证失败时为 `failed`。恢复 Session 时还会核对最后一次受追踪修改的文件 hash；文件被外部编辑后，旧验证会自动失效，已完成任务会转为可继续恢复的 `interrupted`。用户拒绝完成任务所需的写入或命令时会记录为 `denied`。CLI 对 verified 和 unverified 的正常完成返回成功退出码，对失败、拒绝和中断返回非零退出码。
+没有代码修改的只读或分析任务可以正常完成，而不会被要求运行无意义测试。发生代码或配置修改后，只有真实验证命令符合声明的退出码预期，Session 才会标记为 `completed_verified`；未运行验证、相关实现再次变化或验证结果不符合预期时会分别记为未验证、失效或失败。验证可声明覆盖路径或 Python、网页、文档、原生代码等技术区域，无关修改不会废弃仍有效的检查；相同命令和范围在文件未变化时也不会重复执行。每次请求还会附带短小的用户要求与本地证据清单，检查已通过后明确提示 Agent 收敛并直接回答。恢复 Session 时还会核对最后一次受追踪修改的文件 hash；文件被外部编辑后，旧验证会自动失效，已完成任务会转为可继续恢复的 `interrupted`。用户拒绝完成任务所需的写入或命令时会记录为 `denied`。CLI 对 verified 和 unverified 的正常完成返回成功退出码，对失败、拒绝和中断返回非零退出码。
 
 一次真实 Responses 跨进程恢复的脱敏验收结果见 [`docs/runs/session-resume-run.md`](docs/runs/session-resume-run.md)。
 
@@ -292,7 +306,7 @@ Undo 会把已有文件原子恢复到修改前快照；如果原操作创建了
 
 GUI 除“撤销上次修改”外，还会在展开文件列表后提供“撤销此文件”。单文件撤销使用同样的 hash 冲突检查；如果该文件后来又有新的修改，就不会覆盖当前内容。
 
-文件写入和 Undo 都会推进 Session 的修改版本，并把此前验证标记为 stale。Undo 一个已经完成的 Session 后，状态会回到可恢复的 `interrupted`，防止旧测试结果继续冒充当前代码的验证证据。
+文件写入和 Undo 都会推进 Session 的修改版本；代码、测试和配置变化会把相关验证标记为 stale，普通文档变化不会无条件废弃与文档无关的代码测试。Undo 一个已经完成的 Session 后，状态会回到可恢复的 `interrupted`，防止旧测试结果继续冒充当前代码的验证证据。
 
 Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修改，不会尝试撤销 `run_command` 产生的任意文件、Git、网络或其他外部副作用。
 
@@ -308,7 +322,7 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 ## 测试
 
-核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 115 项：
+核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 158 项：
 
 ```powershell
 $env:PYTHONPATH = "src"

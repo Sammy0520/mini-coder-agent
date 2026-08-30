@@ -216,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
             reasoning_effort=config.model_reasoning_effort,
             verbosity=config.model_verbosity,
             timeout_seconds=config.model_timeout_seconds,
+            streaming=config.model_streaming,
+            prompt_cache_enabled=config.prompt_cache_enabled,
+            prompt_cache_key=config.prompt_cache_key,
         )
         provider_label = config.model_provider or "environment/default"
         print(
@@ -326,6 +329,7 @@ def _print_resume_summary(session: AgentSession) -> None:
         f"  Failed/invalid tools: {session.failed_tool_call_count}/"
         f"{session.invalid_tool_call_count}\n"
         f"  Repeated-read hints: {session.repeated_read_hint_count}\n"
+        f"  Observation cache hits: {session.observation_cache_hit_count}\n"
         f"  Pre-existing Git changes: {preexisting_git_changes}\n"
         f"  Provider usage: "
         f"{'partial or unknown' if session.usage_missing_count else 'complete'}\n"
@@ -533,9 +537,10 @@ def _event_handler(log_path: Path | None):
             print(f"[phase] {safe_payload['previous']} -> {safe_payload['phase']}")
         elif name == "verification_completed":
             state = "passed" if safe_payload["passed"] else "failed"
+            expected = safe_payload.get("expected_exit_codes", [0])
             print(
                 f"[verification] {state}, exit {safe_payload['exit_code']}, "
-                f"{safe_payload['duration_seconds']:.2f}s"
+                f"expected {expected}, {safe_payload['duration_seconds']:.2f}s"
             )
         elif name == "verification_invalidated":
             print(f"[verification] stale: {safe_payload['reason']}")

@@ -81,3 +81,27 @@ def _validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> No
         if allowed is not None and value not in allowed:
             rendered = ", ".join(repr(item) for item in allowed)
             raise ToolError(f"Argument '{name}' must be one of: {rendered}")
+        if expected_name == "array":
+            minimum = property_schema.get("minItems")
+            maximum = property_schema.get("maxItems")
+            if isinstance(minimum, int) and len(value) < minimum:
+                raise ToolError(f"Argument '{name}' must contain at least {minimum} item(s)")
+            if isinstance(maximum, int) and len(value) > maximum:
+                raise ToolError(f"Argument '{name}' must contain at most {maximum} item(s)")
+            if property_schema.get("uniqueItems") is True:
+                rendered_items = [repr(item) for item in value]
+                if len(set(rendered_items)) != len(rendered_items):
+                    raise ToolError(f"Argument '{name}' must not contain duplicates")
+            item_schema = property_schema.get("items")
+            if isinstance(item_schema, dict):
+                item_type = item_schema.get("type")
+                item_expected = type_map.get(item_type)
+                if item_expected is not None:
+                    for index, item in enumerate(value):
+                        valid_item = isinstance(item, item_expected)
+                        if item_type in {"integer", "number"} and isinstance(item, bool):
+                            valid_item = False
+                        if not valid_item:
+                            raise ToolError(
+                                f"Argument '{name}[{index}]' must be of type {item_type}"
+                            )

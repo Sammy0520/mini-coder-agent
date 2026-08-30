@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,8 @@ class SearchTextTool(Tool):
     description = (
         "Search text or a regular expression across workspace text files. "
         "Prefer this portable tool over shell commands such as rg, grep, or findstr. "
-        "Use next_offset when truncated and inspect outcome/filter counts when no match exists."
+        "Use next_offset when truncated and inspect outcome/filter counts when no match exists. "
+        "Equivalent unchanged searches may return a cache summary instead of repeated matches."
     )
     parameters = {
         "type": "object",
@@ -45,6 +47,30 @@ class SearchTextTool(Tool):
             raise ToolError(f"Invalid regular expression: {exc}") from exc
         maximum = min(max(arguments.get("max_results", 100), 1), 500)
         offset = min(max(arguments.get("offset", 0), 0), 10_000)
+        cache_key = _search_cache_key(
+            root=root,
+            query=query,
+            glob=glob,
+            regex=bool(arguments.get("regex", False)),
+            case_sensitive=bool(arguments.get("case_sensitive", False)),
+            revision=context.observation_revision,
+        )
+        cached = _reuse_search(context.search_cache.get(cache_key, []), offset, maximum)
+        if cached is not None:
+            replay, exact = cached
+            return ToolResult(
+                True,
+                (
+                    "Reused the earlier equivalent search; workspace observations "
+                    "have not been invalidated"
+                ),
+                {
+                    **replay,
+                    "cache_hit": True,
+                    "cache_replay": "summary" if exact else "covered_subset",
+                    "observation_revision": context.observation_revision,
+                },
+            )
         matches: list[dict[str, Any]] = []
         match_index = 0
         has_more = False
@@ -142,23 +168,104 @@ class SearchTextTool(Tool):
         else:
             outcome = "no_match"
 
+        data = {
+            "matches": matches,
+            "offset": offset,
+            "next_offset": offset + len(matches) if has_more else None,
+            "truncated": has_more,
+            "outcome": outcome,
+            "scanned_files": scanned_files,
+            "filtered": {
+                "policy": filtered_policy,
+                "glob": filtered_glob,
+                "binary": skipped_binary,
+                "large": skipped_large,
+                "decode": skipped_decode,
+            },
+            "scan_truncated": scan_truncated,
+            "cache_hit": False,
+            "observation_revision": context.observation_revision,
+        }
+        if cache_key not in context.search_cache and len(context.search_cache) >= 32:
+            context.search_cache.pop(next(iter(context.search_cache)))
+        pages = context.search_cache.setdefault(cache_key, [])
+        pages.append({"offset": offset, "maximum": maximum, "data": data})
+        del pages[:-8]
         return ToolResult(
             True,
             f"Found {len(matches)} match(es) from offset {offset}; outcome={outcome}",
-            {
-                "matches": matches,
-                "offset": offset,
-                "next_offset": offset + len(matches) if has_more else None,
-                "truncated": has_more,
-                "outcome": outcome,
-                "scanned_files": scanned_files,
-                "filtered": {
-                    "policy": filtered_policy,
-                    "glob": filtered_glob,
-                    "binary": skipped_binary,
-                    "large": skipped_large,
-                    "decode": skipped_decode,
-                },
-                "scan_truncated": scan_truncated,
-            },
+            data,
         )
+
+
+def _search_cache_key(
+    *,
+    root: Path,
+    query: str,
+    glob: str,
+    regex: bool,
+    case_sensitive: bool,
+    revision: int,
+) -> str:
+    normalized_query = query
+    if not regex and not case_sensitive:
+        normalized_query = query.casefold()
+    return json.dumps(
+        [
+            str(root.resolve()),
+            normalized_query,
+            glob,
+            regex,
+            case_sensitive,
+            revision,
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _reuse_search(
+    pages: list[dict[str, Any]],
+    offset: int,
+    maximum: int,
+) -> tuple[dict[str, Any], bool] | None:
+    for page in reversed(pages):
+        data = page.get("data")
+        if not isinstance(data, dict):
+            continue
+        page_offset = page.get("offset")
+        page_maximum = page.get("maximum")
+        matches = data.get("matches")
+        if (
+            not isinstance(page_offset, int)
+            or not isinstance(page_maximum, int)
+            or not isinstance(matches, list)
+            or offset < page_offset
+        ):
+            continue
+        available_end = page_offset + len(matches)
+        requested_end = offset + maximum
+        exhausted = not bool(data.get("truncated", False))
+        if requested_end > available_end and not exhausted:
+            continue
+        start_index = offset - page_offset
+        subset = matches[start_index : start_index + maximum]
+        exact = offset == page_offset and maximum == page_maximum
+        replay = {
+            name: value
+            for name, value in data.items()
+            if name not in {"matches", "cache_hit"}
+        }
+        if exact:
+            replay["matches"] = []
+            replay["reused_match_count"] = len(matches)
+        else:
+            replay["matches"] = subset
+        has_more = (
+            offset + len(subset) < available_end
+            or (bool(data.get("truncated", False)) and offset + len(subset) >= available_end)
+        )
+        replay["offset"] = offset
+        replay["truncated"] = has_more
+        replay["next_offset"] = offset + len(subset) if has_more else None
+        return replay, exact
+    return None

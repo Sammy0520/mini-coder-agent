@@ -1175,14 +1175,18 @@ function overviewDetail(payload) {
 
 function verificationDetail(payload) {
   const duration = Number(payload.duration_seconds || 0).toFixed(2);
-  return `${payload.command || "项目检查"}\n退出码：${payload.exit_code ?? "?"} · 用时：${duration} 秒`;
+  const expected = Array.isArray(payload.expected_exit_codes) ? payload.expected_exit_codes.join("/") : "0";
+  return `${payload.command || "项目检查"}\n退出码：${payload.exit_code ?? "?"} · 预期：${expected} · 用时：${duration} 秒`;
 }
 
 function friendlyVerification(payload) {
   const duration = Number(payload.duration_seconds || 0).toFixed(1);
+  if (payload.passed && Number(payload.exit_code) !== 0) {
+    return `程序按预期拒绝了无效输入（退出码 ${payload.exit_code}，${duration} 秒）。`;
+  }
   return payload.passed
     ? `检查成功完成（${duration} 秒）。`
-    : `检查返回了问题（退出码 ${payload.exit_code ?? "?"}，${duration} 秒）。`;
+    : `检查结果不符合预期（退出码 ${payload.exit_code ?? "?"}，${duration} 秒）。`;
 }
 
 function friendlyFinalText(text) {

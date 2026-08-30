@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from ..exceptions import SessionError
@@ -51,7 +52,7 @@ class SessionStore:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary_path, path)
+            _replace_with_transient_retry(temporary_path, path)
         except OSError as exc:
             try:
                 os.close(descriptor)
@@ -101,3 +102,16 @@ class SessionStore:
         if candidate.is_absolute() or candidate.parent != Path(".") or candidate.suffix == ".json":
             return candidate.resolve()
         return self.path_for(str(identifier))
+
+
+def _replace_with_transient_retry(source: Path, destination: Path) -> None:
+    """Tolerate brief Windows file locks without weakening atomic persistence."""
+    delays = (0.05, 0.1, 0.2)
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt >= len(delays):
+                raise
+            time.sleep(delays[attempt])

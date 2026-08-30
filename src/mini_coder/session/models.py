@@ -18,7 +18,7 @@ from ..verification import (
     VerificationTracker,
 )
 
-CURRENT_SESSION_SCHEMA = 7
+CURRENT_SESSION_SCHEMA = 8
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -35,6 +35,12 @@ _SAFE_MODEL_FIELDS = {
     "max_total_tool_output_chars",
     "max_total_tokens",
     "max_context_tokens",
+    "model_streaming",
+    "prompt_cache_enabled",
+    "prompt_cache_key",
+    "max_response_tool_calls",
+    "max_response_write_calls",
+    "max_response_write_chars",
 }
 
 
@@ -328,6 +334,7 @@ class AgentSession:
     failed_tool_call_count: int = 0
     invalid_tool_call_count: int = 0
     repeated_read_hint_count: int = 0
+    observation_cache_hit_count: int = 0
     stop_reason: str | None = None
     final_text: str = ""
     last_error: str | None = None
@@ -376,6 +383,7 @@ class AgentSession:
             "failed_tool_call_count": self.failed_tool_call_count,
             "invalid_tool_call_count": self.invalid_tool_call_count,
             "repeated_read_hint_count": self.repeated_read_hint_count,
+            "observation_cache_hit_count": self.observation_cache_hit_count,
         }.items():
             if value < 0:
                 raise SessionError(f"session {name} must not be negative")
@@ -447,7 +455,9 @@ class AgentSession:
             SessionStatus.INTERRUPTED,
         }:
             raise SessionError("only a finished session can receive a follow-up task")
-        self.task = follow_up
+        # Keep the original task as the canonical session goal. Follow-up
+        # instructions are appended to the conversation instead of replacing it
+        # with vague messages such as "continue" or "do that".
         self.turn_count += 1
         self.current_step = 0
         self.phase = TaskPhase.ANALYZE
@@ -505,11 +515,17 @@ class AgentSession:
         self.phase = phase
         self.touch()
 
-    def invalidate_verification(self, reason: str) -> list[VerificationRecord]:
+    def invalidate_verification(
+        self,
+        reason: str,
+        *,
+        changed_path: str | None = None,
+    ) -> list[VerificationRecord]:
         self.change_revision += 1
         invalidated = VerificationTracker.invalidate(
             self.verification_records,
             reason=reason,
+            changed_path=changed_path,
         )
         self.refresh_verification_status()
         self.touch()
@@ -556,6 +572,7 @@ class AgentSession:
             "failed_tool_call_count": self.failed_tool_call_count,
             "invalid_tool_call_count": self.invalid_tool_call_count,
             "repeated_read_hint_count": self.repeated_read_hint_count,
+            "observation_cache_hit_count": self.observation_cache_hit_count,
             "stop_reason": self.stop_reason,
             "final_text": self.final_text,
             "last_error": self.last_error,
@@ -669,6 +686,11 @@ class AgentSession:
                 "repeated_read_hint_count",
                 minimum=0,
             ),
+            observation_cache_hit_count=_required_int(
+                data,
+                "observation_cache_hit_count",
+                minimum=0,
+            ),
             stop_reason=_optional_string(data, "stop_reason"),
             final_text=_required_string(data, "final_text", allow_empty=True),
             last_error=_optional_string(data, "last_error"),
@@ -700,7 +722,7 @@ class AgentSession:
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version not in {1, 2, 3, 4, 5, 6}:
+    if version not in {1, 2, 3, 4, 5, 6, 7}:
         return data
     migrated = copy.deepcopy(data)
     if version == 1:
@@ -792,6 +814,10 @@ def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("conversation", conversation)
         migrated.setdefault("working_memory", {})
         migrated.setdefault("model_call_records", [])
+        version = 7
+    if version == 7:
+        migrated["schema_version"] = 8
+        migrated.setdefault("observation_cache_hit_count", 0)
     return migrated
 
 

@@ -18,6 +18,30 @@ _VERIFICATION_PATTERNS = (
     r"(?:^|\s)(?:ruff\s+check|mypy|pyright|eslint|tsc)(?:\s|$)",
 )
 
+_DOCUMENTATION_SUFFIXES = {".md", ".markdown", ".rst"}
+_DOCUMENTATION_COMMAND = re.compile(
+    r"(?i)(?:markdown|markdownlint|mkdocs|sphinx|doctest|rstcheck|README)"
+)
+_DOMAIN_SUFFIXES = {
+    "python": {".py", ".pyi", ".pyx"},
+    "web": {".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".css", ".scss", ".html"},
+    "docs": _DOCUMENTATION_SUFFIXES,
+    "native": {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".rs", ".go", ".java", ".kt", ".cs"},
+}
+_CONFIG_NAMES = {
+    "pyproject.toml",
+    "setup.cfg",
+    "tox.ini",
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "cargo.toml",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+}
+
 
 class VerificationTracker:
     """Derive verification state from commands and workspace change revisions."""
@@ -42,6 +66,16 @@ class VerificationTracker:
         change_revision: int,
         summary_limit: int = 800,
     ) -> VerificationRecord:
+        expected_exit_codes = _expected_exit_codes(
+            result_data.get("expected_exit_codes", arguments.get("expected_exit_codes"))
+        )
+        timed_out = bool(result_data.get("timed_out", False))
+        expectation_met = bool(
+            result_data.get(
+                "expectation_met",
+                result_data.get("exit_code") in expected_exit_codes,
+            )
+        ) and not timed_out
         return VerificationRecord.create(
             tool_execution_id=tool_execution_id,
             command=str(arguments.get("command", "")),
@@ -51,8 +85,12 @@ class VerificationTracker:
             stdout_summary=_summary(result_data.get("stdout", ""), summary_limit),
             stderr_summary=_summary(result_data.get("stderr", ""), summary_limit),
             change_revision=change_revision,
-            passed=bool(result_ok and result_data.get("exit_code") == 0),
-            timed_out=bool(result_data.get("timed_out", False)),
+            passed=bool(result_ok and expectation_met),
+            timed_out=timed_out,
+            expected_exit_codes=expected_exit_codes,
+            expectation_met=expectation_met,
+            scope_paths=_scope_paths(arguments.get("verification_paths")),
+            scope_domains=_scope_domains(arguments),
         )
 
     @staticmethod
@@ -60,10 +98,11 @@ class VerificationTracker:
         records: list[VerificationRecord],
         *,
         reason: str,
+        changed_path: str | None = None,
     ) -> list[VerificationRecord]:
         invalidated = []
         for record in records:
-            if record.is_current:
+            if record.is_current and _change_affects_verification(record, changed_path):
                 record.invalidate(reason)
                 invalidated.append(record)
         return invalidated
@@ -75,11 +114,7 @@ class VerificationTracker:
         change_revision: int,
         had_file_modification: bool,
     ) -> VerificationStatus:
-        current = [
-            record
-            for record in records
-            if record.is_current and record.change_revision == change_revision
-        ]
+        current = [record for record in records if record.is_current]
         if current:
             return VerificationStatus.PASSED if current[-1].passed else VerificationStatus.FAILED
         if records:
@@ -94,3 +129,81 @@ def _summary(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 18)] + "...[truncated]"
+
+
+def _expected_exit_codes(value: Any) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        return (0,)
+    parsed = tuple(
+        item for item in value if isinstance(item, int) and not isinstance(item, bool)
+    )
+    return parsed or (0,)
+
+
+def _change_affects_verification(
+    record: VerificationRecord,
+    changed_path: str | None,
+) -> bool:
+    if not changed_path:
+        return True
+    normalized = changed_path.replace("\\", "/").lstrip("./").casefold()
+    for scoped in record.scope_paths:
+        scoped_normalized = scoped.replace("\\", "/").strip("./").casefold()
+        if normalized == scoped_normalized or normalized.startswith(scoped_normalized + "/"):
+            return True
+    if record.scope_paths:
+        return False
+    domains = set(record.scope_domains)
+    changed_domain = _path_domain(normalized)
+    if changed_domain == "docs":
+        return "docs" in domains or bool(_DOCUMENTATION_COMMAND.search(record.command))
+    if changed_domain == "all":
+        return True
+    if "all" in domains:
+        return True
+    return changed_domain in domains
+
+
+def _scope_paths(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            item.replace("\\", "/").strip("./")
+            for item in value
+            if isinstance(item, str) and item.strip("./\\ ")
+        )
+    )
+
+
+def _scope_domains(arguments: dict[str, Any]) -> tuple[str, ...]:
+    explicit = arguments.get("verification_domains")
+    allowed = {"python", "web", "docs", "native", "config", "all"}
+    if isinstance(explicit, list):
+        selected = tuple(
+            dict.fromkeys(item for item in explicit if isinstance(item, str) and item in allowed)
+        )
+        if selected:
+            return selected
+    command = str(arguments.get("command", ""))
+    lowered = command.casefold()
+    if _DOCUMENTATION_COMMAND.search(command):
+        return ("docs",)
+    if re.search(r"(?:python|pytest|unittest|ruff|mypy|pyright|tox|nox)", lowered):
+        return ("python", "config")
+    if re.search(r"(?:npm|pnpm|yarn|bun|vitest|jest|eslint|tsc)", lowered):
+        return ("web", "config")
+    if re.search(r"(?:cargo|go\s+test|dotnet|mvn|gradle|make)", lowered):
+        return ("native", "config")
+    return ("all",)
+
+
+def _path_domain(path: str) -> str:
+    name = path.rsplit("/", 1)[-1]
+    if name in _CONFIG_NAMES:
+        return "config"
+    suffix = "." + name.rsplit(".", 1)[-1] if "." in name else ""
+    for domain, suffixes in _DOMAIN_SUFFIXES.items():
+        if suffix in suffixes:
+            return domain
+    return "all"

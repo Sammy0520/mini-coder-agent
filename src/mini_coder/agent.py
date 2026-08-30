@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import random
+import re
 import time
 import uuid
 import warnings
@@ -263,6 +264,11 @@ class AgentRunner:
             self._run_tool_output_start = session.tool_output_chars
             self._run_total_token_start = int(session.total_usage.get("total_tokens", 0))
 
+        runtime_key = session.session_id if session is not None else self._run_id
+        self.tool_context.runtime_directory = (
+            self.config.workspace / ".mini-coder" / "runtime" / runtime_key
+        )
+
         self._emit(
             "run_started",
             {
@@ -328,6 +334,11 @@ class AgentRunner:
                     memory=session.working_memory if session is not None else None,
                     follow_up=self._continuing_turn,
                 )
+                if session is not None:
+                    prepared = self._insert_progress_context(
+                        prepared,
+                        self._acceptance_context(session),
+                    )
                 context_was_compacted = self._continuing_turn or len(prepared) < len(messages)
                 if context_was_compacted:
                     self._emit(
@@ -397,9 +408,16 @@ class AgentRunner:
                     },
                 )
 
+                batch_limit_errors = self._response_batch_limit_errors(
+                    response.tool_calls
+                )
                 repeated_flags: list[bool] = []
                 records: list[ToolExecutionRecord | None] = []
-                for call in response.tool_calls:
+                for call, batch_limit_error in zip(
+                    response.tool_calls,
+                    batch_limit_errors,
+                    strict=True,
+                ):
                     signature = self._call_signature(call)
                     if signature == previous_signature:
                         repeated_count += 1
@@ -413,6 +431,8 @@ class AgentRunner:
                     repeated_flags.append(repeated)
                     if record is not None and repeated:
                         record.error = "repeated_call_limit"
+                    elif record is not None and batch_limit_error:
+                        record.error = "response_batch_limit"
 
                 if session is not None:
                     session.current_step = step
@@ -478,12 +498,18 @@ class AgentRunner:
                 batch_decisions: dict[str, bool] = {}
                 batch_candidates: list[tuple[Tool, dict[str, Any]]] = []
                 batch_call_ids: list[str] = []
-                for call, repeated in zip(
+                for call, repeated, batch_limit_error in zip(
                     response.tool_calls,
                     repeated_flags,
+                    batch_limit_errors,
                     strict=True,
                 ):
-                    if repeated or call.arguments is None or call.parse_error:
+                    if (
+                        repeated
+                        or batch_limit_error
+                        or call.arguments is None
+                        or call.parse_error
+                    ):
                         continue
                     try:
                         self.registry.validate_arguments(call.name, call.arguments)
@@ -508,14 +534,25 @@ class AgentRunner:
                     batch_decisions.update(
                         {call_id: approved_batch for call_id in batch_call_ids}
                     )
-                for call, record, repeated in zip(
+                for call, record, repeated, batch_limit_error in zip(
                     response.tool_calls,
                     records,
                     repeated_flags,
+                    batch_limit_errors,
                     strict=True,
                 ):
                     self._check_cancelled()
-                    if repeated:
+                    if batch_limit_error:
+                        self._record_tool_result(
+                            call,
+                            record,
+                            ToolResult(False, batch_limit_error),
+                            messages,
+                            usage,
+                            session,
+                            status=ToolExecutionStatus.FAILED,
+                        )
+                    elif repeated:
                         result = ToolResult(
                             False,
                             f"Stopped: the same tool call was requested {repeated_count} "
@@ -605,6 +642,41 @@ class AgentRunner:
                     },
                 )
             raise
+
+    def _response_batch_limit_errors(
+        self,
+        calls: list[ToolCall],
+    ) -> list[str | None]:
+        errors: list[str | None] = []
+        write_calls = 0
+        write_chars = 0
+        for index, call in enumerate(calls):
+            error: str | None = None
+            if index >= self.config.max_response_tool_calls:
+                error = (
+                    "This response requested too many operations at once. Continue in "
+                    "a later response with a smaller batch."
+                )
+            if call.name in {"write_file", "edit_file"} and call.arguments is not None:
+                write_calls += 1
+                if call.name == "write_file":
+                    payload = call.arguments.get("content", "")
+                else:
+                    payload = call.arguments.get("new_text", "")
+                if isinstance(payload, str):
+                    write_chars += len(payload)
+                if error is None and write_calls > self.config.max_response_write_calls:
+                    error = (
+                        "This response requested too many file changes at once. Split the "
+                        "remaining files into the next small batch."
+                    )
+                if error is None and write_chars > self.config.max_response_write_chars:
+                    error = (
+                        "This response's file content batch is too large. Write fewer or "
+                        "smaller related files, then continue in the next response."
+                    )
+            errors.append(error)
+        return errors
 
     def _validate_resume(self, session: AgentSession, task: str) -> None:
         expected_workspace = Path(session.workspace).expanduser().resolve()
@@ -716,6 +788,12 @@ class AgentRunner:
             "max_total_tool_output_chars": self.config.max_total_tool_output_chars,
             "max_total_tokens": self.config.max_total_tokens,
             "max_context_tokens": self.config.max_context_tokens,
+            "model_streaming": self.config.model_streaming,
+            "prompt_cache_enabled": self.config.prompt_cache_enabled,
+            "prompt_cache_key": self.config.prompt_cache_key,
+            "max_response_tool_calls": self.config.max_response_tool_calls,
+            "max_response_write_calls": self.config.max_response_write_calls,
+            "max_response_write_chars": self.config.max_response_write_chars,
         }
 
     @staticmethod
@@ -733,6 +811,7 @@ class AgentRunner:
         usage: dict[str, int],
     ) -> ModelResponse:
         retry_index = 0
+        attempt_messages = prepared
         tool_definitions = self.registry.definitions()
         tool_schema_chars = len(
             json.dumps(tool_definitions, ensure_ascii=False, default=str)
@@ -755,14 +834,14 @@ class AgentRunner:
                     "step": step,
                     "attempt": retry_index + 1,
                     "history_messages": len(messages),
-                    "sent_messages": len(prepared),
-                    "estimated_chars": self.context.estimate_chars(prepared),
-                    "estimated_tokens": self.context.estimate_tokens(prepared),
+                    "sent_messages": len(attempt_messages),
+                    "estimated_chars": self.context.estimate_chars(attempt_messages),
+                    "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                     "tool_schema_chars": tool_schema_chars,
                 },
             )
             try:
-                response = self.model.complete(prepared, tool_definitions)
+                response = self.model.complete(attempt_messages, tool_definitions)
             except ModelError as exc:
                 self._check_cancelled()
                 if session is not None:
@@ -774,9 +853,9 @@ class AgentRunner:
                             "step": step,
                             "attempt": retry_index + 1,
                             "history_messages": len(messages),
-                            "sent_messages": len(prepared),
-                            "estimated_chars": self.context.estimate_chars(prepared),
-                            "estimated_tokens": self.context.estimate_tokens(prepared),
+                            "sent_messages": len(attempt_messages),
+                            "estimated_chars": self.context.estimate_chars(attempt_messages),
+                            "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                             "tool_schema_chars": tool_schema_chars,
                             "compacted": self._continuing_turn or len(prepared) < len(messages),
                             "duration_seconds": time.monotonic() - request_started,
@@ -787,6 +866,12 @@ class AgentRunner:
                     self._persist(session, messages, usage)
                 max_retries = self.config.max_model_retries
                 if exc.category == ModelErrorCategory.RESPONSE_PARSE:
+                    max_retries = min(max_retries, 1)
+                adaptive_recovery = exc.category == ModelErrorCategory.TIMEOUT or (
+                    exc.category == ModelErrorCategory.SERVER
+                    and exc.status_code in {504, 524}
+                )
+                if adaptive_recovery:
                     max_retries = min(max_retries, 1)
                 if not exc.retryable or retry_index >= max_retries:
                     raise
@@ -801,6 +886,17 @@ class AgentRunner:
                     session.retry_count += 1
                     self._persist(session, messages, usage)
                 retry_index += 1
+                if adaptive_recovery:
+                    attempt_messages = self._timeout_recovery_messages(prepared)
+                    self._emit(
+                        "model_recovery_mode",
+                        {
+                            "step": step,
+                            "attempt": retry_index + 1,
+                            "reason": exc.category.value,
+                            "max_write_calls": 2,
+                        },
+                    )
                 self._emit(
                     "retry_scheduled",
                     {
@@ -828,9 +924,9 @@ class AgentRunner:
                         "step": step,
                         "attempt": retry_index + 1,
                         "history_messages": len(messages),
-                        "sent_messages": len(prepared),
-                        "estimated_chars": self.context.estimate_chars(prepared),
-                        "estimated_tokens": self.context.estimate_tokens(prepared),
+                        "sent_messages": len(attempt_messages),
+                        "estimated_chars": self.context.estimate_chars(attempt_messages),
+                        "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                         "tool_schema_chars": tool_schema_chars,
                         "compacted": self._continuing_turn or len(prepared) < len(messages),
                         "duration_seconds": self._last_model_duration,
@@ -839,6 +935,27 @@ class AgentRunner:
                 )
                 self._persist(session, messages, usage)
             return response
+
+    @staticmethod
+    def _timeout_recovery_messages(
+        prepared: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        recovered = copy.deepcopy(prepared)
+        recovered.append(
+            {
+                "role": "developer",
+                "content": (
+                    "The previous model response did not finish before the transport "
+                    "timeout. Do not repeat or emit the whole plan. Return only the next "
+                    "smallest durable action batch: at most two file write/edit calls, "
+                    "at most four tool calls total, and no more than 12,000 combined "
+                    "characters of new file content. If a prerequisite or user choice "
+                    "blocks implementation, give one short plain-language explanation "
+                    "instead of generating code."
+                ),
+            }
+        )
+        return recovered
 
     def _retry_delay(self, error: ModelError, retry_index: int) -> float:
         exponential = self.config.retry_base_seconds * (2**retry_index)
@@ -1122,6 +1239,21 @@ class AgentRunner:
             )
             return result
 
+        cached_verification = self._reuse_current_verification(call, session)
+        if cached_verification is not None:
+            if record is not None:
+                record.approval_granted = True
+            self._record_tool_result(
+                call,
+                record,
+                cached_verification,
+                messages,
+                usage,
+                session,
+                status=ToolExecutionStatus.COMPLETED,
+            )
+            return cached_verification
+
         if approval_decision is None:
             approved = reuse_approval or tool.risk == RiskLevel.READ
             approval_automatic = approved
@@ -1207,11 +1339,13 @@ class AgentRunner:
             try:
                 self._check_cancelled()
                 change = self.change_tracker.apply(prepared_change)
+                self.tool_context.invalidate_observations()
                 if session is not None:
                     session.changes.append(change)
                     self._set_phase(session, TaskPhase.IMPLEMENT)
                     invalidated = session.invalidate_verification(
-                        f"file changed: {change.path}"
+                        f"file changed: {change.path}",
+                        changed_path=change.path,
                     )
                     for verification in invalidated:
                         self._emit(
@@ -1257,7 +1391,29 @@ class AgentRunner:
                 result = ToolResult(False, str(exc))
         else:
             result = self.registry.execute(call.name, call.arguments, self.tool_context)
-        if result.ok and call.name == "read_file" and session is not None:
+        if (
+            result.ok
+            and session is not None
+            and result.data.get("cache_hit") is True
+        ):
+            session.observation_cache_hit_count += 1
+            self._emit(
+                "observation_cache_hit",
+                {
+                    "tool": call.name,
+                    "path": call.arguments.get("path") if call.arguments else None,
+                    "query": call.arguments.get("query") if call.arguments else None,
+                    "partial": bool(result.data.get("partial_cache_hit", False)),
+                    "replay": result.data.get("cache_replay"),
+                    "count": session.observation_cache_hit_count,
+                },
+            )
+        if (
+            result.ok
+            and call.name == "read_file"
+            and session is not None
+            and result.data.get("cache_hit") is not True
+        ):
             hint = self._repeated_read_hint(call, record, result, session)
             if hint is not None:
                 result.data["efficiency_hint"] = hint
@@ -1280,6 +1436,59 @@ class AgentRunner:
     def _check_cancelled(self) -> None:
         if self.cancellation_callback is not None and self.cancellation_callback():
             raise _RunCancelled
+
+    def _reuse_current_verification(
+        self,
+        call: ToolCall,
+        session: AgentSession | None,
+    ) -> ToolResult | None:
+        """Avoid re-running an identical check when no covered file changed."""
+        if (
+            session is None
+            or call.name != "run_command"
+            or call.arguments is None
+            or not self.verification_tracker.is_verification_command(call.arguments)
+        ):
+            return None
+        command = str(call.arguments.get("command", "")).strip()
+        cwd = str(call.arguments.get("cwd", "."))
+        expected = tuple(call.arguments.get("expected_exit_codes") or [0])
+        paths = tuple(call.arguments.get("verification_paths") or [])
+        domains = tuple(call.arguments.get("verification_domains") or [])
+        for record in reversed(session.verification_records):
+            if not record.is_current or not record.passed:
+                continue
+            if record.command != command or record.cwd != cwd:
+                continue
+            if record.expected_exit_codes != expected:
+                continue
+            if paths and record.scope_paths != paths:
+                continue
+            if domains and record.scope_domains != domains:
+                continue
+            self._emit(
+                "verification_reused",
+                {
+                    "verification_id": record.verification_id,
+                    "command": command,
+                    "reason": "covered files are unchanged",
+                },
+            )
+            return ToolResult(
+                True,
+                "Reused the current successful verification; covered files are unchanged.",
+                {
+                    "exit_code": record.exit_code,
+                    "duration_seconds": 0.0,
+                    "stdout": record.stdout_summary,
+                    "stderr": record.stderr_summary,
+                    "timed_out": False,
+                    "expected_exit_codes": list(record.expected_exit_codes),
+                    "expectation_met": True,
+                    "cached_verification": True,
+                },
+            )
+        return None
 
     def _wait_for_retry(self, delay: float) -> None:
         if self.cancellation_callback is None:
@@ -1371,6 +1580,8 @@ class AgentRunner:
                     "exit_code": verification.exit_code,
                     "duration_seconds": verification.duration_seconds,
                     "passed": verification.passed,
+                    "expected_exit_codes": list(verification.expected_exit_codes),
+                    "expectation_met": verification.expectation_met,
                     "change_revision": verification.change_revision,
                     "verification_status": session.verification_status.value,
                 },
@@ -1673,6 +1884,95 @@ class AgentRunner:
         }
 
     @staticmethod
+    def _acceptance_context(session: AgentSession) -> dict[str, Any]:
+        """Inject a compact, evidence-based convergence checklist for this step."""
+        latest_request = next(
+            (
+                str(item.get("content") or "")
+                for item in reversed(session.conversation)
+                if item.get("role") == "user"
+            ),
+            session.task,
+        )
+        requirements = AgentRunner._extract_acceptance_requirements(latest_request)
+        active_paths = list(
+            dict.fromkeys(
+                item.path for item in session.changes if item.undo_status == "active"
+            )
+        )
+        inspections = sum(
+            1
+            for item in session.tool_executions
+            if item.ok and item.name in {"read_file", "list_files", "search_text"}
+        )
+        current_checks = [
+            item for item in session.verification_records if item.is_current
+        ]
+        verification = session.refresh_verification_status()
+        if verification == VerificationStatus.PASSED:
+            gate = (
+                "GREEN: current acceptance checks pass. Do not call more tools unless "
+                "you can name a specific unmet user requirement; otherwise answer now."
+            )
+        elif active_paths:
+            gate = "OPEN: changes exist but still need a relevant current acceptance check."
+        else:
+            gate = "OPEN: inspect the relevant project area, then implement or explain the blocker."
+        lines = [
+            "Runtime acceptance checklist (progress control, not a new user request):",
+            *[f"- Requirement {index}: {item}" for index, item in enumerate(requirements, 1)],
+            "Evidence already recorded:",
+            f"- successful project inspections: {inspections}",
+            f"- reused read/search observations: {session.observation_cache_hit_count}",
+            f"- active changed files: {', '.join(active_paths[-12:]) or 'none'}",
+            (
+                "- current checks: "
+                + (
+                    "; ".join(
+                        f"{item.command} ({'passed' if item.passed else 'failed'})"
+                        for item in current_checks[-4:]
+                    )
+                    or "none"
+                )
+            ),
+            f"Acceptance gate: {gate}",
+            (
+                "Before requesting another tool, map it to one unmet requirement. Reuse "
+                "unchanged reads and current checks. Finish related edits before verification, "
+                "and after the gate is GREEN provide the final answer without exploratory reads "
+                "or repeated tests."
+            ),
+        ]
+        return {"role": "developer", "content": "\n".join(lines)[:3_000]}
+
+    @staticmethod
+    def _insert_progress_context(
+        messages: list[dict[str, Any]],
+        progress: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Keep the latest tool request/results at the tail for provider continuity."""
+        result = list(messages)
+        latest_tool_request = max(
+            (
+                index
+                for index, message in enumerate(result)
+                if message.get("role") == "assistant" and message.get("tool_calls")
+            ),
+            default=-1,
+        )
+        if latest_tool_request >= 0:
+            insertion = latest_tool_request
+        else:
+            insertion = len(result)
+            while insertion > 0 and result[insertion - 1].get("role") in {
+                "developer",
+                "system",
+            }:
+                insertion -= 1
+        result.insert(insertion, progress)
+        return result
+
+    @staticmethod
     def _call_signature(call: ToolCall) -> str:
         arguments = call.arguments if call.arguments is not None else call.raw_arguments
         return call.name + ":" + json.dumps(
@@ -1681,6 +1981,23 @@ class AgentRunner:
             ensure_ascii=False,
             default=str,
         )
+
+
+    @staticmethod
+    def _extract_acceptance_requirements(task: str, limit: int = 8) -> list[str]:
+        compact = task.strip()
+        if not compact:
+            return ["Complete the current user request"]
+        candidates = re.split(r"(?:\r?\n+|[；;。]+|(?<!\d)[1-9][.、)])", compact)
+        requirements: list[str] = []
+        for candidate in candidates:
+            item = " ".join(candidate.strip(" -\t:：").split())
+            if len(item) < 3 or item in requirements:
+                continue
+            requirements.append(item[:300])
+            if len(requirements) >= limit:
+                break
+        return requirements or [" ".join(compact.split())[:300]]
 
     def _emit(self, name: str, payload: dict[str, Any]) -> None:
         if self.event_callback is None:
@@ -1926,6 +2243,7 @@ class AgentRunner:
             f"- failed tool calls: {session.failed_tool_call_count}",
             f"- invalid tool calls: {session.invalid_tool_call_count}",
             f"- repeated-read hints: {session.repeated_read_hint_count}",
+            f"- observation cache hits: {session.observation_cache_hit_count}",
             f"- total duration: {session.run_duration_seconds:.2f}s",
             f"- usage status: {usage_state}",
             f"- usage: {usage_text or 'unknown'}",

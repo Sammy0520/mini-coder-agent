@@ -24,6 +24,12 @@ class ConfigTests(unittest.TestCase):
                 "CODING_AGENT_MAX_RETRIES": "4",
                 "CODING_AGENT_RETRY_BASE_SECONDS": "0.25",
                 "CODING_AGENT_RETRY_MAX_SECONDS": "3.5",
+                "CODING_AGENT_STREAMING": "false",
+                "CODING_AGENT_PROMPT_CACHE": "true",
+                "CODING_AGENT_PROMPT_CACHE_KEY": "test-workflow-v1",
+                "CODING_AGENT_MAX_RESPONSE_TOOL_CALLS": "6",
+                "CODING_AGENT_MAX_RESPONSE_WRITE_CALLS": "2",
+                "CODING_AGENT_MAX_RESPONSE_WRITE_CHARS": "9000",
             },
             clear=True,
         ):
@@ -38,6 +44,12 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.max_model_retries, 4)
         self.assertEqual(config.retry_base_seconds, 0.25)
         self.assertEqual(config.retry_max_seconds, 3.5)
+        self.assertFalse(config.model_streaming)
+        self.assertTrue(config.prompt_cache_enabled)
+        self.assertEqual(config.prompt_cache_key, "test-workflow-v1")
+        self.assertEqual(config.max_response_tool_calls, 6)
+        self.assertEqual(config.max_response_write_calls, 2)
+        self.assertEqual(config.max_response_write_chars, 9000)
     def test_loads_provider_toml_and_keeps_key_in_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

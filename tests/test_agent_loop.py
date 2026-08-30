@@ -154,6 +154,43 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual((workspace / "one.txt").read_text(encoding="utf-8"), "one\n")
             self.assertEqual((workspace / "two.txt").read_text(encoding="utf-8"), "two\n")
 
+    def test_response_write_batch_limit_defers_extra_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            calls = [
+                ToolCall(
+                    id=f"call-{name}",
+                    name="write_file",
+                    arguments={"path": f"{name}.txt", "content": f"{name}\n"},
+                    raw_arguments=f'{{"path":"{name}.txt","content":"{name}\\n"}}',
+                )
+                for name in ("one", "two", "three")
+            ]
+            model = FakeModel(
+                [
+                    ModelResponse(tool_calls=calls),
+                    ModelResponse(content="Completed the first small batch."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace, max_response_write_calls=2),
+                session_store=store,
+            )
+
+            result = runner.run("Create three files in small batches")
+
+            self.assertEqual(result.status, "completed")
+            self.assertTrue((workspace / "one.txt").exists())
+            self.assertTrue((workspace / "two.txt").exists())
+            self.assertFalse((workspace / "three.txt").exists())
+            rendered = str(model.requests[-1][0])
+            self.assertIn("too many file changes at once", rendered)
+            session = store.load(result.session_id or "")
+            self.assertEqual(session.failed_tool_call_count, 1)
+
     def test_multiple_agent_writes_are_ordered_and_summarized_in_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -421,6 +458,58 @@ class AgentLoopTests(unittest.TestCase):
             self.assertIsNotNone(command_record.duration_seconds)
             self.assertIn("completed_verified", result.final_text)
 
+    def test_expected_nonzero_command_completes_as_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-write-negative",
+                                name="write_file",
+                                arguments={"path": "result.txt", "content": "data\n"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-expected-rejection",
+                                name="run_command",
+                                arguments={
+                                    "command": 'python -c "raise SystemExit(2)"',
+                                    "purpose": "verify",
+                                    "expected_exit_codes": [2],
+                                },
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="The invalid input was rejected as expected."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                approval_callback=lambda tool, arguments: True,
+                session_store=store,
+            )
+
+            result = runner.run("Create a file and verify the negative path")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_VERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.PASSED)
+            self.assertEqual(session.verification_records[-1].exit_code, 2)
+            self.assertEqual(session.verification_records[-1].expected_exit_codes, (2,))
+            self.assertTrue(session.verification_records[-1].expectation_met)
+            self.assertEqual(session.failed_tool_call_count, 0)
+
     def test_failed_verification_overrides_model_completion_claim(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -531,6 +620,64 @@ class AgentLoopTests(unittest.TestCase):
             self.assertIsNotNone(session.verification_records[0].invalidated_at)
             self.assertIn("verification is stale", result.final_text)
 
+    def test_readme_change_does_not_invalidate_unittest_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-source",
+                                name="write_file",
+                                arguments={"path": "result.py", "content": "value = 1\n"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-tests",
+                                name="run_command",
+                                arguments={
+                                    "command": 'python -c "print(\'ok\')"',
+                                    "purpose": "verify",
+                                },
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-readme",
+                                name="write_file",
+                                arguments={"path": "README.md", "content": "# Usage\n"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Code and documentation are complete."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                approval_callback=lambda tool, arguments: True,
+                session_store=store,
+            )
+
+            result = runner.run("Create tested code and document it")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_VERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.PASSED)
+            self.assertTrue(session.verification_records[0].is_current)
+
     def test_repeated_identical_calls_stop_the_loop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -616,12 +763,132 @@ class AgentLoopTests(unittest.TestCase):
             first_request = model.requests[0][0]
             overview = next(item for item in first_request if item.get("role") == "developer")
             self.assertIn("pyproject.toml", overview["content"])
-            self.assertEqual(session.repeated_read_hint_count, 1)
+            self.assertEqual(session.repeated_read_hint_count, 0)
+            self.assertEqual(session.observation_cache_hit_count, 1)
             self.assertEqual(session.invalid_tool_call_count, 1)
             self.assertEqual(session.failed_tool_call_count, 1)
-            self.assertIn("efficiency_hint", session.tool_executions[1].result_content or "")
+            self.assertIn('"partial_cache_hit": true', session.tool_executions[1].result_content or "")
             self.assertIn("invalid_arguments", session.tool_executions[2].result_content or "")
-            self.assertIn("repeated-read hints: 1", result.final_text)
+            self.assertIn("observation cache hits: 1", result.final_text)
+
+    def test_repeated_search_uses_observation_cache_and_emits_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "app.py").write_text("value = 1\n", encoding="utf-8")
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="search-1",
+                                name="search_text",
+                                arguments={"query": "value"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="search-2",
+                                name="search_text",
+                                arguments={"query": "VALUE"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Found it."),
+                ]
+            )
+            events: list[tuple[str, dict]] = []
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+                event_callback=lambda name, payload: events.append((name, payload)),
+            )
+
+            result = runner.run("Find value twice")
+            session = store.load(result.session_id or "")
+
+            self.assertEqual(session.observation_cache_hit_count, 1)
+            self.assertIn('"cache_replay": "summary"', session.tool_executions[-1].result_content or "")
+            self.assertTrue(any(name == "observation_cache_hit" for name, _ in events))
+
+    def test_acceptance_context_is_injected_and_identical_verification_is_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            verify_arguments = {
+                "command": 'python -c "print(\'ok\')"',
+                "purpose": "verify",
+                "verification_domains": ["python"],
+            }
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="write",
+                                name="write_file",
+                                arguments={"path": "app.py", "content": "value = 1\n"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="verify-1",
+                                name="run_command",
+                                arguments=verify_arguments,
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="verify-2",
+                                name="run_command",
+                                arguments=verify_arguments,
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Done."),
+                ]
+            )
+            events: list[tuple[str, dict]] = []
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+                approval_callback=lambda tool, arguments: True,
+                event_callback=lambda name, payload: events.append((name, payload)),
+            )
+
+            result = runner.run("Create app.py; verify it; finish once checks pass.")
+            session = store.load(result.session_id or "")
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                session.verification_status,
+                VerificationStatus.PASSED,
+                msg=[
+                    (item.name, item.status.value, item.error, item.result_content)
+                    for item in session.tool_executions
+                ],
+            )
+            self.assertEqual(len(session.verification_records), 2)
+            self.assertIn("cached_verification", session.tool_executions[-1].result_content or "")
+            self.assertTrue(any(name == "verification_reused" for name, _ in events))
+            rendered_requests = [str(messages) for messages, _ in model.requests]
+            self.assertTrue(any("Runtime acceptance checklist" in item for item in rendered_requests))
+            self.assertIn("Acceptance gate: GREEN", rendered_requests[-1])
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from typing import Any
 from ..exceptions import ToolError
 from ..redaction import redact_sensitive_text
 from .base import RiskLevel, Tool, ToolContext, ToolResult, truncate_text
-from .command_risk import assess_command
+from .command_risk import CommandRisk, assess_command
 
 
 class RunCommandTool(Tool):
@@ -21,7 +21,8 @@ class RunCommandTool(Tool):
     description = (
         "Run tests, builds, formatters, or other project commands in the host's default shell. "
         "The agent Python environment is first on PATH. Use dedicated file/search tools instead "
-        "of shell-based searching, patching, or file writes."
+        "of shell-based searching, patching, or source-file writes. For negative tests, declare "
+        "the accepted process codes with expected_exit_codes."
     )
     risk = RiskLevel.EXECUTE
     parameters = {
@@ -35,6 +36,33 @@ class RunCommandTool(Tool):
                 "enum": ["inspect", "verify", "other"],
                 "description": "Use 'verify' for tests, builds, linters, and other acceptance checks",
             },
+            "expected_exit_codes": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": 1,
+                "maxItems": 16,
+                "uniqueItems": True,
+                "description": (
+                    "Process exit codes that mean this command behaved as expected; default [0]. "
+                    "Use a non-zero value for a deliberate negative-path acceptance check."
+                ),
+            },
+            "verification_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional workspace files or directories covered by this check. "
+                    "Use this to keep unrelated successful checks current."
+                ),
+            },
+            "verification_domains": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["python", "web", "docs", "native", "config", "all"],
+                },
+                "description": "Optional technology areas covered by this check.",
+            },
         },
         "required": ["command"],
         "additionalProperties": False,
@@ -46,6 +74,7 @@ class RunCommandTool(Tool):
             raise ToolError("command must not be empty")
         if len(command) > 4000:
             raise ToolError("command is too long")
+        expected_exit_codes = _expected_exit_codes(arguments.get("expected_exit_codes"))
         cwd = context.policy.resolve(arguments.get("cwd", "."), must_exist=True)
         if not cwd.is_dir():
             raise ToolError("cwd must be a directory")
@@ -67,7 +96,7 @@ class RunCommandTool(Tool):
             process = subprocess.Popen(
                 command,
                 cwd=cwd,
-                env=_command_environment(),
+                env=_command_environment(context.runtime_directory),
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -94,6 +123,7 @@ class RunCommandTool(Tool):
                 if context.is_cancelled():
                     duration_seconds = time.monotonic() - started_at
                     terminated = _terminate_process_tree(process)
+                    _invalidate_after_command(context, assessment.level)
                     return _stopped_result(
                         process,
                         "",
@@ -128,6 +158,7 @@ class RunCommandTool(Tool):
                 redact_sensitive_text(_as_text(stderr, encoding)),
                 context.max_output_chars // 2,
             )
+            _invalidate_after_command(context, assessment.level)
             return ToolResult(
                 False,
                 f"Command timed out after {timeout} second(s)",
@@ -143,6 +174,8 @@ class RunCommandTool(Tool):
                     "process_tree_terminated": terminated,
                     "command_risk": assessment.level.value,
                     "expected_side_effects": assessment.expected_side_effects,
+                    "expected_exit_codes": expected_exit_codes,
+                    "expectation_met": False,
                 },
             )
         except KeyboardInterrupt:
@@ -161,9 +194,18 @@ class RunCommandTool(Tool):
         stderr_text, stderr_truncated = _truncate_stream(
             redact_sensitive_text(stderr), per_stream
         )
+        expectation_met = process.returncode in expected_exit_codes
+        _invalidate_after_command(context, assessment.level)
         return ToolResult(
-            process.returncode == 0,
-            f"Command exited with code {process.returncode}",
+            expectation_met,
+            (
+                f"Command met the expected exit code {process.returncode}"
+                if expectation_met
+                else (
+                    f"Command exited with code {process.returncode}; expected one of "
+                    f"{expected_exit_codes}"
+                )
+            ),
             {
                 "exit_code": process.returncode,
                 "stdout": stdout_text,
@@ -176,23 +218,30 @@ class RunCommandTool(Tool):
                 "process_tree_terminated": False,
                 "command_risk": assessment.level.value,
                 "expected_side_effects": assessment.expected_side_effects,
+                "expected_exit_codes": expected_exit_codes,
+                "expectation_met": expectation_met,
             },
         )
 
 
-def _command_environment() -> dict[str, str]:
+def _invalidate_after_command(context: ToolContext, risk: CommandRisk) -> None:
+    if risk != CommandRisk.READ_ONLY:
+        context.invalidate_observations()
+
+
+def _command_environment(agent_runtime_directory: Path | None = None) -> dict[str, str]:
     """Build a predictable child environment without exposing model credentials."""
     environment = os.environ.copy()
-    runtime_directory = str(Path(sys.executable).absolute().parent)
+    python_runtime_directory = str(Path(sys.executable).absolute().parent)
     existing_path = environment.get("PATH", "")
     path_entries = [entry for entry in existing_path.split(os.pathsep) if entry]
-    runtime_key = os.path.normcase(os.path.abspath(runtime_directory))
+    runtime_key = os.path.normcase(os.path.abspath(python_runtime_directory))
     path_entries = [
         entry
         for entry in path_entries
         if os.path.normcase(os.path.abspath(entry)) != runtime_key
     ]
-    environment["PATH"] = os.pathsep.join([runtime_directory, *path_entries])
+    environment["PATH"] = os.pathsep.join([python_runtime_directory, *path_entries])
 
     if os.path.normcase(os.path.abspath(sys.prefix)) != os.path.normcase(
         os.path.abspath(sys.base_prefix)
@@ -204,7 +253,29 @@ def _command_environment() -> dict[str, str]:
     # separate, deliberately scoped variable from the user.
     environment.pop("OPENAI_API_KEY", None)
     environment.pop("CODING_AGENT_API_KEY", None)
+    environment.pop("MINI_CODER_RUNTIME_DIR", None)
+    if agent_runtime_directory is not None:
+        agent_runtime_directory.mkdir(parents=True, exist_ok=True)
+        environment["MINI_CODER_RUNTIME_DIR"] = str(
+            agent_runtime_directory.resolve()
+        )
     return environment
+
+
+def _expected_exit_codes(value: Any) -> list[int]:
+    if value is None:
+        return [0]
+    if not isinstance(value, list) or not value or len(value) > 16:
+        raise ToolError("expected_exit_codes must contain between 1 and 16 integers")
+    result: list[int] = []
+    for item in value:
+        if not isinstance(item, int) or isinstance(item, bool):
+            raise ToolError("expected_exit_codes must contain only integers")
+        if item not in result:
+            result.append(item)
+    if len(result) != len(value):
+        raise ToolError("expected_exit_codes must not contain duplicates")
+    return result
 
 
 def _as_text(value: str | bytes | None, encoding: str) -> str:

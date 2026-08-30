@@ -25,6 +25,9 @@ class OpenAICompatibleClient(ModelClient):
         reasoning_effort: str | None = None,
         verbosity: str | None = None,
         timeout_seconds: float = 120.0,
+        streaming: bool = True,
+        prompt_cache_enabled: bool = True,
+        prompt_cache_key: str = "mini-coder-agent-v1",
     ) -> None:
         try:
             from openai import OpenAI
@@ -54,6 +57,9 @@ class OpenAICompatibleClient(ModelClient):
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._verbosity = verbosity
+        self._streaming = streaming
+        self._prompt_cache_enabled = prompt_cache_enabled
+        self._prompt_cache_key = prompt_cache_key
 
     def complete(
         self,
@@ -103,8 +109,39 @@ class OpenAICompatibleClient(ModelClient):
             kwargs["reasoning"] = {"effort": self._reasoning_effort}
         if self._verbosity:
             kwargs["text"] = {"verbosity": self._verbosity}
-        response = self._client.responses.create(**kwargs)
+        if getattr(self, "_prompt_cache_enabled", False):
+            kwargs["prompt_cache_key"] = self._prompt_cache_key
+        response = self._request_responses(kwargs)
         return self._parse_response(response)
+
+    def _request_responses(self, kwargs: dict[str, Any]) -> Any:
+        """Use streaming when available, with narrow compatibility fallbacks.
+
+        Compatible providers sometimes implement Responses without the optional
+        streaming or prompt-cache fields. Only explicit feature-rejection errors
+        trigger a fallback; timeouts and server failures remain visible to the
+        AgentRunner so it can apply its normal recovery policy.
+        """
+        request = dict(kwargs)
+        while True:
+            try:
+                if getattr(self, "_streaming", False):
+                    with self._client.responses.stream(**request) as stream:
+                        return stream.get_final_response()
+                return self._client.responses.create(**request)
+            except Exception as exc:
+                if "prompt_cache_key" in request and _feature_rejected(
+                    exc, ("prompt_cache", "cache key", "cache_key")
+                ):
+                    self._prompt_cache_enabled = False
+                    request.pop("prompt_cache_key", None)
+                    continue
+                if getattr(self, "_streaming", False) and _feature_rejected(
+                    exc, ("stream", "event-stream", "sse")
+                ):
+                    self._streaming = False
+                    continue
+                raise
 
     @staticmethod
     def _chat_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -228,6 +265,16 @@ class OpenAICompatibleClient(ModelClient):
             getattr(response, "usage", None),
             ("input_tokens", "output_tokens", "total_tokens"),
         )
+        _merge_usage_details(
+            usage,
+            getattr(getattr(response, "usage", None), "input_tokens_details", None),
+            ("cached_tokens", "cache_write_tokens"),
+        )
+        _merge_usage_details(
+            usage,
+            getattr(getattr(response, "usage", None), "output_tokens_details", None),
+            ("reasoning_tokens",),
+        )
         return ModelResponse(
             content=content,
             tool_calls=calls,
@@ -267,6 +314,30 @@ def _extract_usage(usage_obj: Any, names: Sequence[str]) -> dict[str, int]:
         if isinstance(value, int):
             usage[name] = value
     return usage
+
+
+def _merge_usage_details(
+    usage: dict[str, int],
+    details: Any,
+    names: Sequence[str],
+) -> None:
+    for name in names:
+        value = getattr(details, name, None)
+        if isinstance(value, int):
+            usage[name] = value
+
+
+def _feature_rejected(exc: BaseException, markers: Sequence[str]) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status not in {400, 404, 405, 415, 422}:
+        return False
+    text = str(exc).casefold()
+    return any(marker.casefold() in text for marker in markers) and any(
+        word in text
+        for word in ("unsupported", "not support", "unknown", "invalid", "unexpected")
+    )
 
 
 def _content_as_text(content: Any) -> str:

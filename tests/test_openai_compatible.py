@@ -107,6 +107,65 @@ class OpenAICompatibleParsingTests(unittest.TestCase):
         self.assertEqual(captured["text"], {"verbosity": "high"})
         self.assertEqual(captured["tools"][0]["name"], "read_file")
 
+    def test_responses_streams_with_cache_key_and_reports_cache_usage(self) -> None:
+        captured = {}
+        response = SimpleNamespace(
+            output=[],
+            output_text="done",
+            status="completed",
+            usage=SimpleNamespace(
+                input_tokens=5000,
+                output_tokens=100,
+                total_tokens=5100,
+                input_tokens_details=SimpleNamespace(
+                    cached_tokens=4096,
+                    cache_write_tokens=904,
+                ),
+                output_tokens_details=SimpleNamespace(reasoning_tokens=40),
+            ),
+        )
+
+        class Stream:
+            def get_final_response(self):
+                return response
+
+        class Manager:
+            def __enter__(self):
+                return Stream()
+
+            def __exit__(self, *_args):
+                return False
+
+        class Responses:
+            @staticmethod
+            def stream(**kwargs):
+                captured.update(kwargs)
+                return Manager()
+
+            @staticmethod
+            def create(**_kwargs):
+                raise AssertionError("non-streaming fallback should not be used")
+
+        client = object.__new__(OpenAICompatibleClient)
+        client._client = SimpleNamespace(responses=Responses())
+        client._model = "gpt-5.6-sol"
+        client._wire_api = WireAPI.RESPONSES
+        client._reasoning_effort = "xhigh"
+        client._verbosity = "high"
+        client._streaming = True
+        client._prompt_cache_enabled = True
+        client._prompt_cache_key = "mini-coder-agent-v1"
+
+        result = client._complete_responses(
+            [{"role": "user", "content": "task"}],
+            [],
+        )
+
+        self.assertEqual(captured["prompt_cache_key"], "mini-coder-agent-v1")
+        self.assertEqual(result.usage["cached_tokens"], 4096)
+        self.assertEqual(result.usage["cache_write_tokens"], 904)
+        self.assertEqual(result.usage["reasoning_tokens"], 40)
+
     def test_parses_function_tool_call_without_importing_sdk(self) -> None:
         completion = SimpleNamespace(
             choices=[

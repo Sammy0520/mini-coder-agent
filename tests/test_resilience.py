@@ -23,9 +23,11 @@ class FaultModel(ModelClient):
     def __init__(self, items: list[ModelResponse | BaseException]) -> None:
         self.items = list(items)
         self.calls = 0
+        self.requests = []
 
     def complete(self, messages, tools) -> ModelResponse:
         self.calls += 1
+        self.requests.append(messages)
         item = self.items.pop(0)
         if isinstance(item, BaseException):
             raise item
@@ -86,6 +88,9 @@ class ModelFailureTests(unittest.TestCase):
         network = classify_model_exception(ConnectionError("connection reset"))
         self.assertEqual(network.category, ModelErrorCategory.NETWORK)
         self.assertTrue(network.retryable)
+        stream_read = classify_model_exception(RuntimeError("stream_read_error"))
+        self.assertEqual(stream_read.category, ModelErrorCategory.NETWORK)
+        self.assertTrue(stream_read.retryable)
 
         unusual_secret = "provider-secret-without-a-known-prefix"
         classified = classify_model_exception(
@@ -183,9 +188,14 @@ class ModelFailureTests(unittest.TestCase):
 
                 session = store.load(result.session_id or "")
                 self.assertEqual(result.status, "model_error")
-                self.assertEqual(model.calls, 3)
-                self.assertEqual(session.retry_count, 2)
-                self.assertEqual(session.model_call_count, 3)
+                expected_calls = 2 if category == ModelErrorCategory.TIMEOUT else 3
+                self.assertEqual(model.calls, expected_calls)
+                self.assertEqual(session.retry_count, expected_calls - 1)
+                self.assertEqual(session.model_call_count, expected_calls)
+                if category == ModelErrorCategory.TIMEOUT:
+                    rendered = str(model.requests[-1])
+                    self.assertIn("smallest durable action batch", rendered)
+                    self.assertIn("at most two file write/edit calls", rendered)
 
     def test_400_401_and_403_stop_without_retry(self) -> None:
         failures = (

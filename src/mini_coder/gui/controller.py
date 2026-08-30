@@ -557,6 +557,9 @@ class RunController:
             reasoning_effort=config.model_reasoning_effort,
             verbosity=config.model_verbosity,
             timeout_seconds=config.model_timeout_seconds,
+            streaming=config.model_streaming,
+            prompt_cache_enabled=config.prompt_cache_enabled,
+            prompt_cache_key=config.prompt_cache_key,
         )
         runner = AgentRunner(
             model=model,

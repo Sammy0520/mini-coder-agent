@@ -87,6 +87,93 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(listed.ok)
         self.assertIn("src/example.py", listed.data["entries"])
 
+    def test_identical_read_reuses_unchanged_range_without_replaying_content(self) -> None:
+        path = self.workspace / "sample.py"
+        path.write_text("value = 1\n", encoding="utf-8")
+
+        first = self.execute("read_file", {"path": "sample.py"})
+        second = self.execute("read_file", {"path": "sample.py"})
+
+        self.assertFalse(first.data["cache_hit"])
+        self.assertTrue(second.data["cache_hit"])
+        self.assertTrue(second.data["content_unchanged"])
+        self.assertEqual(second.data["content"], "")
+        self.assertEqual(first.data["content_hash"], second.data["content_hash"])
+
+        path.write_text("value = 2\n", encoding="utf-8")
+        changed = self.execute("read_file", {"path": "sample.py"})
+        self.assertFalse(changed.data["cache_hit"])
+        self.assertIn("value = 2", changed.data["content"])
+
+    def test_overlapping_read_returns_only_previously_unseen_lines(self) -> None:
+        path = self.workspace / "lines.txt"
+        path.write_text(
+            "\n".join(f"line {index}" for index in range(1, 11)) + "\n",
+            encoding="utf-8",
+        )
+
+        first = self.execute(
+            "read_file", {"path": "lines.txt", "start_line": 1, "max_lines": 5}
+        )
+        overlap = self.execute(
+            "read_file", {"path": "lines.txt", "start_line": 3, "max_lines": 5}
+        )
+        covered = self.execute(
+            "read_file", {"path": "lines.txt", "start_line": 2, "max_lines": 4}
+        )
+
+        self.assertFalse(first.data["cache_hit"])
+        self.assertTrue(overlap.data["cache_hit"])
+        self.assertTrue(overlap.data["partial_cache_hit"])
+        self.assertEqual(overlap.data["covered_ranges"], [(3, 5)])
+        self.assertEqual(overlap.data["returned_ranges"], [(6, 7)])
+        self.assertNotIn("line 3", overlap.data["content"])
+        self.assertIn("line 6", overlap.data["content"])
+        self.assertTrue(covered.data["cache_hit"])
+        self.assertEqual(covered.data["content"], "")
+
+    def test_search_cache_reuses_equivalent_query_and_covered_page(self) -> None:
+        (self.workspace / "items.txt").write_text(
+            "\n".join(f"Needle {index}" for index in range(6)) + "\n",
+            encoding="utf-8",
+        )
+
+        first = self.execute(
+            "search_text", {"query": "needle", "max_results": 5}
+        )
+        exact = self.execute(
+            "search_text", {"query": "NEEDLE", "max_results": 5}
+        )
+        subset = self.execute(
+            "search_text",
+            {"query": "needle", "offset": 2, "max_results": 2},
+        )
+
+        self.assertFalse(first.data["cache_hit"])
+        self.assertTrue(exact.data["cache_hit"])
+        self.assertEqual(exact.data["cache_replay"], "summary")
+        self.assertEqual(exact.data["reused_match_count"], 5)
+        self.assertEqual(exact.data["matches"], [])
+        self.assertTrue(subset.data["cache_hit"])
+        self.assertEqual(subset.data["cache_replay"], "covered_subset")
+        self.assertEqual([item["line"] for item in subset.data["matches"]], [3, 4])
+
+    def test_search_cache_is_invalidated_after_workspace_write(self) -> None:
+        (self.workspace / "value.txt").write_text("old value\n", encoding="utf-8")
+        first = self.execute("search_text", {"query": "value"})
+        cached = self.execute("search_text", {"query": "value"})
+
+        self.execute(
+            "write_file",
+            {"path": "new.txt", "content": "new value\n"},
+        )
+        refreshed = self.execute("search_text", {"query": "value"})
+
+        self.assertFalse(first.data["cache_hit"])
+        self.assertTrue(cached.data["cache_hit"])
+        self.assertFalse(refreshed.data["cache_hit"])
+        self.assertEqual(len(refreshed.data["matches"]), 2)
+
     def test_list_search_and_read_support_continuation_metadata(self) -> None:
         for index in range(5):
             (self.workspace / f"file{index}.txt").write_text(
@@ -166,8 +253,36 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result.data["command_risk"], "unknown")
         self.assertIn("12345", result.data["stdout"])
 
+    def test_command_can_treat_an_expected_nonzero_exit_as_success(self) -> None:
+        command = f'"{sys.executable}" -c "import sys; sys.exit(2)"'
+
+        result = self.execute(
+            "run_command",
+            {"command": command, "expected_exit_codes": [2], "purpose": "verify"},
+        )
+
+        self.assertTrue(result.ok, result.data)
+        self.assertEqual(result.data["exit_code"], 2)
+        self.assertEqual(result.data["expected_exit_codes"], [2])
+        self.assertTrue(result.data["expectation_met"])
+
+    def test_command_rejects_invalid_expected_exit_codes(self) -> None:
+        command = f'"{sys.executable}" -c "print(1)"'
+
+        result = self.execute(
+            "run_command",
+            {"command": command, "expected_exit_codes": [0, 0]},
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("must not contain duplicates", result.message)
+
     def test_command_risk_classifier_is_conservative(self) -> None:
         self.assertEqual(assess_command("git status").level, CommandRisk.READ_ONLY)
+        self.assertEqual(
+            assess_command("python -m pip show PySide6").level,
+            CommandRisk.READ_ONLY,
+        )
         self.assertEqual(
             assess_command("python -m unittest").level,
             CommandRisk.WORKSPACE_WRITE,
@@ -276,6 +391,23 @@ class ToolTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.data)
         self.assertEqual(result.data["stdout"].splitlines(), ["missing", "missing"])
+
+    def test_command_receives_agent_runtime_directory(self) -> None:
+        runtime_directory = self.workspace / ".mini-coder" / "runtime" / "test-run"
+        self.context.runtime_directory = runtime_directory
+        command = (
+            'python -c "import os; '
+            "print(os.environ.get('MINI_CODER_RUNTIME_DIR', 'missing'))\""
+        )
+
+        result = self.execute("run_command", {"command": command})
+
+        self.assertTrue(result.ok, result.data)
+        self.assertEqual(
+            os.path.normcase(os.path.abspath(result.data["stdout"].strip())),
+            os.path.normcase(os.path.abspath(runtime_directory)),
+        )
+        self.assertTrue(runtime_directory.is_dir())
 
     def test_registry_rejects_unknown_and_extra_arguments(self) -> None:
         unknown = self.execute("does_not_exist", {})

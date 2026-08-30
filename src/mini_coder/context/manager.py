@@ -42,6 +42,7 @@ class ContextManager:
         if follow_up:
             copied = self._prepare_follow_up(copied, memory or {})
         else:
+            copied = self._compact_completed_tool_batches(copied)
             copied = self._compact_replayed_provider_state(copied)
             copied = self._compact_old_tool_outputs(copied)
         if self._within_budget(copied):
@@ -71,6 +72,80 @@ class ContextManager:
 
         if not self._within_budget(result):
             result = self._shrink_contents(result)
+        return result
+
+    @staticmethod
+    def _compact_completed_tool_batches(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Replace older completed tool batches with small protocol-free summaries.
+
+        Write arguments and read/search results can both contain complete source text.
+        Replaying them on every later request is expensive after the model has already
+        consumed the immediate result. The latest tool batch stays exact so the function
+        calling protocol remains useful for the next response.
+        """
+        tool_indexes = [
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        ]
+        if len(tool_indexes) < 2:
+            return messages
+        latest_tool_index = tool_indexes[-1]
+        result: list[dict[str, Any]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+            if index >= latest_tool_index or not isinstance(calls, list) or not calls:
+                result.append(message)
+                index += 1
+                continue
+
+            call_ids = {
+                str(call.get("id"))
+                for call in calls
+                if isinstance(call, dict) and call.get("id")
+            }
+            end = index + 1
+            tool_results: list[dict[str, Any]] = []
+            while end < len(messages):
+                candidate = messages[end]
+                if candidate.get("role") != "tool":
+                    break
+                if str(candidate.get("tool_call_id")) not in call_ids:
+                    break
+                tool_results.append(candidate)
+                end += 1
+            returned_ids = {
+                str(item.get("tool_call_id")) for item in tool_results
+            }
+            names = [_tool_call_name(call) for call in calls]
+            compactable = {
+                "read_file",
+                "list_files",
+                "search_text",
+                "write_file",
+                "edit_file",
+            }
+            if (
+                not any(name in compactable for name in names)
+                or any(name not in compactable for name in names)
+                or not call_ids
+                or returned_ids != call_ids
+            ):
+                result.append(message)
+                index += 1
+                continue
+
+            result.append(
+                {
+                    "role": "developer",
+                    "content": _completed_batch_summary(calls, tool_results),
+                }
+            )
+            index = end
         return result
 
     @staticmethod
@@ -248,3 +323,93 @@ class ContextManager:
             removable = min(len(content) - 200, max(char_overflow, token_overflow * 3, 100))
             message["content"] = content[: len(content) - removable] + "\n...[context truncated]"
         return result
+
+
+def _tool_call_name(call: Any) -> str:
+    if not isinstance(call, dict):
+        return "unknown"
+    function = call.get("function")
+    if not isinstance(function, dict):
+        return "unknown"
+    return str(function.get("name") or "unknown")
+
+
+def _tool_call_arguments(call: Any) -> dict[str, Any]:
+    if not isinstance(call, dict):
+        return {}
+    function = call.get("function")
+    if not isinstance(function, dict):
+        return {}
+    arguments = function.get("arguments")
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _completed_batch_summary(
+    calls: list[Any],
+    tool_results: list[dict[str, Any]],
+) -> str:
+    results_by_id = {
+        str(item.get("tool_call_id")): item for item in tool_results
+    }
+    lines = [
+        "Local context compression: an earlier completed tool batch is summarized below. "
+        "The operations already ran; do not repeat them unless later evidence requires it."
+    ]
+    for call in calls:
+        call_id = str(call.get("id")) if isinstance(call, dict) else ""
+        name = _tool_call_name(call)
+        arguments = _tool_call_arguments(call)
+        target = arguments.get("path") or arguments.get("directory")
+        raw_content = str(results_by_id.get(call_id, {}).get("content") or "")
+        outcome = "completed"
+        try:
+            parsed_result = json.loads(raw_content)
+        except json.JSONDecodeError:
+            parsed_result = None
+        if isinstance(parsed_result, dict):
+            outcome = "completed" if parsed_result.get("ok") is True else "failed"
+            target = target or parsed_result.get("path")
+            details = []
+            for key, label in (("additions", "+"), ("deletions", "-")):
+                value = parsed_result.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    details.append(f"{label}{value}")
+            detail_text = f" ({'/'.join(details)})" if details else ""
+            if name == "read_file":
+                start = parsed_result.get("start_line", arguments.get("start_line", 1))
+                end = parsed_result.get("end_line")
+                total = parsed_result.get("total_lines")
+                digest = str(parsed_result.get("content_hash") or "")[:12]
+                read_details = []
+                if isinstance(start, int) and isinstance(end, int):
+                    read_details.append(f"lines {start}-{end}")
+                if isinstance(total, int):
+                    read_details.append(f"{total} total")
+                if digest:
+                    read_details.append(f"hash {digest}")
+                if read_details:
+                    detail_text = " (" + ", ".join(read_details) + ")"
+            elif name == "list_files":
+                entries = parsed_result.get("entries")
+                if isinstance(entries, list):
+                    detail_text = f" ({len(entries)} entries)"
+            elif name == "search_text":
+                matches = parsed_result.get("matches")
+                if isinstance(matches, list):
+                    reused = parsed_result.get("reused_match_count")
+                    match_count = reused if isinstance(reused, int) else len(matches)
+                    cache_note = ", cached" if parsed_result.get("cache_hit") is True else ""
+                    detail_text = f" ({match_count} matches{cache_note})"
+        else:
+            detail_text = ""
+        rendered_target = f" {target}" if isinstance(target, str) and target else ""
+        lines.append(f"- {name}{rendered_target}: {outcome}{detail_text}")
+    return "\n".join(lines)

@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .safety import WorkspacePolicy
@@ -22,9 +23,18 @@ class ToolContext:
     command_timeout_seconds: int = 60
     max_output_chars: int = 12_000
     cancellation_requested: Callable[[], bool] | None = None
+    runtime_directory: Path | None = None
+    read_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    search_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    observation_revision: int = 0
 
     def is_cancelled(self) -> bool:
         return bool(self.cancellation_requested and self.cancellation_requested())
+
+    def invalidate_observations(self) -> None:
+        """Discard directory-wide observations after a possible workspace mutation."""
+        self.observation_revision += 1
+        self.search_cache.clear()
 
 
 @dataclass(slots=True)

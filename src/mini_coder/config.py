@@ -47,6 +47,18 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     workspace: Path
@@ -74,6 +86,12 @@ class AgentConfig:
     retry_base_seconds: float = 0.5
     retry_max_seconds: float = 8.0
     model_timeout_seconds: float = 120.0
+    model_streaming: bool = True
+    prompt_cache_enabled: bool = True
+    prompt_cache_key: str = "mini-coder-agent-v1"
+    max_response_tool_calls: int = 8
+    max_response_write_calls: int = 3
+    max_response_write_chars: int = 18_000
 
     def __post_init__(self) -> None:
         positive_fields = {
@@ -87,6 +105,9 @@ class AgentConfig:
             "max_total_tokens": self.max_total_tokens,
             "max_context_chars": self.max_context_chars,
             "max_context_tokens": self.max_context_tokens,
+            "max_response_tool_calls": self.max_response_tool_calls,
+            "max_response_write_calls": self.max_response_write_calls,
+            "max_response_write_chars": self.max_response_write_chars,
         }
         for name, value in positive_fields.items():
             if value < 1:
@@ -103,6 +124,8 @@ class AgentConfig:
             raise ConfigurationError("retry_max_seconds must be >= retry_base_seconds")
         if self.model_timeout_seconds <= 0:
             raise ConfigurationError("model_timeout_seconds must be positive")
+        if not self.prompt_cache_key.strip():
+            raise ConfigurationError("prompt_cache_key must not be empty")
         if self.model_reasoning_effort not in {None, "none", "low", "medium", "high", "xhigh", "max"}:
             raise ConfigurationError(
                 "model_reasoning_effort must be one of: none, low, medium, high, xhigh, max"
@@ -231,6 +254,32 @@ class AgentConfig:
                 "CODING_AGENT_MODEL_TIMEOUT_SECONDS",
                 120.0,
                 minimum=0.001,
+            ),
+            model_streaming=_env_bool(
+                "CODING_AGENT_STREAMING",
+                _optional_bool(file_data.get("model_streaming"), "model_streaming", default=True),
+            ),
+            prompt_cache_enabled=_env_bool(
+                "CODING_AGENT_PROMPT_CACHE",
+                _optional_bool(
+                    file_data.get("prompt_cache_enabled"),
+                    "prompt_cache_enabled",
+                    default=True,
+                ),
+            ),
+            prompt_cache_key=(
+                os.getenv("CODING_AGENT_PROMPT_CACHE_KEY")
+                or _optional_string(file_data.get("prompt_cache_key"), "prompt_cache_key")
+                or "mini-coder-agent-v1"
+            ),
+            max_response_tool_calls=_env_int(
+                "CODING_AGENT_MAX_RESPONSE_TOOL_CALLS", 8
+            ),
+            max_response_write_calls=_env_int(
+                "CODING_AGENT_MAX_RESPONSE_WRITE_CALLS", 3
+            ),
+            max_response_write_chars=_env_int(
+                "CODING_AGENT_MAX_RESPONSE_WRITE_CHARS", 18_000
             ),
         )
 

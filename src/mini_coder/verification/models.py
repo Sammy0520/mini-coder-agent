@@ -39,6 +39,10 @@ class VerificationRecord:
     change_revision: int
     passed: bool
     timed_out: bool = False
+    expected_exit_codes: tuple[int, ...] = (0,)
+    expectation_met: bool = False
+    scope_paths: tuple[str, ...] = ()
+    scope_domains: tuple[str, ...] = ("all",)
     created_at: str = field(default_factory=utc_now)
     invalidated_at: str | None = None
     invalidation_reason: str | None = None
@@ -57,6 +61,10 @@ class VerificationRecord:
         change_revision: int,
         passed: bool,
         timed_out: bool,
+        expected_exit_codes: tuple[int, ...] = (0,),
+        expectation_met: bool | None = None,
+        scope_paths: tuple[str, ...] = (),
+        scope_domains: tuple[str, ...] = ("all",),
     ) -> "VerificationRecord":
         return cls(
             verification_id=uuid.uuid4().hex,
@@ -70,6 +78,10 @@ class VerificationRecord:
             change_revision=change_revision,
             passed=passed,
             timed_out=timed_out,
+            expected_exit_codes=expected_exit_codes,
+            expectation_met=passed if expectation_met is None else expectation_met,
+            scope_paths=scope_paths,
+            scope_domains=scope_domains,
         )
 
     @property
@@ -94,6 +106,10 @@ class VerificationRecord:
             "change_revision": self.change_revision,
             "passed": self.passed,
             "timed_out": self.timed_out,
+            "expected_exit_codes": list(self.expected_exit_codes),
+            "expectation_met": self.expectation_met,
+            "scope_paths": list(self.scope_paths),
+            "scope_domains": list(self.scope_domains),
             "created_at": self.created_at,
             "invalidated_at": self.invalidated_at,
             "invalidation_reason": self.invalidation_reason,
@@ -130,6 +146,26 @@ class VerificationRecord:
         timed_out = data.get("timed_out")
         if not isinstance(passed, bool) or not isinstance(timed_out, bool):
             raise ValueError("verification passed and timed_out must be booleans")
+        raw_expected = data.get("expected_exit_codes", [0])
+        if (
+            not isinstance(raw_expected, list)
+            or not raw_expected
+            or any(not isinstance(item, int) or isinstance(item, bool) for item in raw_expected)
+        ):
+            raise ValueError("verification expected_exit_codes must be a non-empty integer list")
+        expectation_met = data.get("expectation_met", passed)
+        if not isinstance(expectation_met, bool):
+            raise ValueError("verification expectation_met must be a boolean")
+        scope_paths = data.get("scope_paths", [])
+        scope_domains = data.get("scope_domains", ["all"])
+        if not isinstance(scope_paths, list) or not all(
+            isinstance(item, str) and item for item in scope_paths
+        ):
+            raise ValueError("verification scope_paths must be a string list")
+        if not isinstance(scope_domains, list) or not scope_domains or not all(
+            isinstance(item, str) and item for item in scope_domains
+        ):
+            raise ValueError("verification scope_domains must be a non-empty string list")
         invalidated_at = data.get("invalidated_at")
         invalidation_reason = data.get("invalidation_reason")
         if invalidated_at is not None and not isinstance(invalidated_at, str):
@@ -148,6 +184,10 @@ class VerificationRecord:
             change_revision=revision,
             passed=passed,
             timed_out=timed_out,
+            expected_exit_codes=tuple(raw_expected),
+            expectation_met=expectation_met,
+            scope_paths=tuple(scope_paths),
+            scope_domains=tuple(scope_domains),
             created_at=data["created_at"],
             invalidated_at=invalidated_at,
             invalidation_reason=invalidation_reason,

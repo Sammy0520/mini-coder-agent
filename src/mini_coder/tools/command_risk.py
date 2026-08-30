@@ -52,6 +52,7 @@ _WORKSPACE_WRITE = re.compile(
 )
 _READ_ONLY = re.compile(
     r"(?i)^\s*(?:python(?:\.exe)?\s+--version|python(?:\.exe)?\s+-V|"
+    r"(?:python(?:\.exe)?\s+-m\s+)?pip\s+(?:show|list|freeze|check)|"
     r"node\s+--version|npm\s+--version|git\s+(?:status|diff|log|show|branch)|"
     r"pwd|cd|dir|ls|where|which|whoami)(?:\s|$)"
 )
