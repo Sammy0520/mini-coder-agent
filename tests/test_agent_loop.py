@@ -294,7 +294,12 @@ class AgentLoopTests(unittest.TestCase):
 
             self.assertEqual(result.status, "completed")
             self.assertEqual(path.read_text(encoding="utf-8"), "user change\n")
-            self.assertIn("changed after approval", model.requests[1][0][-1]["content"])
+            self.assertTrue(
+                any(
+                    "changed after approval" in str(message.get("content") or "")
+                    for message in model.requests[1][0]
+                )
+            )
             session = store.load(result.session_id or "")
             self.assertEqual(session.changes, [])
             self.assertFalse(session.tool_executions[0].ok)
@@ -889,6 +894,45 @@ class AgentLoopTests(unittest.TestCase):
             rendered_requests = [str(messages) for messages, _ in model.requests]
             self.assertTrue(any("Runtime acceptance checklist" in item for item in rendered_requests))
             self.assertIn("Acceptance gate: GREEN", rendered_requests[-1])
+
+    def test_volatile_progress_is_appended_after_cacheable_history(self) -> None:
+        history = [
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "task"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+        ]
+        progress = {"role": "developer", "content": "volatile progress"}
+
+        prepared = AgentRunner._insert_progress_context(history, progress)
+
+        self.assertEqual(prepared[:-1], history)
+        self.assertEqual(prepared[-1], progress)
+
+    def test_cache_metrics_support_both_provider_accounting_styles(self) -> None:
+        included = AgentRunner._cache_metrics(
+            {"input_tokens": 10_000, "cached_tokens": 8_000}
+        )
+        separate = AgentRunner._cache_metrics(
+            {"input_tokens": 2_000, "cached_tokens": 8_000}
+        )
+
+        self.assertEqual(included["accounting"], "cached_included_in_input")
+        self.assertEqual(included["uncached_input_tokens"], 2_000)
+        self.assertEqual(included["cache_reuse_ratio"], 0.8)
+        self.assertEqual(separate["accounting"], "cached_reported_separately")
+        self.assertEqual(separate["effective_input_tokens"], 10_000)
+        self.assertEqual(separate["cache_reuse_ratio"], 0.8)
 
 
 if __name__ == "__main__":

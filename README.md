@@ -142,7 +142,7 @@ $env:CODING_AGENT_PROMPT_CACHE_KEY = "mini-coder-agent-v1"
 
 Responses 默认优先使用流式传输，并发送稳定的 prompt cache key。兼容服务明确拒绝流式或缓存字段时，客户端只针对该能力回退，不会把普通超时误判为“不支持”。Session 会保存 provider 返回的 `cached_tokens`、`cache_write_tokens` 和 `reasoning_tokens`；供应方不返回这些字段时保持未知，不会伪造缓存命中率。
 
-复杂任务中，模型必须在下一轮看到最近一批工具的完整结果；更早且已经完成的 `write_file`/`edit_file` 批次则会被本地压缩为路径、成败和增删行摘要，不再反复重放工具参数中的整份源码。完整变更仍保存在 Session 和 ChangeTracker 中，需要核对时可以重新读取文件。这能降低多文件任务后半程的输入量，同时保持最近工具调用的 Responses 协议配对完整。
+复杂任务采用 cache-stable context：系统提示、用户请求和当前工具历史在舒适预算内保持追加式前缀，逐步变化的验收进度只放在请求尾部。接近上下文预算后，才按稳定的批次边界压缩较早工具记录，并始终保留最近的完整工具调用。这样既避免每一步重写旧前缀导致缓存失效，也能控制长任务后半程的输入体积。完整变更仍保存在 Session 和 ChangeTracker 中，需要核对时可以重新读取文件。
 
 其他可选变量见 `.env.example`。
 
@@ -247,7 +247,7 @@ mini-coder --config agent.toml --workspace "D:\path\to\workspace" --resume <sess
 mini-coder --config agent.toml --resume "<session-file>" "继续在刚才的实现上增加导出功能并验证"
 ```
 
-每次模型请求都会记录本轮消息数、发送消息数、本地 Token 估算、工具 schema 大小、耗时和 provider usage。原始消息仍完整落盘以便审计；进入下一轮时只发送本 Session 的结构化工作记忆、上一轮结论和最新用户请求，不重放旧工具日志。单轮内部也会停止重复发送已经过时的加密 reasoning 项，把较早的读取、搜索和写入批次压缩为文件、范围、结果与内容指纹摘要。文件读取会合并本轮已经看过的行号区间，重叠请求只返回尚未见过的行；大小写等价的普通搜索和已覆盖分页会复用先前结果。写入或可能改变工作区的命令会让目录级搜索缓存失效，文件读取则继续用内容指纹判断是否仍然有效。缓存命中次数会保存到 Session 和运行事件中。
+每次模型请求都会记录本轮消息数、发送消息数、本地 Token 估算、工具 schema 大小、耗时、provider usage、provider 返回的模型标识，以及兼容两种常见计数口径的缓存复用比例。原始消息仍完整落盘以便审计；进入下一轮时只发送本 Session 的结构化工作记忆、上一轮结论和最新用户请求，不重放旧工具日志。单轮内部优先保持可缓存的追加历史，只在接近预算时成批压缩。文件读取会合并本轮已经看过的行号区间，重叠请求只返回尚未见过的行；大小写等价的普通搜索和已覆盖分页会复用先前结果。写入或可能改变工作区的命令会让目录级搜索缓存失效，文件读取则继续用内容指纹判断是否仍然有效。缓存命中次数会保存到 Session 和运行事件中。
 
 工具调用按 `requested`、`approved`、`running`、`completed`、`failed`、`denied` 和 `uncertain` 记录：
 
@@ -322,7 +322,7 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 ## 测试
 
-核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 158 项：
+核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 166 项：
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -365,6 +365,24 @@ mini-coder-eval --live --scenario multifile_interface `
 真实 Eval 的 provider usage 为 29,506 input、1,025 output、30,531 total tokens；只有 provider 实际返回 usage 时才记录。完整脱敏证据见 [`docs/runs/eval-ci-release-run.md`](docs/runs/eval-ci-release-run.md)。
 
 发布候选还从公开 GitHub URL 克隆到一次性目录，使用全新虚拟环境重新安装并通过 115 项测试、10 项 Eval、两个 CLI 入口和演示初始状态复现；该过程没有复制本地 API Key。详见 [`docs/runs/release-candidate-audit.md`](docs/runs/release-candidate-audit.md)。
+
+### Mini Coder 与 Codex 同源对比
+
+`MiniCoderBench` 让 Mini Coder 和 Codex 同时使用 aicode007、`gpt-5.6-sol`、`xhigh` 和相同任务限制。两边分别获得全新的工作区副本；隐藏验收只在 Agent 退出后注入，因此最终通过与否不依赖 Agent 自报结果。任务覆盖修复、跨文件功能、从零构建、行为保持重构和同会话多轮扩展。
+
+列出任务不会调用模型：
+
+```powershell
+mini-coder-bench --list
+```
+
+真实对比必须显式使用 `--live`：
+
+```powershell
+mini-coder-bench --live --agent both --task boundary-fix --config agent.toml
+```
+
+报告统一记录完成率、隐藏验收、越界修改、耗时、调用次数、输入/输出/推理/缓存 Token 和 provider 返回的模型标识。实际费用不按 OpenAI 公价推算，必须按时间戳和响应记录与 aicode007 面板核对；完整说明见 [`benchmarks/README.md`](benchmarks/README.md)，首次同源烟雾记录见 [`docs/runs/cache-stable-benchmark-smoke.md`](docs/runs/cache-stable-benchmark-smoke.md)。
 
 ## 两分钟多文件演示
 

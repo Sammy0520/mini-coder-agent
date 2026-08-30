@@ -18,6 +18,9 @@ class OpenAICompatibleParsingTests(unittest.TestCase):
             status="completed",
         )
         response = SimpleNamespace(
+            id="resp-1",
+            model="gpt-5.6-sol-2026-08-01",
+            service_tier="default",
             output=[function_call],
             output_text="",
             status="completed",
@@ -30,6 +33,9 @@ class OpenAICompatibleParsingTests(unittest.TestCase):
         self.assertEqual(parsed.tool_calls[0].arguments, {"path": "main.py"})
         self.assertEqual(parsed.usage["total_tokens"], 25)
         self.assertEqual(parsed.provider_items[0]["type"], "function_call")
+        self.assertEqual(parsed.provider_metadata["response_id"], "resp-1")
+        self.assertEqual(parsed.provider_metadata["model"], "gpt-5.6-sol-2026-08-01")
+        self.assertEqual(parsed.provider_metadata["service_tier"], "default")
 
     def test_responses_history_replays_output_and_function_result(self) -> None:
         messages = [

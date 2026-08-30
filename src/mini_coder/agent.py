@@ -403,6 +403,8 @@ class AgentRunner:
                         "finish_reason": response.finish_reason,
                         "duration_seconds": self._last_model_duration,
                         "usage": dict(response.usage),
+                        "cache": self._cache_metrics(response.usage),
+                        "provider": dict(response.provider_metadata),
                         "estimated_input_tokens": self.context.estimate_tokens(prepared),
                         "turn": session.turn_count if session is not None else 1,
                     },
@@ -801,6 +803,48 @@ class AgentRunner:
         for name, value in response.usage.items():
             usage[name] = usage.get(name, 0) + value
 
+    @staticmethod
+    def _cache_metrics(usage: dict[str, int]) -> dict[str, Any]:
+        """Normalize both common compatible-provider cache accounting styles.
+
+        OpenAI includes cached input in ``input_tokens``. Some compatible
+        dashboards report uncached input and cached input as separate columns.
+        Keeping the raw fields plus the detected convention makes benchmark
+        reports useful without pretending every provider has identical usage
+        semantics.
+        """
+        reported_input = usage.get("input_tokens")
+        cached = usage.get("cached_tokens")
+        cache_write = usage.get("cache_write_tokens")
+        result: dict[str, Any] = {
+            "reported_input_tokens": reported_input,
+            "cached_tokens": cached,
+            "cache_write_tokens": cache_write,
+            "accounting": "unknown",
+            "effective_input_tokens": None,
+            "uncached_input_tokens": None,
+            "cache_reuse_ratio": None,
+        }
+        if not isinstance(reported_input, int) or not isinstance(cached, int):
+            return result
+        if cached <= reported_input:
+            effective = reported_input
+            uncached = reported_input - cached
+            accounting = "cached_included_in_input"
+        else:
+            effective = reported_input + cached
+            uncached = reported_input
+            accounting = "cached_reported_separately"
+        result.update(
+            {
+                "accounting": accounting,
+                "effective_input_tokens": effective,
+                "uncached_input_tokens": uncached,
+                "cache_reuse_ratio": (cached / effective) if effective else 0.0,
+            }
+        )
+        return result
+
     def _complete_with_retry(
         self,
         prepared: list[dict[str, Any]],
@@ -931,6 +975,8 @@ class AgentRunner:
                         "compacted": self._continuing_turn or len(prepared) < len(messages),
                         "duration_seconds": self._last_model_duration,
                         "usage": dict(response.usage),
+                        "cache": self._cache_metrics(response.usage),
+                        "provider": dict(response.provider_metadata),
                     }
                 )
                 self._persist(session, messages, usage)
@@ -1950,27 +1996,8 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         progress: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Keep the latest tool request/results at the tail for provider continuity."""
-        result = list(messages)
-        latest_tool_request = max(
-            (
-                index
-                for index, message in enumerate(result)
-                if message.get("role") == "assistant" and message.get("tool_calls")
-            ),
-            default=-1,
-        )
-        if latest_tool_request >= 0:
-            insertion = latest_tool_request
-        else:
-            insertion = len(result)
-            while insertion > 0 and result[insertion - 1].get("role") in {
-                "developer",
-                "system",
-            }:
-                insertion -= 1
-        result.insert(insertion, progress)
-        return result
+        """Append volatile progress after the cacheable conversation prefix."""
+        return [*messages, progress]
 
     @staticmethod
     def _call_signature(call: ToolCall) -> str:

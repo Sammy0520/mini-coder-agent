@@ -835,10 +835,13 @@ feat: add local GUI run and approval console
 - [x] Session v7 保存轮次、对话、会话内工作记忆和逐次模型调用统计。
 - [x] 不建立跨 Session 记忆，不在不同对话之间共享用户请求或项目结论。
 - [x] 新一轮仅携带结构化工作记忆、上一轮结论和最新请求，不重放旧工具日志。
-- [x] 单轮后续请求移除已经过时的 provider reasoning replay，并压缩较早的超长工具输出。
+- [x] 单轮内保持可缓存的追加式热历史，把动态验收状态放在请求尾部，仅在接近预算时按稳定批次边界压缩。
 - [x] 上下文同时使用字符上限和本地 Token 估算控制。
+- [x] 保存 provider 返回的缓存读写、推理 Token、响应 ID 和实际模型标识，并兼容常见的两种缓存计数口径。
 - [x] GUI 执行详情显示当前轮次、简洁操作次数和会话记忆提示；Token 仅留在 Session/评测记录中，不在页面展示。
-- [ ] 使用真实 provider 对同一组单轮与两轮任务做优化前后对比。
+- [x] 建立同一 aicode007/模型/推理强度下的 Mini Coder 与 Codex 非 GUI 对比 Runner。
+- [x] 建立含修复、跨文件功能、从零构建、重构和多轮任务的 MiniCoderBench，并使用运行后注入的隐藏验收。
+- [ ] 使用真实 provider 运行配对任务并与 aicode007 面板核对实际费用。
 
 ## 19. 当前下一步
 
@@ -847,4 +850,4 @@ feat: add local GUI run and approval console
 3. 仓库所有者已选择 MIT License、公开 description/topics，并确认创建 `v0.1.0` tag/Release；阶段 I1 完成。
 4. 阶段 J 已完成全局 Session 列表、运行控制器、SSE、页面审批、Diff/完整文件、验证面板和同会话连续协作。
 5. Session v7 已完成会话内工作记忆、逐次模型调用统计和 Token-aware 上下文整理；明确不做跨会话记忆。
-6. 下一步进入真实单轮/多轮对比，用成功率、无关修改、工具调用、Token 和耗时验证本轮优化，再决定自适应 reasoning 或服务端续接是否值得实现。
+6. cache-stable context 和 MiniCoderBench 对比框架已经实现；下一步先运行一个低风险配对任务核对 Codex JSON、Mini Session 与 aicode007 面板，再扩展到完整单轮/多轮对比。

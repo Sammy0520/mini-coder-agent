@@ -72,7 +72,7 @@ class ContextManagerTests(unittest.TestCase):
         self.assertNotIn("old output", rendered)
         self.assertLess(manager.estimate_tokens(prepared), manager.estimate_tokens(messages))
 
-    def test_old_reasoning_and_large_tool_output_are_not_replayed_in_full(self) -> None:
+    def test_hot_history_is_preserved_while_below_soft_budget(self) -> None:
         manager = ContextManager(max_chars=50_000, max_tokens=20_000)
         messages = [
             {"role": "system", "content": "system"},
@@ -101,10 +101,10 @@ class ContextManagerTests(unittest.TestCase):
 
         prepared = manager.prepare(messages)
 
-        self.assertNotIn("secret-state", str(prepared))
+        self.assertIn("secret-state", str(prepared))
         self.assertIn("latest-state", str(prepared))
-        self.assertIn("earlier completed tool batch", str(prepared))
-        self.assertNotIn("A" * 1_000, str(prepared))
+        self.assertNotIn("earlier completed tool batch", str(prepared))
+        self.assertIn("A" * 1_000, str(prepared))
         self.assertEqual(prepared[-1]["content"], "B" * 8_000)
         included_ids = {
             call["id"]
@@ -115,7 +115,7 @@ class ContextManagerTests(unittest.TestCase):
             if message.get("role") == "tool":
                 self.assertIn(message["tool_call_id"], included_ids)
 
-    def test_older_completed_write_payload_is_replaced_with_summary(self) -> None:
+    def test_completed_write_payload_stays_cacheable_below_soft_budget(self) -> None:
         old_content = "old source body\n" * 800
         latest_content = "latest source body\n" * 300
         messages = [
@@ -165,21 +165,19 @@ class ContextManagerTests(unittest.TestCase):
         prepared = manager.prepare(messages)
         rendered = str(prepared)
 
-        self.assertNotIn(old_content, rendered)
-        self.assertIn("earlier completed tool batch", rendered)
-        self.assertIn("write_file old.py: completed (+800/-0)", rendered)
+        self.assertNotIn("earlier completed tool batch", rendered)
         latest_message = next(
             item
-            for item in prepared
+            for item in reversed(prepared)
             if item.get("role") == "assistant" and item.get("tool_calls")
         )
         self.assertEqual(
             latest_message["tool_calls"][0]["function"]["arguments"]["content"],
             latest_content,
         )
-        self.assertLess(manager.estimate_tokens(prepared), manager.estimate_tokens(messages))
+        self.assertEqual(prepared, messages)
 
-    def test_older_completed_read_and_search_batches_are_summarized(self) -> None:
+    def test_completed_read_and_search_stay_cacheable_below_soft_budget(self) -> None:
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "inspect"},
@@ -218,9 +216,60 @@ class ContextManagerTests(unittest.TestCase):
         prepared = ContextManager(max_chars=30_000, max_tokens=10_000).prepare(messages)
         rendered = str(prepared)
 
-        self.assertNotIn("source source source", rendered)
-        self.assertIn("read_file app.py: completed (lines 1-100, 100 total, hash abcdef123456)", rendered)
+        self.assertIn("source source source", rendered)
+        self.assertNotIn("earlier completed tool batch", rendered)
         self.assertEqual(prepared[-1]["tool_call_id"], "latest")
+
+    def test_near_budget_compaction_moves_in_stable_chunks(self) -> None:
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "task"},
+        ]
+        manager = ContextManager(
+            max_chars=30_000,
+            max_tokens=20_000,
+            soft_limit_ratio=0.6,
+            compaction_chunk_batches=4,
+            hot_tool_batches=2,
+        )
+        prepared_at_seven = None
+        for index in range(8):
+            call_id = f"call-{index}"
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"app.py"}',
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": "source" * 700,
+                    },
+                ]
+            )
+            if index == 6:
+                prepared_at_seven = manager.prepare(messages)
+
+        prepared_at_eight = manager.prepare(messages)
+        assert prepared_at_seven is not None
+        self.assertTrue(
+            any("earlier completed tool batch" in item.get("content", "") for item in prepared_at_seven)
+        )
+        self.assertEqual(
+            prepared_at_eight[: len(prepared_at_seven)],
+            prepared_at_seven,
+        )
 
 
 if __name__ == "__main__":

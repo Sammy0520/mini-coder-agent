@@ -15,4 +15,5 @@ auth.json
 tmp/
 .mini-coder/
 eval-results/
+benchmark-results/
 examples/order_service/workspace/

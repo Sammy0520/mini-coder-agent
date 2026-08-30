@@ -14,12 +14,24 @@ class ContextManager:
         max_chars: int = 80_000,
         summary_chars: int = 2_000,
         max_tokens: int | None = None,
+        soft_limit_ratio: float = 0.8,
+        compaction_chunk_batches: int = 4,
+        hot_tool_batches: int = 2,
     ) -> None:
         if max_chars < 2_000:
             raise ValueError("max_chars must be at least 2000")
         self.max_chars = max_chars
         self.summary_chars = min(summary_chars, max_chars // 4)
         self.max_tokens = max_tokens or max(1_000, max_chars // 4)
+        if not 0.5 <= soft_limit_ratio < 1.0:
+            raise ValueError("soft_limit_ratio must be between 0.5 and 1.0")
+        if compaction_chunk_batches < 1:
+            raise ValueError("compaction_chunk_batches must be positive")
+        if hot_tool_batches < 1:
+            raise ValueError("hot_tool_batches must be positive")
+        self.soft_limit_ratio = soft_limit_ratio
+        self.compaction_chunk_batches = compaction_chunk_batches
+        self.hot_tool_batches = hot_tool_batches
 
     def estimate_chars(self, messages: Sequence[dict[str, Any]]) -> int:
         return len(json.dumps(list(messages), ensure_ascii=False, default=str))
@@ -41,10 +53,19 @@ class ContextManager:
         copied = copy.deepcopy(list(messages))
         if follow_up:
             copied = self._prepare_follow_up(copied, memory or {})
-        else:
-            copied = self._compact_completed_tool_batches(copied)
-            copied = self._compact_replayed_provider_state(copied)
-            copied = self._compact_old_tool_outputs(copied)
+        # Preserve an append-only hot history while it comfortably fits. Prompt
+        # caches match exact prefixes, so rewriting an old tool batch after every
+        # model turn saves raw tokens but prevents the provider from reusing most
+        # of the preceding request.
+        if self._within_soft_budget(copied):
+            return copied
+
+        compact_count = self._stable_compaction_count(copied)
+        if compact_count:
+            copied = self._compact_completed_tool_batches(
+                copied,
+                compact_count=compact_count,
+            )
         if self._within_budget(copied):
             return copied
 
@@ -74,9 +95,23 @@ class ContextManager:
             result = self._shrink_contents(result)
         return result
 
+    def _stable_compaction_count(self, messages: list[dict[str, Any]]) -> int:
+        """Compact old batches in chunks so the boundary moves infrequently."""
+        batch_count = sum(
+            1
+            for message in messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+        available = max(0, batch_count - self.hot_tool_batches)
+        return (
+            available // self.compaction_chunk_batches
+        ) * self.compaction_chunk_batches
+
     @staticmethod
     def _compact_completed_tool_batches(
         messages: list[dict[str, Any]],
+        *,
+        compact_count: int,
     ) -> list[dict[str, Any]]:
         """Replace older completed tool batches with small protocol-free summaries.
 
@@ -90,15 +125,15 @@ class ContextManager:
             for index, message in enumerate(messages)
             if message.get("role") == "assistant" and message.get("tool_calls")
         ]
-        if len(tool_indexes) < 2:
+        if compact_count <= 0 or not tool_indexes:
             return messages
-        latest_tool_index = tool_indexes[-1]
+        compact_indexes = set(tool_indexes[:compact_count])
         result: list[dict[str, Any]] = []
         index = 0
         while index < len(messages):
             message = messages[index]
             calls = message.get("tool_calls") if message.get("role") == "assistant" else None
-            if index >= latest_tool_index or not isinstance(calls, list) or not calls:
+            if index not in compact_indexes or not isinstance(calls, list) or not calls:
                 result.append(message)
                 index += 1
                 continue
@@ -207,6 +242,13 @@ class ContextManager:
         return (
             self.estimate_chars(messages) <= self.max_chars
             and self.estimate_tokens(messages) <= self.max_tokens
+        )
+
+    def _within_soft_budget(self, messages: Sequence[dict[str, Any]]) -> bool:
+        return (
+            self.estimate_chars(messages) <= int(self.max_chars * self.soft_limit_ratio)
+            and self.estimate_tokens(messages)
+            <= int(self.max_tokens * self.soft_limit_ratio)
         )
 
     def _prepare_follow_up(

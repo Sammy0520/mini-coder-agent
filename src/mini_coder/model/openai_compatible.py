@@ -238,6 +238,11 @@ class OpenAICompatibleClient(ModelClient):
             tool_calls=calls,
             finish_reason=getattr(choice, "finish_reason", None),
             usage=usage,
+            provider_metadata={
+                "response_id": getattr(completion, "id", None),
+                "model": getattr(completion, "model", None),
+                "service_tier": getattr(completion, "service_tier", None),
+            },
         )
 
     @staticmethod
@@ -281,6 +286,11 @@ class OpenAICompatibleClient(ModelClient):
             finish_reason=getattr(response, "status", None),
             usage=usage,
             provider_items=[_plain_value(item) for item in output],
+            provider_metadata={
+                "response_id": getattr(response, "id", None),
+                "model": getattr(response, "model", None),
+                "service_tier": getattr(response, "service_tier", None),
+            },
         )
 
 

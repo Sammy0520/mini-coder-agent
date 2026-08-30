@@ -27,6 +27,7 @@ class ModelResponse:
     finish_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     provider_items: list[dict[str, Any]] = field(default_factory=list)
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_assistant_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content or ""}

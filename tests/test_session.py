@@ -547,7 +547,12 @@ class SessionRunnerTests(unittest.TestCase):
             self.assertEqual(restored.status, SessionStatus.COMPLETED_UNVERIFIED)
             self.assertEqual(restored.verification_status, VerificationStatus.STALE)
             self.assertEqual(restored.change_revision, 2)
-            self.assertIn("Local runtime notice", model.requests[0][-1]["content"])
+            self.assertTrue(
+                any(
+                    "Local runtime notice" in str(message.get("content") or "")
+                    for message in model.requests[0]
+                )
+            )
 
     def test_resume_uses_persisted_approved_change_and_detects_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
