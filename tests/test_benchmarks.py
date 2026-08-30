@@ -34,6 +34,11 @@ class BenchmarkRunnerTests(unittest.TestCase):
             {item.category for item in tasks},
             {"bug-fix", "feature", "zero-to-one", "refactor", "multi-turn"},
         )
+        multifile = next(item for item in tasks if item.task_id == "multifile-feature")
+        public_contract = multifile.turns[0]
+        self.assertIn("返回该 SKU 扣减后的剩余库存", public_contract)
+        self.assertIn("0 或负数时抛出 ValueError", public_contract)
+        self.assertIn("同一 SKU 出现多次时按合计数量", public_contract)
 
     def test_cache_metrics_accept_openai_and_separate_dashboard_styles(self) -> None:
         included = BenchmarkRunner._cache_metrics(

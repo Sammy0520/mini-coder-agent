@@ -28,7 +28,7 @@
       "fixture": "tasks/multifile-feature/workspace",
       "hidden": "tasks/multifile-feature/hidden",
       "turns": [
-        "增加库存预留功能：inventory.py 提供 reserve(sku, quantity)，库存不足时抛出 OutOfStockError；service.py 提供 reserve_order(lines)，其中 lines 是 (sku, quantity) 列表，全部成功时返回预留后的库存快照。必须避免部分成功：任一商品不足时所有库存都保持原样。保持现有接口可用并运行检查。只修改 inventory.py 和 service.py。"
+        "增加库存预留功能：inventory.py 提供 reserve(sku, quantity)，成功时返回该 SKU 扣减后的剩余库存，库存不足时抛出 OutOfStockError；quantity 必须是正整数，0 或负数时抛出 ValueError。service.py 提供 reserve_order(lines)，其中 lines 是 (sku, quantity) 列表，全部成功时返回预留后的库存快照。必须避免部分成功：任一商品不足或数量非法时所有库存都保持原样；同一 SKU 出现多次时按合计数量判断和扣减。保持现有接口可用并运行检查。只修改 inventory.py 和 service.py。"
       ],
       "validation_command": ["python", "-m", "unittest", "discover", "-s", ".minicoder-bench-hidden", "-v"],
       "expected_changed_paths": ["inventory.py", "service.py"]
