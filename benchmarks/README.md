@@ -18,4 +18,4 @@ mini-coder-bench --live --agent both --task boundary-fix --config agent.toml
 
 The JSON report records provider usage when available. Reconcile `actual_cost` against the aicode007 panel; do not substitute OpenAI list prices. Separate API keys in the same aicode007 billing group are recommended when the provider supports them.
 
-The first same-provider smoke test and its interpretation limits are recorded in [`docs/runs/cache-stable-benchmark-smoke.md`](../docs/runs/cache-stable-benchmark-smoke.md).
+The first same-provider smoke test and its interpretation limits are recorded in [`docs/runs/cache-stable-benchmark-smoke.md`](../docs/runs/cache-stable-benchmark-smoke.md). The first billing-reconciled pair is recorded in [`docs/runs/formal-boundary-comparison.md`](../docs/runs/formal-boundary-comparison.md).

@@ -382,7 +382,7 @@ mini-coder-bench --list
 mini-coder-bench --live --agent both --task boundary-fix --config agent.toml
 ```
 
-报告统一记录完成率、隐藏验收、越界修改、耗时、调用次数、输入/输出/推理/缓存 Token 和 provider 返回的模型标识。实际费用不按 OpenAI 公价推算，必须按时间戳和响应记录与 aicode007 面板核对；完整说明见 [`benchmarks/README.md`](benchmarks/README.md)，首次同源烟雾记录见 [`docs/runs/cache-stable-benchmark-smoke.md`](docs/runs/cache-stable-benchmark-smoke.md)。
+报告统一记录完成率、隐藏验收、越界修改、耗时、调用次数、输入/输出/推理/缓存 Token 和 provider 返回的模型标识。实际费用不按 OpenAI 公价推算，必须按时间戳和响应记录与 aicode007 面板核对；完整说明见 [`benchmarks/README.md`](benchmarks/README.md)，首次账单核对后的正式对照见 [`docs/runs/formal-boundary-comparison.md`](docs/runs/formal-boundary-comparison.md)。
 
 ## 两分钟多文件演示
 
