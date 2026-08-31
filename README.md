@@ -7,6 +7,7 @@
 **30 秒了解差异点：**
 
 - 不是把模型套进 Agent SDK：核心循环、Responses/Chat Completions 适配和工具协议都在仓库内。
+- 不要求用户先写规格文档：一句模糊的自然语言目标会先被整理为意图、保守默认值和最低验收条件，再进入执行。
 - 不把“模型说测试通过”当成事实：完成状态由本地命令、修改版本和 Session 记录决定。
 - 不把写文件当黑盒：每次写入都有 Diff、前后 hash、原子替换、变更归属和冲突安全 Undo。
 - 不只展示一次成功录屏：10 个隔离、确定性的 Eval 覆盖修复、恢复、拒绝、越界、429 和输出预算；真实 provider 使用同一评分协议。
@@ -34,7 +35,8 @@
 - 运行控制：最大步骤、总时间、模型/工具调用、单次/累计工具输出和 provider token 预算；连续重复调用检测、旧读取/搜索/写入压缩、重叠读取区间与等价搜索复用，以及可恢复中断。
 - Session：原子保存版本化 Session；支持中断恢复和同一会话追加多轮任务，保留 Responses provider items、工具执行状态、审批结果、会话内工作记忆和累计 usage，并阻止不确定副作用被自动重放。
 - ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
-- 验证闭环：Session 记录 `analyze`、`implement`、`verify`、`summarize` 阶段以及真实验证命令、覆盖路径/技术区域、退出码、耗时和输出摘要；相同且仍有效的检查直接复用，最终状态由本地事实决定。
+- 任务成形：运行时识别构建、修复、加功能、改进和解释类意图，按 `discover → frame → locate → implement → verify → finish` 推进；TaskLedger 在同一会话内保留目标、假设、相关文件、修改、证据和未解决项。
+- 验证闭环：Session 记录真实验证命令、覆盖路径/技术区域、退出码、耗时和输出摘要；正常验收必须成功退出，负向输入检查只能作为补充证据，依赖或运行环境错误不能伪装成通过。
 - 项目理解：启动时注入有界工作区概览，识别清单、入口、测试、验证命令、项目说明和 Git 起始状态，并跳过依赖、缓存与构建目录。
 - 工具体验：文件列表和搜索支持分页，读取支持明确的继续行号，搜索返回过滤原因；失败结果包含稳定错误码和下一步建议。
 - 本地 GUI：浏览器页面与 CLI 复用同一个 `AgentRunner`，支持全局会话列表、运行中自由切换会话、同会话连续对话、SSE 事件续接、对话内批量审批、协作式停止、整批或单文件安全 Undo、完整文件查看、运行时间线、Diff、验证结果和会话记忆提示。
@@ -52,6 +54,7 @@ Interfaces
           ├─ ModelClient         可替换的模型抽象
           │   └─ OpenAICompatibleClient
           ├─ WorkspaceInspector  清单、入口、测试、说明与 Git 基线
+          ├─ TaskFramer/Ledger   模糊意图、默认假设、阶段与收敛状态
           ├─ ContextManager      本地限制发送给模型的上下文
           ├─ ChangeTracker       Diff、hash、原子写入、冲突检测与 Undo
           ├─ VerificationTracker 验证命令、修改版本、失效规则与完成判定
@@ -174,7 +177,7 @@ mini-coder-gui
 
 可通过 `--log agent-events.jsonl` 保存可选的本地 JSONL 事件日志。每项事件包含 schema 版本、UTC 时间、run/session ID、step 和运行时长。日志写入失败只产生可见警告，不会中断主任务。事件内容会经过统一凭据脱敏，但仍可能含有代码或命令输出，因此默认关闭，也不应提交。
 
-`run_command` 会把启动 `mini-coder` 的 Python 环境放在子进程 `PATH` 最前面。因此从 `.venv` 启动时，模型执行普通的 `python` 或 `python -m pip` 也会使用同一个 `.venv`，而不是意外落到系统 Python 或 Anaconda。模型服务所用的 `OPENAI_API_KEY` 与 `CODING_AGENT_API_KEY` 不会自动传给项目子进程。命令超时或用户按下 Ctrl+C 时，Runner 会终止它启动的进程组/进程树，并把退出码、预期退出码、超时、耗时和输出截断状态保存到 Session。负向验收可以声明 `expected_exit_codes`，例如程序正确拒绝非法输入并返回 2 时会记为通过，而不是误报任务失败。
+`run_command` 会把启动 `mini-coder` 的 Python 环境放在子进程 `PATH` 最前面。因此从 `.venv` 启动时，模型执行普通的 `python` 或 `python -m pip` 也会使用同一个 `.venv`，而不是意外落到系统 Python 或 Anaconda。模型服务所用的 `OPENAI_API_KEY` 与 `CODING_AGENT_API_KEY` 不会自动传给项目子进程。命令超时或用户按下 Ctrl+C 时，Runner 会终止它启动的进程组/进程树，并把退出码、预期退出码、超时、耗时和输出截断状态保存到 Session。标准验收必须正常退出；负向验收需明确标记为 `expected_rejection`，它只能作为补充证据，缺少依赖或导入失败不会被误报为任务通过。
 
 每次运行还会向项目命令提供 `MINI_CODER_RUNTIME_DIR`。需要临时数据库、导出文件或其他冒烟数据时，Agent 应把它们放在这个 Session 专用目录，而不是先通过 `write_file` 创建项目文件。这样运行时产物不会混入代码 Diff、Undo 或 ChangeTracker 冲突判断。
 
@@ -364,25 +367,7 @@ mini-coder-eval --live --scenario multifile_interface `
 
 真实 Eval 的 provider usage 为 29,506 input、1,025 output、30,531 total tokens；只有 provider 实际返回 usage 时才记录。完整脱敏证据见 [`docs/runs/eval-ci-release-run.md`](docs/runs/eval-ci-release-run.md)。
 
-发布候选还从公开 GitHub URL 克隆到一次性目录，使用全新虚拟环境重新安装并通过 115 项测试、10 项 Eval、两个 CLI 入口和演示初始状态复现；该过程没有复制本地 API Key。详见 [`docs/runs/release-candidate-audit.md`](docs/runs/release-candidate-audit.md)。
-
-### Mini Coder 与 Codex 同源对比
-
-`MiniCoderBench` 让 Mini Coder 和 Codex 同时使用 aicode007、`gpt-5.6-sol`、`xhigh` 和相同任务限制。两边分别获得全新的工作区副本；隐藏验收只在 Agent 退出后注入，因此最终通过与否不依赖 Agent 自报结果。任务覆盖修复、跨文件功能、从零构建、行为保持重构和同会话多轮扩展。
-
-列出任务不会调用模型：
-
-```powershell
-mini-coder-bench --list
-```
-
-真实对比必须显式使用 `--live`：
-
-```powershell
-mini-coder-bench --live --agent both --task boundary-fix --config agent.toml
-```
-
-报告统一记录完成率、隐藏验收、越界修改、耗时、调用次数、输入/输出/推理/缓存 Token 和 provider 返回的模型标识。实际费用不按 OpenAI 公价推算，必须按时间戳和响应记录与 aicode007 面板核对；完整说明见 [`benchmarks/README.md`](benchmarks/README.md)，首次账单核对后的正式对照见 [`docs/runs/formal-boundary-comparison.md`](docs/runs/formal-boundary-comparison.md)。
+发布候选还从公开 GitHub URL 克隆到一次性目录，使用全新虚拟环境重新安装并通过完整测试、确定性 Eval、CLI 入口和演示初始状态复现；该过程没有复制本地 API Key。详见 [`docs/runs/release-candidate-audit.md`](docs/runs/release-candidate-audit.md)。
 
 ## 两分钟多文件演示
 
@@ -411,7 +396,7 @@ Agent 内部的 `.mini-coder/` Session 目录和 Python `__pycache__/` 也会从
 - 路径策略严格约束专用文件工具，但无法从操作系统层面阻止一个已获批准的任意 shell 命令访问当前账号可见资源。
 - 当前只有 `OpenAICompatibleClient`，支持 Responses 与 Chat Completions function calling；其他厂商可通过 `ModelClient` 扩展，但尚无内置适配器。
 - ChangeTracker 追踪 `write_file`/`edit_file`，不声称可以撤销命令、依赖安装、Git 或网络副作用。
-- 文本修改采用可审计的精确替换，不提供 AST 重构或模糊补丁；单个受追踪文本文件上限为 2 MB。
+- 文本修改采用可审计的精确替换，不提供 AST 重构或模糊补丁；精确片段不匹配时会返回最接近的当前代码供下一轮修正，单个受追踪文本文件上限为 2 MB。
 - 当前 GUI 是复用真实 Agent 内核的本地展示控制台，不是完整代码编辑器或 IDE；停止模型请求只能在该次请求返回或超时后生效，但审批等待、本地命令和步骤间停止会立即响应。
 - 项目不包含多 Agent、向量数据库、通用 RAG、MCP 生态或自动 commit/push/PR；这些不属于当前考核核心闭环。
 - Eval 能证明预先声明场景的行为，不能保证模型在任意仓库中都成功；真实模型结果会受 provider、模型版本和网络状态影响。

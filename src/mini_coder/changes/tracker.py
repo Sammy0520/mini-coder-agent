@@ -80,8 +80,10 @@ class ChangeTracker:
             normalized_new = _normalize_newlines(new_text, newline)
             actual = before_text.count(normalized_old)
             if actual != expected:
+                recovery = _nearest_edit_excerpt(before_text, normalized_old)
                 raise ChangeError(
-                    f"Expected {expected} occurrence(s), found {actual}; file was not changed"
+                    f"Expected {expected} occurrence(s), found {actual}; file was not changed. "
+                    f"{recovery}"
                 )
             after_text = before_text.replace(normalized_old, normalized_new, expected)
 
@@ -291,6 +293,49 @@ def _detect_newline(text: str) -> str:
 
 def _normalize_newlines(text: str, newline: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline)
+
+
+def _nearest_edit_excerpt(current_text: str, requested_text: str) -> str:
+    """Return a bounded exact excerpt that lets the model retry without rereading."""
+    current_lines = current_text.splitlines()
+    requested_lines = requested_text.splitlines()
+    if not current_lines or not requested_lines:
+        return "Read the current file and retry with an exact old_text block."
+
+    anchor_offset = next(
+        (index for index, line in enumerate(requested_lines) if line.strip()),
+        0,
+    )
+    anchor = requested_lines[anchor_offset].strip()
+    exact = [
+        index for index, line in enumerate(current_lines) if line.strip() == anchor
+    ]
+    if exact:
+        anchor_index = exact[0]
+    else:
+        anchor_index = max(
+            range(len(current_lines)),
+            key=lambda index: difflib.SequenceMatcher(
+                None,
+                anchor,
+                current_lines[index].strip(),
+                autojunk=False,
+            ).ratio(),
+        )
+
+    start = max(0, anchor_index - anchor_offset - 2)
+    wanted = max(5, min(len(requested_lines) + 4, 24))
+    end = min(len(current_lines), start + wanted)
+    excerpt = "\n".join(current_lines[start:end])
+    if len(excerpt) > 2_400:
+        excerpt = excerpt[:2_380] + "\n...[excerpt truncated]"
+    return (
+        f"Closest current excerpt is lines {start + 1}-{end}. Retry edit_file using "
+        "the exact text below (including comments and whitespace):\n"
+        "```text\n"
+        f"{excerpt}\n"
+        "```"
+    )
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:

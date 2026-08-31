@@ -12,9 +12,16 @@ def utc_now() -> str:
 
 
 class TaskPhase(str, Enum):
-    ANALYZE = "analyze"
+    DISCOVER = "discover"
+    FRAME = "frame"
+    LOCATE = "locate"
     IMPLEMENT = "implement"
     VERIFY = "verify"
+    FINISH = "finish"
+
+    # Kept readable for sessions created by schema v8 before the six-stage
+    # workflow was introduced. New runs never move back to these phases.
+    ANALYZE = "analyze"
     SUMMARIZE = "summarize"
 
 
@@ -41,6 +48,9 @@ class VerificationRecord:
     timed_out: bool = False
     expected_exit_codes: tuple[int, ...] = (0,)
     expectation_met: bool = False
+    verification_mode: str = "standard"
+    conclusive: bool = True
+    environment_error: bool = False
     scope_paths: tuple[str, ...] = ()
     scope_domains: tuple[str, ...] = ("all",)
     created_at: str = field(default_factory=utc_now)
@@ -63,6 +73,9 @@ class VerificationRecord:
         timed_out: bool,
         expected_exit_codes: tuple[int, ...] = (0,),
         expectation_met: bool | None = None,
+        verification_mode: str = "standard",
+        conclusive: bool = True,
+        environment_error: bool = False,
         scope_paths: tuple[str, ...] = (),
         scope_domains: tuple[str, ...] = ("all",),
     ) -> "VerificationRecord":
@@ -80,6 +93,9 @@ class VerificationRecord:
             timed_out=timed_out,
             expected_exit_codes=expected_exit_codes,
             expectation_met=passed if expectation_met is None else expectation_met,
+            verification_mode=verification_mode,
+            conclusive=conclusive,
+            environment_error=environment_error,
             scope_paths=scope_paths,
             scope_domains=scope_domains,
         )
@@ -108,6 +124,9 @@ class VerificationRecord:
             "timed_out": self.timed_out,
             "expected_exit_codes": list(self.expected_exit_codes),
             "expectation_met": self.expectation_met,
+            "verification_mode": self.verification_mode,
+            "conclusive": self.conclusive,
+            "environment_error": self.environment_error,
             "scope_paths": list(self.scope_paths),
             "scope_domains": list(self.scope_domains),
             "created_at": self.created_at,
@@ -156,6 +175,13 @@ class VerificationRecord:
         expectation_met = data.get("expectation_met", passed)
         if not isinstance(expectation_met, bool):
             raise ValueError("verification expectation_met must be a boolean")
+        verification_mode = data.get("verification_mode", "standard")
+        if verification_mode not in {"standard", "expected_rejection"}:
+            raise ValueError("verification_mode must be standard or expected_rejection")
+        conclusive = data.get("conclusive", verification_mode == "standard")
+        environment_error = data.get("environment_error", False)
+        if not isinstance(conclusive, bool) or not isinstance(environment_error, bool):
+            raise ValueError("verification conclusive flags must be booleans")
         scope_paths = data.get("scope_paths", [])
         scope_domains = data.get("scope_domains", ["all"])
         if not isinstance(scope_paths, list) or not all(
@@ -186,6 +212,9 @@ class VerificationRecord:
             timed_out=timed_out,
             expected_exit_codes=tuple(raw_expected),
             expectation_met=expectation_met,
+            verification_mode=verification_mode,
+            conclusive=conclusive,
+            environment_error=environment_error,
             scope_paths=tuple(scope_paths),
             scope_domains=tuple(scope_domains),
             created_at=data["created_at"],

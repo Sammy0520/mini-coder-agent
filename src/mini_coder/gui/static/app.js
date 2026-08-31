@@ -26,6 +26,8 @@ const state = {
   activeRuns: new Map(),
   changesExpanded: false,
   sessionPoller: null,
+  taskBrief: null,
+  phase: "discover",
 };
 
 const elementIds = [
@@ -284,6 +286,8 @@ async function loadSession(sessionId) {
       count: 1,
     }));
     state.readGroup = null;
+    state.taskBrief = data.working_memory?.task_brief || null;
+    state.phase = data.phase || "finish";
     state.changesExpanded = false;
     state.changes = new Map();
     (data.changes || []).filter((item) => item.undo_status === "active").forEach((item) => {
@@ -346,6 +350,8 @@ function resetDraft(options = {}) {
   state.eventCount = 0;
   state.executionGroups = [];
   state.readGroup = null;
+  state.taskBrief = null;
+  state.phase = "discover";
   state.changesExpanded = false;
   state.changes = new Map();
   state.pendingApproval = null;
@@ -456,6 +462,8 @@ function prepareRunningView(task) {
   state.eventCount = 0;
   state.executionGroups = [];
   state.readGroup = null;
+  state.taskBrief = null;
+  state.phase = "discover";
   if (!continuing) state.changes = new Map();
   state.pendingApproval = null;
   els.welcomeState.classList.add("hidden");
@@ -528,6 +536,16 @@ function handleEvent(envelope) {
     renderTurnSummary("执行中");
   } else if (name === "workspace_overview_generated") {
     addExecution("先了解了一下项目结构", overviewDetail(payload), timestamp, "⌁");
+  } else if (name === "task_framed") {
+    state.taskBrief = payload;
+    renderTaskBrief();
+    addExecution("已经理解你想完成什么", taskBriefDetail(payload), timestamp, "◎");
+  } else if (name === "phase_changed") {
+    state.phase = payload.phase || state.phase;
+    updatePhaseHeading(state.phase);
+  } else if (name === "completion_reserve_started") {
+    addExecution("开始收尾，优先完成和检查已有改动", "不再扩展可选内容", timestamp, "→");
+    updatePhaseHeading("finish");
   } else if (name === "tool_call_requested") {
     state.turnToolCalls += 1;
     renderTurnSummary("执行中");
@@ -541,9 +559,13 @@ function handleEvent(envelope) {
   } else if (name === "change_applied") {
     rememberAppliedChange(payload);
   } else if (name === "verification_completed") {
-    const title = payload.passed ? "运行测试，确认功能可以正常使用" : "运行测试后发现还有问题";
-    addExecution(title, verificationDetail(payload), timestamp, payload.passed ? "✓" : "!");
-    setVerification(payload.passed ? "passed" : "failed", payload.passed ? "已通过" : "未通过", friendlyVerification(payload));
+    const supporting = payload.verification_mode === "expected_rejection" && payload.check_passed;
+    const title = supporting
+      ? "确认了无效输入会被正确拒绝"
+      : (payload.passed ? "运行测试，确认功能可以正常使用" : "运行测试后发现还有问题");
+    addExecution(title, verificationDetail(payload), timestamp, (payload.passed || supporting) ? "✓" : "!");
+    if (supporting) setVerification("neutral", "还需检查", friendlyVerification(payload));
+    else setVerification(payload.passed ? "passed" : "failed", payload.passed ? "已通过" : "未通过", friendlyVerification(payload));
   } else if (name === "verification_invalidated") {
     setVerification("neutral", "需要重跑", "代码又发生了变化，需要重新运行检查。 ");
   } else if (name === "tool_call_denied") {
@@ -557,6 +579,19 @@ function handleEvent(envelope) {
     state.usedSessionMemory = state.currentTurn > 1;
     renderTurnSummary("执行中");
     addExecution("已整理较长的上下文", "保留重要信息后继续执行", timestamp, "·");
+  } else if (name === "run_completed") {
+    updatePhaseHeading("finish");
+  } else if (name === "completion_evidence") {
+    const paths = Array.isArray(payload.changed_files) ? payload.changed_files : [];
+    const checks = Array.isArray(payload.checks) ? payload.checks : [];
+    const detail = [
+      paths.length ? `修改：${paths.join("、")}` : "没有修改文件",
+      payload.verification_status === "passed"
+        ? "正常运行检查已通过"
+        : (checks.length ? "检查结果尚未完全通过" : "这次没有需要运行的检查"),
+      payload.remaining_issue ? `仍需处理：${payload.remaining_issue}` : "",
+    ].filter(Boolean).join("\n");
+    addExecution(payload.completed ? "已经整理好本次结果" : "已保存当前进度", detail, timestamp, payload.completed ? "✓" : "!");
   } else if (name === "controller_cancel_requested") {
     state.cancellationRequested = true;
     els.runStatus.textContent = "正在停止";
@@ -640,10 +675,40 @@ function addProgressMessage() {
     <div class="message-author"><span class="author-dot">AI</span><span>Mini Coder</span></div>
     <div id="activeProgressCard" class="progress-card">
       <div class="progress-card-header"><span class="progress-spinner"></span><span id="progressTitle">正在了解项目并完成任务…</span></div>
+      <div id="taskBriefCard" class="task-brief-card hidden"></div>
       <div id="progressSteps" class="progress-steps"><div class="progress-step"><span class="progress-step-icon">·</span><span>准备开始</span></div></div>
     </div>`;
   els.messageList.appendChild(wrapper);
   scrollConversation();
+}
+
+function renderTaskBrief() {
+  const target = document.getElementById("taskBriefCard");
+  if (!target || !state.taskBrief) return;
+  const brief = state.taskBrief;
+  const assumptions = Array.isArray(brief.assumptions) ? brief.assumptions : [];
+  const checks = Array.isArray(brief.acceptance_checks) ? brief.acceptance_checks : [];
+  target.classList.remove("hidden");
+  target.innerHTML = `
+    <strong>我会这样理解这次任务</strong>
+    <p>${escapeHtml(brief.goal || "完成你刚刚提出的目标")}</p>
+    ${(assumptions.length || checks.length) ? `<details><summary>查看我采用的默认理解</summary><ul>${assumptions.slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}${checks.slice(0, 3).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></details>` : ""}`;
+}
+
+function updatePhaseHeading(phase) {
+  const heading = document.getElementById("progressTitle");
+  if (!heading) return;
+  const labels = {
+    discover: "正在了解项目…",
+    frame: "正在确认任务目标…",
+    locate: "正在找到需要处理的位置…",
+    implement: "正在完成修改…",
+    verify: "正在检查结果…",
+    finish: "正在整理结果…",
+    analyze: "正在了解项目…",
+    summarize: "正在整理结果…",
+  };
+  heading.textContent = labels[phase] || "正在完成任务…";
 }
 
 function renderProgressSteps() {
@@ -1173,6 +1238,12 @@ function overviewDetail(payload) {
   return files.length ? `发现：${files.slice(0, 6).join("、")}` : "已查看主要目录和项目入口";
 }
 
+function taskBriefDetail(payload) {
+  const intentNames = {build: "从零构建", fix: "定位并修复问题", feature: "增加功能", improve: "改进现有项目", explain: "分析并解释"};
+  const assumptions = Array.isArray(payload.assumptions) ? payload.assumptions : [];
+  return `${intentNames[payload.intent] || "完成任务"}${assumptions.length ? `\n默认：${assumptions.slice(0, 3).join("；")}` : ""}`;
+}
+
 function verificationDetail(payload) {
   const duration = Number(payload.duration_seconds || 0).toFixed(2);
   const expected = Array.isArray(payload.expected_exit_codes) ? payload.expected_exit_codes.join("/") : "0";
@@ -1181,8 +1252,11 @@ function verificationDetail(payload) {
 
 function friendlyVerification(payload) {
   const duration = Number(payload.duration_seconds || 0).toFixed(1);
-  if (payload.passed && Number(payload.exit_code) !== 0) {
-    return `程序按预期拒绝了无效输入（退出码 ${payload.exit_code}，${duration} 秒）。`;
+  if (payload.verification_mode === "expected_rejection" && payload.check_passed) {
+    return `无效输入被正确拒绝了；这是一项补充检查，还需要正常运行检查才能完成验收（${duration} 秒）。`;
+  }
+  if (payload.environment_error) {
+    return "检查环境或依赖没有准备好，因此不能把这次运行算作通过。";
   }
   return payload.passed
     ? `检查成功完成（${duration} 秒）。`

@@ -113,6 +113,13 @@ button { color: inherit; }
 .progress-message { width: 100%; }
 .progress-card { width: min(720px, 92%); overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: #fff; box-shadow: 0 8px 26px rgba(34, 49, 84, .05); }
 .progress-card-header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 800; }
+.task-brief-card { padding: 11px 14px; border-bottom: 1px solid var(--border); background: #f8f9ff; color: #3f4b63; font-size: 10px; line-height: 1.55; }
+.task-brief-card strong { color: var(--text); font-size: 10px; }
+.task-brief-card p { margin: 4px 0 0; }
+.task-brief-card details { margin-top: 6px; color: var(--muted); }
+.task-brief-card summary { cursor: pointer; font-weight: 750; }
+.task-brief-card ul { margin: 6px 0 0; padding-left: 17px; }
+.task-brief-card li + li { margin-top: 3px; }
 .progress-spinner { width: 15px; height: 15px; border: 2px solid #d9dff7; border-top-color: var(--blue); border-radius: 50%; animation: spin .9s linear infinite; }
 .progress-card.done .progress-spinner { display: grid; place-items: center; color: #fff; border: 0; background: var(--green); animation: none; }
 .progress-card.done .progress-spinner::after { content: "✓"; font-size: 9px; }

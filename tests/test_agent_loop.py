@@ -58,7 +58,7 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertEqual(session.status, SessionStatus.COMPLETED_UNVERIFIED)
             self.assertEqual(session.verification_status, VerificationStatus.NOT_REQUIRED)
-            self.assertEqual(session.phase, TaskPhase.SUMMARIZE)
+            self.assertEqual(session.phase, TaskPhase.FINISH)
 
     def test_safe_write_shows_diff_before_approval_and_denial_changes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -402,7 +402,7 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertEqual(session.status, SessionStatus.COMPLETED_UNVERIFIED)
             self.assertEqual(session.verification_status, VerificationStatus.UNVERIFIED)
-            self.assertEqual(session.phase, TaskPhase.SUMMARIZE)
+            self.assertEqual(session.phase, TaskPhase.FINISH)
             self.assertIn("Current file changes have not been verified", result.final_text)
 
     def test_successful_real_command_marks_current_changes_verified(self) -> None:
@@ -463,7 +463,7 @@ class AgentLoopTests(unittest.TestCase):
             self.assertIsNotNone(command_record.duration_seconds)
             self.assertIn("completed_verified", result.final_text)
 
-    def test_expected_nonzero_command_completes_as_verified(self) -> None:
+    def test_expected_nonzero_command_is_supporting_not_whole_task_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             store = SessionStore.for_workspace(workspace)
@@ -488,6 +488,7 @@ class AgentLoopTests(unittest.TestCase):
                                     "command": 'python -c "raise SystemExit(2)"',
                                     "purpose": "verify",
                                     "expected_exit_codes": [2],
+                                    "verification_mode": "expected_rejection",
                                 },
                                 raw_arguments="{}",
                             )
@@ -508,11 +509,12 @@ class AgentLoopTests(unittest.TestCase):
 
             session = store.load(result.session_id or "")
             self.assertEqual(result.status, "completed")
-            self.assertEqual(session.status, SessionStatus.COMPLETED_VERIFIED)
-            self.assertEqual(session.verification_status, VerificationStatus.PASSED)
+            self.assertEqual(session.status, SessionStatus.COMPLETED_UNVERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.UNVERIFIED)
             self.assertEqual(session.verification_records[-1].exit_code, 2)
             self.assertEqual(session.verification_records[-1].expected_exit_codes, (2,))
             self.assertTrue(session.verification_records[-1].expectation_met)
+            self.assertFalse(session.verification_records[-1].conclusive)
             self.assertEqual(session.failed_tool_call_count, 0)
 
     def test_failed_verification_overrides_model_completion_claim(self) -> None:

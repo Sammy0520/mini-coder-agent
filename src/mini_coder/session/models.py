@@ -321,7 +321,7 @@ class AgentSession:
     tool_executions: list[ToolExecutionRecord] = field(default_factory=list)
     changes: list[ChangeRecord] = field(default_factory=list)
     undo_history: list[UndoRecord] = field(default_factory=list)
-    phase: TaskPhase = TaskPhase.ANALYZE
+    phase: TaskPhase = TaskPhase.DISCOVER
     verification_status: VerificationStatus = VerificationStatus.NOT_REQUIRED
     verification_records: list[VerificationRecord] = field(default_factory=list)
     change_revision: int = 0
@@ -460,7 +460,7 @@ class AgentSession:
         # with vague messages such as "continue" or "do that".
         self.turn_count += 1
         self.current_step = 0
-        self.phase = TaskPhase.ANALYZE
+        self.phase = TaskPhase.DISCOVER
         self.stop_reason = None
         self.final_text = ""
         self.last_error = None

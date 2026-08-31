@@ -73,13 +73,14 @@ class VerificationTrackerTests(unittest.TestCase):
             VerificationStatus.STALE,
         )
 
-    def test_expected_nonzero_exit_is_a_passed_verification(self) -> None:
+    def test_expected_nonzero_exit_is_supporting_not_conclusive_verification(self) -> None:
         record = VerificationTracker.record(
             tool_execution_id="negative-check",
             arguments={
                 "command": "python -m app invalid-input",
                 "purpose": "verify",
                 "expected_exit_codes": [2],
+                "verification_mode": "expected_rejection",
             },
             result_data={
                 "exit_code": 2,
@@ -88,6 +89,7 @@ class VerificationTrackerTests(unittest.TestCase):
                 "expected_exit_codes": [2],
                 "expectation_met": True,
                 "timed_out": False,
+                "verification_mode": "expected_rejection",
             },
             result_ok=True,
             change_revision=3,
@@ -96,13 +98,14 @@ class VerificationTrackerTests(unittest.TestCase):
         self.assertTrue(record.passed)
         self.assertTrue(record.expectation_met)
         self.assertEqual(record.expected_exit_codes, (2,))
+        self.assertFalse(record.conclusive)
         self.assertEqual(
             VerificationTracker.evaluate(
                 [record],
                 change_revision=3,
                 had_file_modification=True,
             ),
-            VerificationStatus.PASSED,
+            VerificationStatus.UNVERIFIED,
         )
 
     def test_documentation_change_keeps_unrelated_test_current(self) -> None:

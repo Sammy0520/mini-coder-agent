@@ -76,6 +76,16 @@ class VerificationTracker:
                 result_data.get("exit_code") in expected_exit_codes,
             )
         ) and not timed_out
+        verification_mode = str(
+            result_data.get(
+                "verification_mode",
+                arguments.get("verification_mode", "standard"),
+            )
+        )
+        if verification_mode not in {"standard", "expected_rejection"}:
+            verification_mode = "standard"
+        environment_error = bool(result_data.get("environment_error", False))
+        conclusive = verification_mode == "standard" and expected_exit_codes == (0,)
         return VerificationRecord.create(
             tool_execution_id=tool_execution_id,
             command=str(arguments.get("command", "")),
@@ -85,10 +95,13 @@ class VerificationTracker:
             stdout_summary=_summary(result_data.get("stdout", ""), summary_limit),
             stderr_summary=_summary(result_data.get("stderr", ""), summary_limit),
             change_revision=change_revision,
-            passed=bool(result_ok and expectation_met),
+            passed=bool(result_ok and expectation_met and not environment_error),
             timed_out=timed_out,
             expected_exit_codes=expected_exit_codes,
             expectation_met=expectation_met,
+            verification_mode=verification_mode,
+            conclusive=conclusive,
+            environment_error=environment_error,
             scope_paths=_scope_paths(arguments.get("verification_paths")),
             scope_domains=_scope_domains(arguments),
         )
@@ -116,7 +129,31 @@ class VerificationTracker:
     ) -> VerificationStatus:
         current = [record for record in records if record.is_current]
         if current:
-            return VerificationStatus.PASSED if current[-1].passed else VerificationStatus.FAILED
+            # A retry of the same check supersedes its earlier result, while distinct
+            # current checks all remain part of the acceptance gate.
+            latest_by_check: dict[tuple[Any, ...], VerificationRecord] = {}
+            for record in current:
+                key = (
+                    record.command,
+                    record.cwd,
+                    record.expected_exit_codes,
+                    record.verification_mode,
+                    record.scope_paths,
+                    record.scope_domains,
+                )
+                latest_by_check[key] = record
+            effective = list(latest_by_check.values())
+            if any(not record.passed or record.environment_error for record in effective):
+                return VerificationStatus.FAILED
+            # A deliberate invalid-input rejection is useful supporting evidence,
+            # but it cannot by itself prove the edited program works normally.
+            if any(record.passed and record.conclusive for record in effective):
+                return VerificationStatus.PASSED
+            return (
+                VerificationStatus.UNVERIFIED
+                if had_file_modification
+                else VerificationStatus.NOT_REQUIRED
+            )
         if records:
             return VerificationStatus.STALE
         if had_file_modification:

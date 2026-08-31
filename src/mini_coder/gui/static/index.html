@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mini Coder Agent</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260829-7">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260831-1">
 </head>
 <body>
   <div class="app-layout">
@@ -35,11 +35,11 @@
       <section id="conversation" class="conversation" aria-live="polite">
         <div id="welcomeState" class="welcome-state">
           <div class="welcome-mark"><span></span></div><p class="eyebrow">开始协作</p><h3>你想让 Agent 完成什么？</h3>
-          <p>描述目标和验收标准。Agent 会先了解文件夹中的内容，修改前向你确认，完成后运行本地检查。</p>
+          <p>用一句话说想做什么就可以。Agent 会自己了解项目、补全安全的默认理解，修改前向你确认，完成后运行本地检查。</p>
           <div class="prompt-suggestions">
-            <button type="button" data-prompt="阅读这个项目，补充一份清晰的中文快速开始说明，并检查文档中的命令是否正确。">完善项目文档</button>
-            <button type="button" data-prompt="检查现有测试失败的原因，修复问题并运行测试验证。">修复测试问题</button>
-            <button type="button" data-prompt="从零创建一个带测试的简单命令行待办事项应用。">从零创建小项目</button>
+            <button type="button" data-prompt="帮我把这个项目的说明整理得更容易看懂">完善项目文档</button>
+            <button type="button" data-prompt="这个项目运行时报错了，帮我找出原因并修好">修复运行问题</button>
+            <button type="button" data-prompt="帮我做一个简单的本地待办事项应用">从零创建小项目</button>
           </div>
         </div>
         <div id="messageList" class="message-list"></div>
@@ -94,6 +94,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/assets/app.js?v=20260829-8" defer></script>
+  <script src="/assets/app.js?v=20260831-1" defer></script>
 </body>
 </html>

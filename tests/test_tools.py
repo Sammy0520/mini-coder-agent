@@ -259,13 +259,19 @@ class ToolTests(unittest.TestCase):
 
         result = self.execute(
             "run_command",
-            {"command": command, "expected_exit_codes": [2], "purpose": "verify"},
+            {
+                "command": command,
+                "expected_exit_codes": [2],
+                "purpose": "verify",
+                "verification_mode": "expected_rejection",
+            },
         )
 
         self.assertTrue(result.ok, result.data)
         self.assertEqual(result.data["exit_code"], 2)
         self.assertEqual(result.data["expected_exit_codes"], [2])
         self.assertTrue(result.data["expectation_met"])
+        self.assertEqual(result.data["verification_mode"], "expected_rejection")
 
     def test_command_rejects_invalid_expected_exit_codes(self) -> None:
         command = f'"{sys.executable}" -c "print(1)"'

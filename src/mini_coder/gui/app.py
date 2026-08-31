@@ -165,6 +165,24 @@ def _friendly_tool_action(name: str) -> str:
 
 def _session_execution_history(session) -> list[dict]:
     history: list[dict] = []
+    brief = session.working_memory.get("task_brief")
+    if isinstance(brief, dict):
+        assumptions = brief.get("assumptions")
+        history.append(
+            {
+                "title": "已经理解你想完成什么",
+                "details": [
+                    str(brief.get("goal") or session.task),
+                    *(
+                        [f"默认理解：{item}" for item in assumptions[:3]]
+                        if isinstance(assumptions, list)
+                        else []
+                    ),
+                ],
+                "time": session.created_at,
+                "icon": "◎",
+            }
+        )
     if session.workspace_baseline:
         history.append(
             {
@@ -222,7 +240,10 @@ def _session_execution_history(session) -> list[dict]:
         elif execution.name == "run_command":
             verification = verifications.get(execution.execution_id)
             if verification is not None:
-                expected_rejection = verification.passed and verification.exit_code not in {0, None}
+                expected_rejection = (
+                    verification.verification_mode == "expected_rejection"
+                    and verification.passed
+                )
                 title = (
                     "确认程序会正确拒绝无效输入"
                     if expected_rejection
@@ -234,7 +255,8 @@ def _session_execution_history(session) -> list[dict]:
                 )
                 details = [
                     (
-                        f"程序按预期返回了退出码 {verification.exit_code}。"
+                        f"程序按预期返回了退出码 {verification.exit_code}；"
+                        "这是一项补充检查，仍需要正常运行检查。"
                         if expected_rejection
                         else (
                             "测试已经通过。"

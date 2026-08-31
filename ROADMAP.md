@@ -342,7 +342,9 @@ undo_status
 
 ### 8.1 任务阶段
 
-- [x] 在 Session 中记录轻量级任务阶段：`analyze`、`implement`、`verify`、`summarize`。
+- [x] 在 Session 中记录六个任务阶段：`discover`、`frame`、`locate`、`implement`、`verify`、`finish`。
+- [x] 运行时从自然语言识别构建、修复、功能、改进和解释类意图，并形成默认假设与验收条件。
+- [x] 使用同一会话 TaskLedger 保存目标、需求、相关文件、改动、验证证据和未解决项。
 - [x] 阶段用于状态和提示，不把模型限制成僵硬工作流。
 - [x] 用户只要求分析时允许不进入 implement 和 verify。
 
@@ -839,15 +841,12 @@ feat: add local GUI run and approval console
 - [x] 上下文同时使用字符上限和本地 Token 估算控制。
 - [x] 保存 provider 返回的缓存读写、推理 Token、响应 ID 和实际模型标识，并兼容常见的两种缓存计数口径。
 - [x] GUI 执行详情显示当前轮次、简洁操作次数和会话记忆提示；Token 仅留在 Session/评测记录中，不在页面展示。
-- [x] 建立同一 aicode007/模型/推理强度下的 Mini Coder 与 Codex 非 GUI 对比 Runner。
-- [x] 建立含修复、跨文件功能、从零构建、重构和多轮任务的 MiniCoderBench，并使用运行后注入的隐藏验收。
-- [x] 使用真实 provider 完成首个配对任务，并与 aicode007 面板核对调用次数和实际费用。
 
 ## 19. 当前下一步
 
-1. 阶段 B～H 的核心实现、真实模型验收、115 项离线测试、10 项确定性 Eval、两分钟演示和跨平台 CI 已完成。
+1. 阶段 B～H 的核心实现、真实模型验收、完整离线测试、确定性 Eval、两分钟演示和跨平台 CI 已完成。
 2. 阶段 I1 已从公开仓库在全新虚拟环境复现安装、依赖检查、CLI、完整测试、完整 Eval 和演示初始状态，并保存发布候选审计记录。
 3. 仓库所有者已选择 MIT License、公开 description/topics，并确认创建 `v0.1.0` tag/Release；阶段 I1 完成。
 4. 阶段 J 已完成全局 Session 列表、运行控制器、SSE、页面审批、Diff/完整文件、验证面板和同会话连续协作。
 5. Session v7 已完成会话内工作记忆、逐次模型调用统计和 Token-aware 上下文整理；明确不做跨会话记忆。
-6. 首个同源 `boundary-fix` 已完成账单核对；下一步用跨文件功能任务验证轻量执行链路在更复杂修改中能否继续保持正确性和成本优势。
+6. 已加入任务成形、六阶段 TaskLedger、精确编辑恢复、可信验收和预算主动收尾；下一步用真实但简短的自然语言任务做一次完整演示排练。

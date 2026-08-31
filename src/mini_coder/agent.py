@@ -27,6 +27,13 @@ from .messages import ModelResponse, ToolCall
 from .model import ModelClient
 from .prompts import build_system_prompt
 from .redaction import redact_sensitive_text, redact_sensitive_value
+from .tasking import (
+    TaskBrief,
+    create_task_ledger,
+    frame_task,
+    render_task_brief,
+    render_task_ledger,
+)
 from .session import (
     AgentSession,
     SessionStatus,
@@ -116,6 +123,7 @@ class AgentRunner:
         self._run_tool_call_start = 0
         self._run_tool_output_start = 0
         self._run_total_token_start = 0
+        self._completion_reserve_active = False
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
@@ -133,6 +141,12 @@ class AgentRunner:
         self._run_started_at = time.monotonic()
         self._run_id = uuid.uuid4().hex
         self._current_step = 0
+        self._continuing_turn = False
+        self._completion_reserve_active = False
+        self._run_model_call_start = 0
+        self._run_tool_call_start = 0
+        self._run_tool_output_start = 0
+        self._run_total_token_start = 0
         task = redact_sensitive_text(task.strip(), secrets=(self.config.api_key,))
         if session is None and not task:
             return AgentRunResult("invalid_task", "Task must not be empty.", 0)
@@ -142,11 +156,16 @@ class AgentRunner:
                 self.config.workspace,
                 self.tool_context.policy,
             )
+            task_brief = frame_task(task, workspace_overview)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": self.system_prompt},
                 {
                     "role": "developer",
                     "content": render_workspace_overview(workspace_overview),
+                },
+                {
+                    "role": "developer",
+                    "content": render_task_brief(task_brief),
                 },
                 {"role": "user", "content": task},
             ]
@@ -162,6 +181,8 @@ class AgentRunner:
                     messages=messages,
                     workspace_baseline=workspace_overview,
                 )
+                session.working_memory["task_brief"] = task_brief.to_dict()
+                session.working_memory["task_ledger"] = create_task_ledger(task_brief)
                 session.set_status(SessionStatus.RUNNING)
                 self._active_session_id = session.session_id
                 self._persist(session, messages, usage)
@@ -190,9 +211,15 @@ class AgentRunner:
                     "scan": workspace_overview.get("scan", {}),
                 },
             )
+            if session is not None:
+                self._set_phase(session, TaskPhase.FRAME)
+            self._emit("task_framed", task_brief.to_dict())
+            if session is not None:
+                self._set_phase(session, TaskPhase.LOCATE)
         else:
             self._active_session_id = session.session_id
             self._validate_resume(session, task)
+            follow_up_task = task
             self._continuing_turn = bool(task.strip()) and session.status in {
                 SessionStatus.COMPLETED_VERIFIED,
                 SessionStatus.COMPLETED_UNVERIFIED,
@@ -202,6 +229,31 @@ class AgentRunner:
             }
             if self._continuing_turn:
                 session.start_follow_up(task)
+                workspace_overview = inspect_workspace(
+                    self.config.workspace,
+                    self.tool_context.policy,
+                )
+                task_brief = frame_task(follow_up_task, workspace_overview)
+                session.working_memory["task_brief"] = task_brief.to_dict()
+                session.working_memory["task_ledger"] = create_task_ledger(task_brief)
+                self._emit(
+                    "workspace_overview_generated",
+                    {
+                        "manifests": workspace_overview.get("manifests", []),
+                        "test_paths": workspace_overview.get("test_paths", []),
+                        "entry_points": workspace_overview.get("entry_points", []),
+                        "verification_candidates": workspace_overview.get(
+                            "verification_candidates", []
+                        ),
+                        "instruction_files": workspace_overview.get(
+                            "instruction_files", []
+                        ),
+                        "scan": workspace_overview.get("scan", {}),
+                    },
+                )
+                self._set_phase(session, TaskPhase.FRAME)
+                self._emit("task_framed", task_brief.to_dict())
+                self._set_phase(session, TaskPhase.LOCATE)
             task = session.task
             messages = copy.deepcopy(session.messages)
             usage = dict(session.total_usage)
@@ -330,6 +382,7 @@ class AgentRunner:
                             usage,
                             session,
                         )
+                    self._activate_completion_reserve_if_needed(session, step)
                 prepared = self.context.prepare(
                     messages,
                     memory=session.working_memory if session is not None else None,
@@ -474,7 +527,7 @@ class AgentRunner:
                     if final:
                         outcome = self._completion_outcome(session)
                         if session is not None:
-                            self._set_phase(session, TaskPhase.SUMMARIZE)
+                            self._set_phase(session, TaskPhase.FINISH)
                         return self._finish(
                             outcome[0],
                             final,
@@ -810,7 +863,7 @@ class AgentRunner:
 
         OpenAI includes cached input in ``input_tokens``. Some compatible
         dashboards report uncached input and cached input as separate columns.
-        Keeping the raw fields plus the detected convention makes benchmark
+        Keeping the raw fields plus the detected convention makes usage
         reports useful without pretending every provider has identical usage
         semantics.
         """
@@ -1040,6 +1093,50 @@ class AgentRunner:
         ):
             return "max_total_tokens"
         return None
+
+    def _activate_completion_reserve_if_needed(
+        self,
+        session: AgentSession,
+        step: int,
+    ) -> bool:
+        """Reserve the final part of a run for edit, verification, and an answer."""
+        if self._completion_reserve_active:
+            return False
+        model_calls = session.model_call_count - self._run_model_call_start
+        tool_calls = len(session.tool_executions) - self._run_tool_call_start
+        reported_tokens = int(session.total_usage.get("total_tokens", 0))
+        used_tokens = max(0, reported_tokens - self._run_total_token_start)
+        elapsed = self._elapsed_total(session)
+        ratios = {
+            "steps": max(0, step - 1) / max(1, self.config.max_steps),
+            "model_calls": model_calls / max(1, self.config.max_model_calls),
+            "tool_calls": tool_calls / max(1, self.config.max_tool_calls),
+            "tokens": used_tokens / max(1, self.config.max_total_tokens),
+            "time": elapsed / max(1, self.config.max_seconds),
+        }
+        remaining_steps = self.config.max_steps - step + 1
+        remaining_model_calls = self.config.max_model_calls - model_calls
+        trigger = (
+            max(ratios.values()) >= 0.72
+            or remaining_steps <= 3
+            or remaining_model_calls <= 2
+        )
+        if not trigger:
+            return False
+        self._completion_reserve_active = True
+        ledger = session.working_memory.get("task_ledger")
+        if isinstance(ledger, dict):
+            ledger["completion_reserve"] = True
+        self._emit(
+            "completion_reserve_started",
+            {
+                "session_id": session.session_id,
+                "ratios": {name: round(value, 3) for name, value in ratios.items()},
+                "remaining_steps": remaining_steps,
+                "remaining_model_calls": remaining_model_calls,
+            },
+        )
+        return True
 
     def _finish_budget(
         self,
@@ -1504,6 +1601,7 @@ class AgentRunner:
         command = str(call.arguments.get("command", "")).strip()
         cwd = str(call.arguments.get("cwd", "."))
         expected = tuple(call.arguments.get("expected_exit_codes") or [0])
+        verification_mode = str(call.arguments.get("verification_mode", "standard"))
         paths = tuple(call.arguments.get("verification_paths") or [])
         domains = tuple(call.arguments.get("verification_domains") or [])
         for record in reversed(session.verification_records):
@@ -1512,6 +1610,8 @@ class AgentRunner:
             if record.command != command or record.cwd != cwd:
                 continue
             if record.expected_exit_codes != expected:
+                continue
+            if record.verification_mode != verification_mode:
                 continue
             if paths and record.scope_paths != paths:
                 continue
@@ -1536,6 +1636,8 @@ class AgentRunner:
                     "timed_out": False,
                     "expected_exit_codes": list(record.expected_exit_codes),
                     "expectation_met": True,
+                    "verification_mode": record.verification_mode,
+                    "environment_error": record.environment_error,
                     "cached_verification": True,
                 },
             )
@@ -1630,9 +1732,13 @@ class AgentRunner:
                     "command": verification.command,
                     "exit_code": verification.exit_code,
                     "duration_seconds": verification.duration_seconds,
-                    "passed": verification.passed,
+                    "passed": session.verification_status == VerificationStatus.PASSED,
+                    "check_passed": verification.passed,
                     "expected_exit_codes": list(verification.expected_exit_codes),
                     "expectation_met": verification.expectation_met,
+                    "verification_mode": verification.verification_mode,
+                    "conclusive": verification.conclusive,
+                    "environment_error": verification.environment_error,
                     "change_revision": verification.change_revision,
                     "verification_status": session.verification_status.value,
                 },
@@ -1641,6 +1747,7 @@ class AgentRunner:
             if status == ToolExecutionStatus.FAILED:
                 session.failed_tool_call_count += 1
             session.tool_output_chars += len(content)
+            self._update_task_ledger_after_tool(session, call, result, status)
             self._persist(session, messages, usage)
         self._emit(
             "tool_call_completed",
@@ -1853,6 +1960,34 @@ class AgentRunner:
             session.finish_turn(turn_reply)
             self._refresh_working_memory(session, turn_reply)
             self._persist(session, messages, usage)
+            self._emit(
+                "completion_evidence",
+                {
+                    "session_id": session.session_id,
+                    "completed": session_status in {
+                        SessionStatus.COMPLETED_VERIFIED,
+                        SessionStatus.COMPLETED_UNVERIFIED,
+                    },
+                    "changed_files": list(
+                        dict.fromkeys(
+                            item.path
+                            for item in session.changes
+                            if item.undo_status == "active"
+                        )
+                    ),
+                    "verification_status": session.verification_status.value,
+                    "checks": [
+                        {
+                            "command": item.command,
+                            "passed": item.passed,
+                            "conclusive": item.conclusive,
+                        }
+                        for item in session.verification_records
+                        if item.is_current
+                    ][-6:],
+                    "remaining_issue": session.last_error,
+                },
+            )
         if session_status in {
             SessionStatus.COMPLETED_VERIFIED,
             SessionStatus.COMPLETED_UNVERIFIED,
@@ -1899,6 +2034,8 @@ class AgentRunner:
 
     @staticmethod
     def _refresh_working_memory(session: AgentSession, turn_reply: str) -> None:
+        preserved_brief = copy.deepcopy(session.working_memory.get("task_brief"))
+        preserved_ledger = copy.deepcopy(session.working_memory.get("task_ledger"))
         active_changes = [
             item.path for item in session.changes if item.undo_status == "active"
         ]
@@ -1936,8 +2073,20 @@ class AgentRunner:
             "verification": latest_verification,
             "last_outcome": turn_reply[:1_200],
             "session_status": session.status.value,
-            "unresolved_reason": session.last_error or session.stop_reason,
+            "unresolved_reason": session.last_error,
         }
+        if isinstance(preserved_brief, dict):
+            session.working_memory["task_brief"] = preserved_brief
+        if isinstance(preserved_ledger, dict):
+            preserved_ledger["changed_files"] = list(
+                dict.fromkeys(active_changes)
+            )[-30:]
+            preserved_ledger["relevant_files"] = relevant_files[-30:]
+            preserved_ledger["phase"] = session.phase.value
+            preserved_ledger["unresolved"] = (
+                [session.last_error] if session.last_error else []
+            )
+            session.working_memory["task_ledger"] = preserved_ledger
 
     @staticmethod
     def _acceptance_context(session: AgentSession) -> dict[str, Any]:
@@ -1950,7 +2099,12 @@ class AgentRunner:
             ),
             session.task,
         )
-        requirements = AgentRunner._extract_acceptance_requirements(latest_request)
+        brief = TaskBrief.from_dict(session.working_memory.get("task_brief"))
+        requirements = (
+            list(brief.acceptance_checks)
+            if brief is not None
+            else AgentRunner._extract_acceptance_requirements(latest_request)
+        )
         active_paths = list(
             dict.fromkeys(
                 item.path for item in session.changes if item.undo_status == "active"
@@ -1999,7 +2153,67 @@ class AgentRunner:
                 "or repeated tests."
             ),
         ]
-        return {"role": "developer", "content": "\n".join(lines)[:3_000]}
+        ledger_text = render_task_ledger(session.working_memory.get("task_ledger"))
+        if ledger_text:
+            lines.extend(["", ledger_text])
+        return {"role": "developer", "content": "\n".join(lines)[:5_000]}
+
+    @staticmethod
+    def _ledger_add(ledger: dict[str, Any], key: str, value: str, limit: int) -> None:
+        items = ledger.setdefault(key, [])
+        if not isinstance(items, list):
+            items = []
+            ledger[key] = items
+        compact = " ".join(value.strip().split())[:500]
+        if compact and compact not in items:
+            items.append(compact)
+        del items[:-limit]
+
+    def _update_task_ledger_after_tool(
+        self,
+        session: AgentSession,
+        call: ToolCall,
+        result: ToolResult,
+        status: ToolExecutionStatus,
+    ) -> None:
+        ledger = session.working_memory.get("task_ledger")
+        if not isinstance(ledger, dict):
+            return
+        arguments = call.arguments or {}
+        path = arguments.get("path") or arguments.get("directory")
+        if result.ok and call.name in {"read_file", "list_files", "search_text"}:
+            if isinstance(path, str):
+                self._ledger_add(ledger, "relevant_files", path, 30)
+        if result.ok and call.name in {"write_file", "edit_file"}:
+            if isinstance(path, str):
+                self._ledger_add(ledger, "changed_files", path, 30)
+                self._ledger_add(
+                    ledger,
+                    "decisions",
+                    f"Applied a focused change to {path}",
+                    16,
+                )
+        if call.name == "run_command" and self.verification_tracker.is_verification_command(
+            arguments
+        ):
+            mode = str(result.data.get("verification_mode", "standard"))
+            state = "passed" if result.ok else "failed"
+            self._ledger_add(
+                ledger,
+                "verification",
+                f"{state}: {str(arguments.get('command') or '')[:220]} ({mode})",
+                12,
+            )
+        if status == ToolExecutionStatus.FAILED:
+            self._ledger_add(ledger, "unresolved", result.message, 8)
+        elif result.ok:
+            unresolved = ledger.get("unresolved")
+            if isinstance(unresolved, list) and call.name in {
+                "write_file",
+                "edit_file",
+                "run_command",
+            }:
+                ledger["unresolved"] = unresolved[-4:]
 
     @staticmethod
     def _insert_progress_context(
@@ -2145,6 +2359,9 @@ class AgentRunner:
             return
         previous = session.phase
         session.set_phase(phase)
+        ledger = session.working_memory.get("task_ledger")
+        if isinstance(ledger, dict):
+            ledger["phase"] = phase.value
         self._emit(
             "phase_changed",
             {

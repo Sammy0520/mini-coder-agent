@@ -22,7 +22,7 @@ class RunCommandTool(Tool):
         "Run tests, builds, formatters, or other project commands in the host's default shell. "
         "The agent Python environment is first on PATH. Use dedicated file/search tools instead "
         "of shell-based searching, patching, or source-file writes. For negative tests, declare "
-        "the accepted process codes with expected_exit_codes."
+        "verification_mode='expected_rejection' and declare the accepted process codes."
     )
     risk = RiskLevel.EXECUTE
     parameters = {
@@ -35,6 +35,16 @@ class RunCommandTool(Tool):
                 "type": "string",
                 "enum": ["inspect", "verify", "other"],
                 "description": "Use 'verify' for tests, builds, linters, and other acceptance checks",
+            },
+            "verification_mode": {
+                "type": "string",
+                "enum": ["standard", "expected_rejection"],
+                "description": (
+                    "Standard checks must exit 0. Use expected_rejection only when the "
+                    "acceptance criterion is that invalid user input is rejected with a "
+                    "specific non-zero exit code. A rejection check is supporting evidence, "
+                    "not sufficient whole-task verification."
+                ),
             },
             "expected_exit_codes": {
                 "type": "array",
@@ -77,6 +87,20 @@ class RunCommandTool(Tool):
         if len(command) > 4000:
             raise ToolError("command is too long")
         expected_exit_codes = _expected_exit_codes(arguments.get("expected_exit_codes"))
+        verification_mode = arguments.get("verification_mode", "standard")
+        if verification_mode not in {"standard", "expected_rejection"}:
+            raise ToolError("verification_mode must be standard or expected_rejection")
+        if verification_mode == "standard" and expected_exit_codes != [0]:
+            raise ToolError(
+                "standard verification must use expected_exit_codes [0]; use "
+                "verification_mode='expected_rejection' for a deliberate negative-path check"
+            )
+        if verification_mode == "expected_rejection" and (
+            0 in expected_exit_codes or not any(code != 0 for code in expected_exit_codes)
+        ):
+            raise ToolError(
+                "expected_rejection requires one or more non-zero expected_exit_codes"
+            )
         cwd = context.policy.resolve(arguments.get("cwd", "."), must_exist=True)
         if not cwd.is_dir():
             raise ToolError("cwd must be a directory")
@@ -181,6 +205,8 @@ class RunCommandTool(Tool):
                     "expected_side_effects": assessment.expected_side_effects,
                     "expected_exit_codes": expected_exit_codes,
                     "expectation_met": False,
+                    "verification_mode": verification_mode,
+                    "environment_error": False,
                 },
             )
         except KeyboardInterrupt:
@@ -199,7 +225,11 @@ class RunCommandTool(Tool):
         stderr_text, stderr_truncated = _truncate_stream(
             redact_sensitive_text(stderr), per_stream
         )
-        expectation_met = process.returncode in expected_exit_codes
+        environment_error = process.returncode != 0 and _looks_like_environment_error(
+            stdout_text,
+            stderr_text,
+        )
+        expectation_met = process.returncode in expected_exit_codes and not environment_error
         _invalidate_after_command(context, assessment.level)
         return ToolResult(
             expectation_met,
@@ -207,8 +237,13 @@ class RunCommandTool(Tool):
                 f"Command met the expected exit code {process.returncode}"
                 if expectation_met
                 else (
-                    f"Command exited with code {process.returncode}; expected one of "
-                    f"{expected_exit_codes}"
+                    "Command could not be accepted as verification because the runtime or "
+                    "dependencies were unavailable"
+                    if environment_error
+                    else (
+                        f"Command exited with code {process.returncode}; expected one of "
+                        f"{expected_exit_codes}"
+                    )
                 )
             ),
             {
@@ -225,6 +260,8 @@ class RunCommandTool(Tool):
                 "expected_side_effects": assessment.expected_side_effects,
                 "expected_exit_codes": expected_exit_codes,
                 "expectation_met": expectation_met,
+                "verification_mode": verification_mode,
+                "environment_error": environment_error,
             },
         )
 
@@ -286,6 +323,22 @@ def _expected_exit_codes(value: Any) -> list[int]:
     if len(result) != len(value):
         raise ToolError("expected_exit_codes must not contain duplicates")
     return result
+
+
+_ENVIRONMENT_ERROR_MARKERS = (
+    "modulenotfounderror:",
+    "importerror:",
+    "no module named ",
+    "command not found",
+    "is not recognized as an internal or external command",
+    "could not find an executable",
+    "failed to spawn",
+)
+
+
+def _looks_like_environment_error(stdout: str, stderr: str) -> bool:
+    combined = f"{stdout}\n{stderr}".casefold()
+    return any(marker in combined for marker in _ENVIRONMENT_ERROR_MARKERS)
 
 
 def _as_text(value: str | bytes | None, encoding: str) -> str:
