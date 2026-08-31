@@ -109,6 +109,9 @@ def provider_preflight(
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            # Some OpenAI-compatible gateways reject urllib's default
+            # Python-urllib User-Agent before inspecting the API request.
+            "User-Agent": "openai-python/2.x mini-coder-benchmark/1.0",
         },
         method="POST",
     )

@@ -207,13 +207,18 @@ class ClawUsageTests(unittest.TestCase):
         with patch(
             "benchmarks.claw_swe_bench.support.urllib.request.urlopen",
             side_effect=error,
-        ):
+        ) as urlopen:
             with self.assertRaises(ProviderPreflightError) as caught:
                 provider_preflight(
                     api_key="secret-test-key",
                     base_url="https://api.example.test",
                     model="model",
                 )
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.get_header("User-agent"),
+            "openai-python/2.x mini-coder-benchmark/1.0",
+        )
         self.assertEqual(caught.exception.category, "billing")
         self.assertNotIn("secret-test-key", str(caught.exception))
 
