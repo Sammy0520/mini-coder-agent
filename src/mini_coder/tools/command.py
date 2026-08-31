@@ -44,7 +44,9 @@ class RunCommandTool(Tool):
                 "uniqueItems": True,
                 "description": (
                     "Process exit codes that mean this command behaved as expected; default [0]. "
-                    "Use a non-zero value for a deliberate negative-path acceptance check."
+                    "Use a non-zero value only for a deliberate negative-path acceptance check. "
+                    "Never use it to reclassify a test failure, import error, missing dependency, "
+                    "or unavailable environment as a passing verification."
                 ),
             },
             "verification_paths": {
@@ -96,7 +98,10 @@ class RunCommandTool(Tool):
             process = subprocess.Popen(
                 command,
                 cwd=cwd,
-                env=_command_environment(context.runtime_directory),
+                env=_command_environment(
+                    context.runtime_directory,
+                    preserve_project_path=context.preserve_project_command_path,
+                ),
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -229,24 +234,29 @@ def _invalidate_after_command(context: ToolContext, risk: CommandRisk) -> None:
         context.invalidate_observations()
 
 
-def _command_environment(agent_runtime_directory: Path | None = None) -> dict[str, str]:
+def _command_environment(
+    agent_runtime_directory: Path | None = None,
+    *,
+    preserve_project_path: bool = False,
+) -> dict[str, str]:
     """Build a predictable child environment without exposing model credentials."""
     environment = os.environ.copy()
-    python_runtime_directory = str(Path(sys.executable).absolute().parent)
-    existing_path = environment.get("PATH", "")
-    path_entries = [entry for entry in existing_path.split(os.pathsep) if entry]
-    runtime_key = os.path.normcase(os.path.abspath(python_runtime_directory))
-    path_entries = [
-        entry
-        for entry in path_entries
-        if os.path.normcase(os.path.abspath(entry)) != runtime_key
-    ]
-    environment["PATH"] = os.pathsep.join([python_runtime_directory, *path_entries])
+    if not preserve_project_path:
+        python_runtime_directory = str(Path(sys.executable).absolute().parent)
+        existing_path = environment.get("PATH", "")
+        path_entries = [entry for entry in existing_path.split(os.pathsep) if entry]
+        runtime_key = os.path.normcase(os.path.abspath(python_runtime_directory))
+        path_entries = [
+            entry
+            for entry in path_entries
+            if os.path.normcase(os.path.abspath(entry)) != runtime_key
+        ]
+        environment["PATH"] = os.pathsep.join([python_runtime_directory, *path_entries])
 
-    if os.path.normcase(os.path.abspath(sys.prefix)) != os.path.normcase(
-        os.path.abspath(sys.base_prefix)
-    ):
-        environment["VIRTUAL_ENV"] = str(Path(sys.prefix).absolute())
+        if os.path.normcase(os.path.abspath(sys.prefix)) != os.path.normcase(
+            os.path.abspath(sys.base_prefix)
+        ):
+            environment["VIRTUAL_ENV"] = str(Path(sys.prefix).absolute())
 
     # Project commands should not automatically inherit the credential used to
     # operate the coding model. Tests that genuinely need a key can receive a

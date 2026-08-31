@@ -616,6 +616,49 @@ class CommandRiskApprovalTests(unittest.TestCase):
             self.assertEqual(session.status, SessionStatus.COMPLETED_VERIFIED)
             self.assertEqual(session.tool_executions[0].risk, "workspace_write")
 
+    def test_disposable_auto_mode_can_opt_in_to_unknown_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            marker = workspace / "benchmark-marker.txt"
+            command = (
+                f'python -c "from pathlib import Path; '
+                f"Path(r'{marker}').write_text('ok')\""
+            )
+            model = FaultModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-benchmark-unknown",
+                                name="run_command",
+                                arguments={"command": command, "purpose": "other"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Done."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(
+                    workspace,
+                    approval_policy=ApprovalPolicy.AUTO,
+                    auto_approve_unknown_commands=True,
+                ),
+                session_store=store,
+            )
+
+            result = runner.run("Run a command in a disposable benchmark container")
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
+            session = store.load(result.session_id or "")
+            self.assertTrue(session.tool_executions[0].approval_granted)
+            self.assertEqual(session.tool_executions[0].risk, "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

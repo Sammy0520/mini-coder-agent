@@ -22,6 +22,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--phase", choices=["phase1", "phase2"], default="phase1")
     parser.add_argument(
+        "--pair",
+        type=int,
+        choices=range(1, 9),
+        help="Pull only one preregistered pair image",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -36,7 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     rows = sorted(
-        (row for row in manifest["instances"] if row["phase"] == args.phase),
+        (
+            row
+            for row in manifest["instances"]
+            if row["phase"] == args.phase
+            and (args.pair is None or row["pair_order"] == args.pair)
+        ),
         key=lambda row: row["pair_order"],
     )
     missing: list[str] = []

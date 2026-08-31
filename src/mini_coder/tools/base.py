@@ -24,6 +24,7 @@ class ToolContext:
     max_output_chars: int = 12_000
     cancellation_requested: Callable[[], bool] | None = None
     runtime_directory: Path | None = None
+    preserve_project_command_path: bool = False
     read_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     search_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     observation_revision: int = 0

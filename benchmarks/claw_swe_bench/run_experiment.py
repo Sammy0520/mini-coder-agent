@@ -46,6 +46,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--auth-file", type=Path)
     parser.add_argument("--phase", choices=["phase1", "phase2", "all"], default="phase1")
+    parser.add_argument(
+        "--pair",
+        type=int,
+        choices=range(1, 9),
+        help="Run only one preregistered pair within the selected phase",
+    )
     parser.add_argument("--agent", choices=["mini", "codex", "both"], default="both")
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--base-url", default="https://api.aicode007.com")
@@ -63,11 +69,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _schedule(manifest: dict[str, Any], phase: str, agent: str) -> list[dict[str, Any]]:
+def _schedule(
+    manifest: dict[str, Any],
+    phase: str,
+    agent: str,
+    pair: int | None = None,
+) -> list[dict[str, Any]]:
     rows = [
         row
         for row in manifest["instances"]
-        if phase == "all" or row["phase"] == phase
+        if (phase == "all" or row["phase"] == phase)
+        and (pair is None or row["pair_order"] == pair)
     ]
     rows.sort(key=lambda row: (row["phase"], row["pair_order"]))
     schedule: list[dict[str, Any]] = []
@@ -145,7 +157,9 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("manifest is not marked as preregistered")
     if _sha256(args.parquet) != EXPECTED_PARQUET_SHA256:
         raise RuntimeError("Lite parquet does not match the preregistered dataset revision")
-    schedule = _schedule(manifest, args.phase, args.agent)
+    if args.phase == "all" and args.pair is not None:
+        raise ValueError("--pair requires --phase phase1 or --phase phase2")
+    schedule = _schedule(manifest, args.phase, args.agent, args.pair)
     _print_schedule(schedule)
     if args.preflight:
         return _preflight(args, schedule)

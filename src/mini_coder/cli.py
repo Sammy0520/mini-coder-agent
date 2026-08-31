@@ -69,6 +69,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Auto-approve writes and commands; use only in a disposable workspace",
     )
+    parser.add_argument(
+        "--preserve-project-command-path",
+        action="store_true",
+        help="Run project commands with the workspace/container PATH instead of Agent Python",
+    )
+    parser.add_argument(
+        "--auto-approve-unknown-commands",
+        action="store_true",
+        help="In --auto mode, permit unknown commands; use only inside a disposable container",
+    )
+    parser.add_argument(
+        "--external-evaluation",
+        action="store_true",
+        help="Allow an unverified patch to finish; an external evaluator decides correctness",
+    )
     parser.add_argument("--log", type=Path, help="Optional JSONL event log path")
     parser.add_argument(
         "--resume",
@@ -202,7 +217,14 @@ def main(argv: list[str] | None = None) -> int:
             max_total_tool_output_chars=args.max_total_tool_output,
             max_total_tokens=args.max_total_tokens,
             max_model_retries=args.max_retries,
+            preserve_project_command_path=args.preserve_project_command_path,
+            auto_approve_unknown_commands=args.auto_approve_unknown_commands,
+            external_evaluation=args.external_evaluation,
         )
+        if args.auto_approve_unknown_commands and not args.auto:
+            raise ConfigurationError(
+                "--auto-approve-unknown-commands requires --auto"
+            )
         config.validate_for_model()
         if resumed_session is not None:
             _validate_resume_model(resumed_session, config)

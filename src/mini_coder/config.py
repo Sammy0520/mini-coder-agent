@@ -92,6 +92,9 @@ class AgentConfig:
     max_response_tool_calls: int = 8
     max_response_write_calls: int = 3
     max_response_write_chars: int = 18_000
+    preserve_project_command_path: bool = False
+    auto_approve_unknown_commands: bool = False
+    external_evaluation: bool = False
 
     def __post_init__(self) -> None:
         positive_fields = {
@@ -157,6 +160,9 @@ class AgentConfig:
         max_total_tool_output_chars: int | None = None,
         max_total_tokens: int | None = None,
         max_model_retries: int | None = None,
+        preserve_project_command_path: bool = False,
+        auto_approve_unknown_commands: bool = False,
+        external_evaluation: bool = False,
     ) -> "AgentConfig":
         file_data = _load_toml(config_path)
         provider_name = file_data.get("model_provider")
@@ -240,6 +246,9 @@ class AgentConfig:
                 if max_total_tokens is not None
                 else _env_int("CODING_AGENT_MAX_TOTAL_TOKENS", 500_000)
             ),
+            preserve_project_command_path=preserve_project_command_path,
+            auto_approve_unknown_commands=auto_approve_unknown_commands,
+            external_evaluation=external_evaluation,
             max_context_chars=_env_int("CODING_AGENT_CONTEXT_CHARS", 80_000),
             max_context_tokens=_env_int("CODING_AGENT_CONTEXT_TOKENS", 20_000),
             repeated_call_limit=_env_int("CODING_AGENT_REPEATED_CALL_LIMIT", 3, minimum=2),

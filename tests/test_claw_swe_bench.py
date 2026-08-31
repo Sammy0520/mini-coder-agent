@@ -6,13 +6,45 @@ import unittest
 from pathlib import Path
 
 from benchmarks.claw_swe_bench.preregister import LANGUAGES, build_manifest
-from benchmarks.claw_swe_bench.evaluate_experiment import _jobs
+from benchmarks.claw_swe_bench.evaluate_experiment import (
+    _jobs,
+    _load_official_report,
+)
 from benchmarks.claw_swe_bench.pull_images import sweagent_image
 from benchmarks.claw_swe_bench.run_experiment import _schedule
 from benchmarks.claw_swe_bench.support import codex_metrics, mini_session_metrics, read_jsonl
 
 
 class ClawPreregistrationTests(unittest.TestCase):
+    def test_official_report_is_bound_to_prediction_model_and_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            predictions = root / "predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "instance_id": "example__repo-1",
+                        "model_name_or_path": "vendor/model",
+                        "model_patch": "patch",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            report = root / "vendor__model.pilot-eval.json"
+            report.write_text(
+                json.dumps(
+                    {
+                        "resolved_ids": ["example__repo-1"],
+                        "incomplete_ids": [],
+                        "error_ids": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = _load_official_report(root, "pilot-eval", predictions)
+            self.assertEqual(loaded["resolved_ids"], ["example__repo-1"])
+
     def test_official_sweagent_image_name(self) -> None:
         self.assertEqual(
             sweagent_image("django__django-11885"),
@@ -57,6 +89,24 @@ class ClawPreregistrationTests(unittest.TestCase):
             pair = schedule[index : index + 2]
             self.assertEqual(pair[0]["instance_id"], pair[1]["instance_id"])
             self.assertNotEqual(pair[0]["agent"], pair[1]["agent"])
+
+    def test_schedule_can_select_one_pair(self) -> None:
+        rows = [
+            {
+                "instance_id": f"{language.lower()}-{index}",
+                "language": language,
+                "repo": "example/repo",
+                "source_dataset": "multilingual",
+            }
+            for language in LANGUAGES
+            for index in range(10)
+        ]
+        schedule = _schedule(
+            build_manifest(rows, created_at="fixed"), "phase1", "both", pair=3
+        )
+        self.assertEqual(len(schedule), 2)
+        self.assertEqual({row["pair_order"] for row in schedule}, {3})
+        self.assertEqual(len({row["instance_id"] for row in schedule}), 1)
 
     def test_evaluation_jobs_split_pinned_sources_for_each_agent(self) -> None:
         rows = [

@@ -563,6 +563,55 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(session.verification_status, VerificationStatus.FAILED)
             self.assertIn("latest verification command failed", result.final_text)
 
+    def test_external_evaluation_keeps_failed_local_check_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-write-external-eval",
+                                name="write_file",
+                                arguments={"path": "result.txt", "content": "candidate\n"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-blocked-local-check",
+                                name="run_command",
+                                arguments={
+                                    "command": 'python -c "raise SystemExit(3)"',
+                                    "purpose": "verify",
+                                },
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Local verification is unavailable; submit the patch."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace, external_evaluation=True),
+                approval_callback=lambda tool, arguments: True,
+                session_store=store,
+            )
+
+            result = runner.run("Produce a candidate patch for external evaluation")
+
+            session = store.load(result.session_id or "")
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_UNVERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.FAILED)
+            self.assertEqual(session.stop_reason, "model_completed_external_evaluation")
+            self.assertIn("external evaluation", result.final_text)
+
     def test_change_after_successful_verification_makes_it_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

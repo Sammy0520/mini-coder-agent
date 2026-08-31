@@ -121,6 +121,7 @@ class AgentRunner:
             command_timeout_seconds=config.command_timeout_seconds,
             max_output_chars=config.max_tool_output_chars,
             cancellation_requested=cancellation_callback,
+            preserve_project_command_path=config.preserve_project_command_path,
         )
 
     def run(
@@ -1311,6 +1312,10 @@ class AgentRunner:
                 and (
                     command_assessment is None
                     or command_assessment.auto_approvable
+                    or (
+                        self.config.auto_approve_unknown_commands
+                        and command_assessment.level == CommandRisk.UNKNOWN
+                    )
                 )
             ):
                 approved = True
@@ -1786,7 +1791,12 @@ class AgentRunner:
         if command_assessment is not None and command_assessment.level == CommandRisk.READ_ONLY:
             return False
         if self.config.approval_policy == ApprovalPolicy.AUTO and (
-            command_assessment is None or command_assessment.auto_approvable
+            command_assessment is None
+            or command_assessment.auto_approvable
+            or (
+                self.config.auto_approve_unknown_commands
+                and command_assessment.level == CommandRisk.UNKNOWN
+            )
         ):
             return False
         return True
@@ -2087,6 +2097,16 @@ class AgentRunner:
             )
         verification = session.refresh_verification_status()
         if verification == VerificationStatus.FAILED:
+            active_changes = [
+                item for item in session.changes if item.undo_status == "active"
+            ]
+            if self.config.external_evaluation and active_changes:
+                return (
+                    "completed",
+                    SessionStatus.COMPLETED_UNVERIFIED,
+                    "model_completed_external_evaluation",
+                    "Local verification failed; correctness requires external evaluation.",
+                )
             return (
                 "verification_failed",
                 SessionStatus.FAILED,

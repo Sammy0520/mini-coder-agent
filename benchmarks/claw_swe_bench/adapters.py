@@ -67,11 +67,17 @@ class MiniCoderAdapter(BaseClawAdapter):
             "MINI_CODER_ENV_PATH",
         )
         self.python = f"{self.environment}/bin/python"
+        self.source_root = _require_path(
+            str(Path(__file__).resolve().parents[2] / "src"),
+            "Mini Coder source root",
+        )
+        self.container_source_root = "/opt/mini-coder-src"
 
     def container_run_args(self, instance_id: str) -> list[str]:
         return [
             "-v", f"{self.python_home}:{self.python_home}:ro",
             "-v", f"{self.environment}:{self.environment}:ro",
+            "-v", f"{self.source_root}:{self.container_source_root}:ro",
             *_proxy_args(),
         ]
 
@@ -104,6 +110,7 @@ class MiniCoderAdapter(BaseClawAdapter):
             "-e", "OPENAI_API_KEY",
             "-e", "HOME=/tmp/mini-coder-home",
             "-e", "CODING_AGENT_PROMPT_CACHE_KEY=claw-swe-bench-lite-v1",
+            "-e", f"PYTHONPATH={self.container_source_root}",
             container_name,
             self.python, "-m", "mini_coder",
             "--workspace", "/testbed",
@@ -116,8 +123,12 @@ class MiniCoderAdapter(BaseClawAdapter):
             "--max-seconds", str(self.timeout),
             "--max-model-calls", str(self.max_turns or 300),
             "--max-tool-calls", str((self.max_turns or 300) * 4),
+            "--max-total-tokens", "240000",
             "--max-retries", "1",
             "--auto",
+            "--preserve-project-command-path",
+            "--auto-approve-unknown-commands",
+            "--external-evaluation",
             "--log", container_event_path,
             prompt,
         ]
@@ -200,12 +211,26 @@ class CodexAdapter(BaseClawAdapter):
             "CODEX_BIN",
             directory=False,
         )
+        self.code_mode_host = _require_path(
+            os.environ.get(
+                "CODEX_CODE_MODE_HOST",
+                str(Path(self.executable).with_name("codex-code-mode-host")),
+            ),
+            "CODEX_CODE_MODE_HOST",
+            directory=False,
+        )
 
     def container_run_args(self, instance_id: str) -> list[str]:
         return [
             "-v", f"{self.executable}:{self.executable}:ro",
+            "-v", f"{self.code_mode_host}:{self.code_mode_host}:ro",
             *_proxy_args(),
         ]
+
+    def post_container_start(self, workspace) -> None:
+        workspace.run_in_container(
+            "mkdir -p /root/.codex && chmod 700 /root/.codex"
+        )
 
     def send_task(
         self,
@@ -234,8 +259,8 @@ class CodexAdapter(BaseClawAdapter):
         command = [
             "docker", "exec", "-i", "-w", "/testbed",
             "-e", "OPENAI_API_KEY",
-            "-e", "HOME=/tmp/codex-home",
-            "-e", "CODEX_HOME=/tmp/codex-home",
+            "-e", "HOME=/root",
+            "-e", "CODEX_HOME=/root/.codex",
             "-e", "NO_COLOR=1",
             container_name,
             self.executable,

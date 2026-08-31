@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 from mini_coder.exceptions import PathSafetyError
 from mini_coder.tools import create_default_registry
+from mini_coder.tools.command import _command_environment
 from mini_coder.tools.command_risk import CommandRisk, assess_command
 from mini_coder.tools.base import ToolContext
 from mini_coder.tools.safety import WorkspacePolicy
@@ -373,6 +374,17 @@ class ToolTests(unittest.TestCase):
         actual = os.path.normcase(os.path.abspath(result.data["stdout"].strip()))
         expected = os.path.normcase(os.path.abspath(sys.executable))
         self.assertEqual(actual, expected)
+
+    def test_command_environment_can_preserve_project_path(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"PATH": "project-bin", "VIRTUAL_ENV": "project-environment"},
+            clear=False,
+        ):
+            environment = _command_environment(preserve_project_path=True)
+
+        self.assertEqual(environment["PATH"], "project-bin")
+        self.assertEqual(environment["VIRTUAL_ENV"], "project-environment")
 
     def test_command_does_not_inherit_model_api_keys(self) -> None:
         command = (
