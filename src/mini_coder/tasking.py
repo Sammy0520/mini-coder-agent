@@ -68,8 +68,8 @@ class TaskBrief:
         )
 
 
-def create_task_ledger(brief: TaskBrief) -> dict[str, Any]:
-    """Create compact durable state for one conversation turn.
+def create_turn_state(brief: TaskBrief) -> dict[str, Any]:
+    """Create the single compact durable state for one conversation turn.
 
     The runtime, rather than the model, owns this structure. It is intentionally
     JSON-shaped so schema-v8 sessions can persist it inside working_memory.
@@ -78,33 +78,52 @@ def create_task_ledger(brief: TaskBrief) -> dict[str, Any]:
         "version": 1,
         "intent": brief.intent.value,
         "goal": brief.goal[:1_200],
+        "workspace_kind": brief.workspace_kind,
         "phase": "frame",
         "requirements": list(brief.acceptance_checks),
         "assumptions": list(brief.assumptions),
+        "clarification_needed": brief.clarification_needed,
+        "clarification_question": brief.clarification_question,
         "decisions": [],
         "relevant_files": [],
         "changed_files": [],
         "verification": [],
         "unresolved": [],
         "completion_reserve": False,
+        "last_outcome": "",
+        "session_status": "running",
     }
 
 
-def render_task_ledger(ledger: Any) -> str:
-    if not isinstance(ledger, dict):
+def turn_state_from_memory(memory: Any) -> dict[str, Any] | None:
+    """Read new state or normalize schema-v8 state created before TurnState."""
+    if not isinstance(memory, dict):
+        return None
+    current = memory.get("turn_state")
+    if isinstance(current, dict):
+        return current
+    legacy = memory.get("task_ledger")
+    if isinstance(legacy, dict):
+        return legacy
+    brief = TaskBrief.from_dict(memory.get("task_brief"))
+    return create_turn_state(brief) if brief is not None else None
+
+
+def render_turn_state(state: Any) -> str:
+    if not isinstance(state, dict):
         return ""
 
     def values(name: str, limit: int = 8) -> list[str]:
-        raw = ledger.get(name, [])
+        raw = state.get(name, [])
         if not isinstance(raw, list):
             return []
         return [str(item)[:300] for item in raw[-limit:] if str(item).strip()]
 
     lines = [
-        "Runtime task ledger (authoritative compact state for this turn):",
-        f"- Goal: {str(ledger.get('goal') or '')[:1_200]}",
-        f"- Intent: {str(ledger.get('intent') or 'feature')}",
-        f"- Current phase: {str(ledger.get('phase') or 'locate')}",
+        "Previous turn state (compact evidence, not a new user request):",
+        f"- Goal: {str(state.get('goal') or '')[:1_200]}",
+        f"- Intent: {str(state.get('intent') or 'feature')}",
+        f"- Final phase: {str(state.get('phase') or 'finish')}",
     ]
     for label, key in (
         ("Requirements", "requirements"),
@@ -116,12 +135,16 @@ def render_task_ledger(ledger: Any) -> str:
     ):
         items = values(key)
         lines.append(f"- {label}: " + (" | ".join(items) if items else "none yet"))
-    if ledger.get("completion_reserve") is True:
-        lines.append(
-            "- Completion reserve is active: stop broad discovery, make only the smallest "
-            "remaining edits, run one relevant normal verification, and finish."
-        )
+    last_outcome = str(state.get("last_outcome") or "").strip()
+    if last_outcome:
+        lines.append(f"- Last outcome: {last_outcome[:800]}")
     return "\n".join(lines)[:4_000]
+
+
+# Compatibility for callers and saved sessions created by the first staged-workflow
+# implementation. New code stores only working_memory.turn_state.
+create_task_ledger = create_turn_state
+render_task_ledger = render_turn_state
 
 
 _FIX_MARKERS = (

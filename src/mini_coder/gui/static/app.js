@@ -286,7 +286,8 @@ async function loadSession(sessionId) {
       count: 1,
     }));
     state.readGroup = null;
-    state.taskBrief = data.working_memory?.task_brief || null;
+    state.taskBrief =
+      data.working_memory?.turn_state || data.working_memory?.task_brief || null;
     state.phase = data.phase || "finish";
     state.changesExpanded = false;
     state.changes = new Map();
@@ -687,7 +688,9 @@ function renderTaskBrief() {
   if (!target || !state.taskBrief) return;
   const brief = state.taskBrief;
   const assumptions = Array.isArray(brief.assumptions) ? brief.assumptions : [];
-  const checks = Array.isArray(brief.acceptance_checks) ? brief.acceptance_checks : [];
+  const checks = Array.isArray(brief.acceptance_checks)
+    ? brief.acceptance_checks
+    : (Array.isArray(brief.requirements) ? brief.requirements : []);
   target.classList.remove("hidden");
   target.innerHTML = `
     <strong>我会这样理解这次任务</strong>

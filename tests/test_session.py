@@ -478,12 +478,15 @@ class SessionRunnerTests(unittest.TestCase):
                 [item["role"] for item in restored.conversation],
                 ["user", "assistant", "user", "assistant"],
             )
-            self.assertIn("Session working memory", rendered_request)
+            self.assertIn("Previous turn state", rendered_request)
             self.assertIn("Now add a follow-up feature", rendered_request)
             self.assertNotIn("old output", rendered_request)
+            self.assertIn("turn_state", restored.working_memory)
+            self.assertNotIn("task_brief", restored.working_memory)
+            self.assertNotIn("task_ledger", restored.working_memory)
             self.assertEqual(restored.total_usage["total_tokens"], 22)
             self.assertEqual([item["turn"] for item in restored.model_call_records], [1, 2])
-            self.assertTrue(restored.model_call_records[-1]["compacted"])
+            self.assertFalse(restored.model_call_records[-1]["compacted"])
 
     def test_resume_invalidates_verification_after_external_file_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

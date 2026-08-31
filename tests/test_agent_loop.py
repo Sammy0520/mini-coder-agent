@@ -873,7 +873,7 @@ class AgentLoopTests(unittest.TestCase):
             self.assertIn('"cache_replay": "summary"', session.tool_executions[-1].result_content or "")
             self.assertTrue(any(name == "observation_cache_hit" for name, _ in events))
 
-    def test_acceptance_context_is_injected_and_identical_verification_is_reused(self) -> None:
+    def test_green_acceptance_gate_stops_additional_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             store = SessionStore.for_workspace(workspace)
@@ -939,36 +939,45 @@ class AgentLoopTests(unittest.TestCase):
                     for item in session.tool_executions
                 ],
             )
-            self.assertEqual(len(session.verification_records), 2)
-            self.assertIn("cached_verification", session.tool_executions[-1].result_content or "")
-            self.assertTrue(any(name == "verification_reused" for name, _ in events))
+            self.assertEqual(len(session.verification_records), 1)
+            self.assertEqual(len(session.tool_executions), 2)
+            self.assertTrue(any(name == "finish_gate_started" for name, _ in events))
+            self.assertTrue(
+                any(name == "post_verification_tools_skipped" for name, _ in events)
+            )
             rendered_requests = [str(messages) for messages, _ in model.requests]
-            self.assertTrue(any("Runtime acceptance checklist" in item for item in rendered_requests))
-            self.assertIn("Acceptance gate: GREEN", rendered_requests[-1])
+            self.assertIn("Acceptance gate is GREEN", rendered_requests[-1])
 
-    def test_volatile_progress_is_appended_after_cacheable_history(self) -> None:
-        history = [
-            {"role": "system", "content": "stable"},
-            {"role": "user", "content": "task"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "read_file", "arguments": "{}"},
-                    }
-                ],
-            },
-            {"role": "tool", "tool_call_id": "call-1", "content": "result"},
-        ]
-        progress = {"role": "developer", "content": "volatile progress"}
+    def test_each_step_preserves_the_previous_request_as_an_exact_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "app.py").write_text("value = 1\n", encoding="utf-8")
+            model = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="read",
+                                name="read_file",
+                                arguments={"path": "app.py"},
+                                raw_arguments="{}",
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Done."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+            )
 
-        prepared = AgentRunner._insert_progress_context(history, progress)
+            runner.run("Read app.py and explain it")
 
-        self.assertEqual(prepared[:-1], history)
-        self.assertEqual(prepared[-1], progress)
+            first_request = model.requests[0][0]
+            second_request = model.requests[1][0]
+            self.assertEqual(second_request[: len(first_request)], first_request)
 
     def test_cache_metrics_support_both_provider_accounting_styles(self) -> None:
         included = AgentRunner._cache_metrics(

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from ..changes import ChangeTracker
 from ..exceptions import ChangeError, SessionError
 from ..session import SessionStatus, SessionStore, TaskPhase
+from ..tasking import turn_state_from_memory
 from .controller import RunController, RunRequest
 
 
@@ -165,14 +166,14 @@ def _friendly_tool_action(name: str) -> str:
 
 def _session_execution_history(session) -> list[dict]:
     history: list[dict] = []
-    brief = session.working_memory.get("task_brief")
-    if isinstance(brief, dict):
-        assumptions = brief.get("assumptions")
+    turn_state = turn_state_from_memory(session.working_memory)
+    if isinstance(turn_state, dict):
+        assumptions = turn_state.get("assumptions")
         history.append(
             {
                 "title": "已经理解你想完成什么",
                 "details": [
-                    str(brief.get("goal") or session.task),
+                    str(turn_state.get("goal") or session.task),
                     *(
                         [f"默认理解：{item}" for item in assumptions[:3]]
                         if isinstance(assumptions, list)

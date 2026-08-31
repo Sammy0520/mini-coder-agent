@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import random
-import re
 import time
 import uuid
 import warnings
@@ -29,10 +28,11 @@ from .prompts import build_system_prompt
 from .redaction import redact_sensitive_text, redact_sensitive_value
 from .tasking import (
     TaskBrief,
-    create_task_ledger,
+    create_turn_state,
     frame_task,
     render_task_brief,
-    render_task_ledger,
+    render_turn_state,
+    turn_state_from_memory,
 )
 from .session import (
     AgentSession,
@@ -124,6 +124,7 @@ class AgentRunner:
         self._run_tool_output_start = 0
         self._run_total_token_start = 0
         self._completion_reserve_active = False
+        self._finish_directive_added = False
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
@@ -143,6 +144,7 @@ class AgentRunner:
         self._current_step = 0
         self._continuing_turn = False
         self._completion_reserve_active = False
+        self._finish_directive_added = False
         self._run_model_call_start = 0
         self._run_tool_call_start = 0
         self._run_tool_output_start = 0
@@ -181,8 +183,11 @@ class AgentRunner:
                     messages=messages,
                     workspace_baseline=workspace_overview,
                 )
-                session.working_memory["task_brief"] = task_brief.to_dict()
-                session.working_memory["task_ledger"] = create_task_ledger(task_brief)
+                session.working_memory = {
+                    "scope": "this session only",
+                    "turn": session.turn_count,
+                    "turn_state": create_turn_state(task_brief),
+                }
                 session.set_status(SessionStatus.RUNNING)
                 self._active_session_id = session.session_id
                 self._persist(session, messages, usage)
@@ -217,6 +222,7 @@ class AgentRunner:
             if session is not None:
                 self._set_phase(session, TaskPhase.LOCATE)
         else:
+            follow_up_messages: list[dict[str, Any]] | None = None
             self._active_session_id = session.session_id
             self._validate_resume(session, task)
             follow_up_task = task
@@ -228,14 +234,26 @@ class AgentRunner:
                 SessionStatus.INTERRUPTED,
             }
             if self._continuing_turn:
+                prior_turn_state = copy.deepcopy(
+                    turn_state_from_memory(session.working_memory)
+                )
                 session.start_follow_up(task)
                 workspace_overview = inspect_workspace(
                     self.config.workspace,
                     self.tool_context.policy,
                 )
                 task_brief = frame_task(follow_up_task, workspace_overview)
-                session.working_memory["task_brief"] = task_brief.to_dict()
-                session.working_memory["task_ledger"] = create_task_ledger(task_brief)
+                session.working_memory = {
+                    "scope": "this session only",
+                    "turn": session.turn_count,
+                    "turn_state": create_turn_state(task_brief),
+                }
+                follow_up_messages = self._build_follow_up_messages(
+                    follow_up_task,
+                    workspace_overview,
+                    task_brief,
+                    prior_turn_state,
+                )
                 self._emit(
                     "workspace_overview_generated",
                     {
@@ -255,7 +273,11 @@ class AgentRunner:
                 self._emit("task_framed", task_brief.to_dict())
                 self._set_phase(session, TaskPhase.LOCATE)
             task = session.task
-            messages = copy.deepcopy(session.messages)
+            messages = (
+                follow_up_messages
+                if follow_up_messages is not None
+                else copy.deepcopy(session.messages)
+            )
             usage = dict(session.total_usage)
             previous_signature = session.previous_call_signature
             repeated_count = session.repeated_call_count
@@ -382,18 +404,18 @@ class AgentRunner:
                             usage,
                             session,
                         )
-                    self._activate_completion_reserve_if_needed(session, step)
+                    self._activate_completion_reserve_if_needed(
+                        session,
+                        step,
+                        messages,
+                        usage,
+                    )
                 prepared = self.context.prepare(
                     messages,
                     memory=session.working_memory if session is not None else None,
-                    follow_up=self._continuing_turn,
+                    follow_up=False,
                 )
-                if session is not None:
-                    prepared = self._insert_progress_context(
-                        prepared,
-                        self._acceptance_context(session),
-                    )
-                context_was_compacted = self._continuing_turn or len(prepared) < len(messages)
+                context_was_compacted = len(prepared) < len(messages)
                 if context_was_compacted:
                     self._emit(
                         "context_compacted",
@@ -463,6 +485,38 @@ class AgentRunner:
                         "turn": session.turn_count if session is not None else 1,
                     },
                 )
+
+                if (
+                    session is not None
+                    and self._finish_directive_added
+                    and session.verification_status == VerificationStatus.PASSED
+                    and response.tool_calls
+                    and not any(
+                        call.name in {"write_file", "edit_file"}
+                        for call in response.tool_calls
+                    )
+                ):
+                    for call in response.tool_calls:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": (
+                                    "Skipped: the acceptance gate is already green. "
+                                    "Return the final answer without more tool calls."
+                                ),
+                            }
+                        )
+                    self._emit(
+                        "post_verification_tools_skipped",
+                        {
+                            "session_id": session.session_id,
+                            "tools": [call.name for call in response.tool_calls],
+                        },
+                    )
+                    session.current_step = step
+                    self._persist(session, messages, usage)
+                    continue
 
                 batch_limit_errors = self._response_batch_limit_errors(
                     response.tool_calls
@@ -734,6 +788,32 @@ class AgentRunner:
             errors.append(error)
         return errors
 
+    def _build_follow_up_messages(
+        self,
+        task: str,
+        workspace_overview: dict[str, Any],
+        task_brief: TaskBrief,
+        prior_turn_state: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Create one stable base for a new turn, without replaying old tool logs."""
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt},
+            {
+                "role": "developer",
+                "content": render_workspace_overview(workspace_overview),
+            },
+        ]
+        prior = render_turn_state(prior_turn_state)
+        if prior:
+            messages.append({"role": "developer", "content": prior})
+        messages.extend(
+            [
+                {"role": "developer", "content": render_task_brief(task_brief)},
+                {"role": "user", "content": task},
+            ]
+        )
+        return messages
+
     def _validate_resume(self, session: AgentSession, task: str) -> None:
         expected_workspace = Path(session.workspace).expanduser().resolve()
         if not expected_workspace.is_dir():
@@ -955,7 +1035,12 @@ class AgentRunner:
                             "estimated_chars": self.context.estimate_chars(attempt_messages),
                             "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                             "tool_schema_chars": tool_schema_chars,
-                            "compacted": self._continuing_turn or len(prepared) < len(messages),
+                            "compacted": len(prepared) < len(messages),
+                            "turn_context_rebuilt": (
+                                self._continuing_turn
+                                and session.model_call_count
+                                == self._run_model_call_start + 1
+                            ),
                             "duration_seconds": time.monotonic() - request_started,
                             "usage": {},
                             "error_category": exc.category.value,
@@ -1026,7 +1111,12 @@ class AgentRunner:
                         "estimated_chars": self.context.estimate_chars(attempt_messages),
                         "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                         "tool_schema_chars": tool_schema_chars,
-                        "compacted": self._continuing_turn or len(prepared) < len(messages),
+                        "compacted": len(prepared) < len(messages),
+                        "turn_context_rebuilt": (
+                            self._continuing_turn
+                            and session.model_call_count
+                            == self._run_model_call_start + 1
+                        ),
                         "duration_seconds": self._last_model_duration,
                         "usage": dict(response.usage),
                         "cache": self._cache_metrics(response.usage),
@@ -1098,6 +1188,8 @@ class AgentRunner:
         self,
         session: AgentSession,
         step: int,
+        messages: list[dict[str, Any]],
+        usage: dict[str, int],
     ) -> bool:
         """Reserve the final part of a run for edit, verification, and an answer."""
         if self._completion_reserve_active:
@@ -1116,17 +1208,43 @@ class AgentRunner:
         }
         remaining_steps = self.config.max_steps - step + 1
         remaining_model_calls = self.config.max_model_calls - model_calls
+        state = self._turn_state(session)
+        intent = str(state.get("intent") or "feature")
+        soft_target = {
+            "explain": 3,
+            "fix": 6,
+            "feature": 6,
+            "improve": 6,
+            "build": 8,
+        }.get(intent, 6)
+        has_progress = bool(
+            state.get("changed_files")
+            or state.get("verification")
+            or intent == "explain"
+        )
+        soft_convergence = has_progress and model_calls >= max(2, soft_target - 2)
         trigger = (
             max(ratios.values()) >= 0.72
             or remaining_steps <= 3
             or remaining_model_calls <= 2
+            or soft_convergence
         )
         if not trigger:
             return False
         self._completion_reserve_active = True
-        ledger = session.working_memory.get("task_ledger")
-        if isinstance(ledger, dict):
-            ledger["completion_reserve"] = True
+        state["completion_reserve"] = True
+        messages.append(
+            {
+                "role": "developer",
+                "content": (
+                    "Completion reserve is now active. Stop broad discovery and optional "
+                    "polish. Complete only the smallest known missing edit, run one relevant "
+                    "standard verification, then answer. If current verification is already "
+                    "green, call no more tools and finish now."
+                ),
+            }
+        )
+        self._persist(session, messages, usage)
         self._emit(
             "completion_reserve_started",
             {
@@ -1134,6 +1252,7 @@ class AgentRunner:
                 "ratios": {name: round(value, 3) for name, value in ratios.items()},
                 "remaining_steps": remaining_steps,
                 "remaining_model_calls": remaining_model_calls,
+                "soft_target_model_calls": soft_target,
             },
         )
         return True
@@ -1747,7 +1866,55 @@ class AgentRunner:
             if status == ToolExecutionStatus.FAILED:
                 session.failed_tool_call_count += 1
             session.tool_output_chars += len(content)
-            self._update_task_ledger_after_tool(session, call, result, status)
+            self._update_turn_state_after_tool(session, call, result, status)
+            if (
+                self._finish_directive_added
+                and result.ok
+                and call.name in {"write_file", "edit_file"}
+            ):
+                self._finish_directive_added = False
+                self._set_phase(session, TaskPhase.IMPLEMENT)
+                messages.append(
+                    {
+                        "role": "developer",
+                        "content": (
+                            "Acceptance gate reopened because code changed after the last "
+                            "check. Complete this focused change, run one current relevant "
+                            "verification, then finish."
+                        ),
+                    }
+                )
+                self._emit(
+                    "finish_gate_reopened",
+                    {
+                        "session_id": session.session_id,
+                        "path": (call.arguments or {}).get("path"),
+                    },
+                )
+            if (
+                session.verification_status == VerificationStatus.PASSED
+                and not self._turn_state(session).get("unresolved")
+            ):
+                self._set_phase(session, TaskPhase.FINISH)
+                if not self._finish_directive_added:
+                    self._finish_directive_added = True
+                    messages.append(
+                        {
+                            "role": "developer",
+                            "content": (
+                                "Acceptance gate is GREEN. Current relevant verification "
+                                "passed and no unresolved item remains. Call no more tools; "
+                                "give the concise final answer now."
+                            ),
+                        }
+                    )
+                    self._emit(
+                        "finish_gate_started",
+                        {
+                            "session_id": session.session_id,
+                            "verification_status": session.verification_status.value,
+                        },
+                    )
             self._persist(session, messages, usage)
         self._emit(
             "tool_call_completed",
@@ -2033,9 +2200,37 @@ class AgentRunner:
         )
 
     @staticmethod
+    def _turn_state(session: AgentSession) -> dict[str, Any]:
+        """Return the one compact durable state used by the current turn."""
+        state = turn_state_from_memory(session.working_memory)
+        if state is None:
+            state = {
+                "version": 1,
+                "intent": "feature",
+                "goal": session.task[:1_200],
+                "workspace_kind": "existing",
+                "phase": session.phase.value,
+                "requirements": [session.task[:300]],
+                "assumptions": [],
+                "clarification_needed": False,
+                "clarification_question": None,
+                "decisions": [],
+                "relevant_files": [],
+                "changed_files": [],
+                "verification": [],
+                "unresolved": [],
+                "completion_reserve": False,
+                "last_outcome": "",
+                "session_status": session.status.value,
+            }
+        session.working_memory["turn_state"] = state
+        session.working_memory.pop("task_brief", None)
+        session.working_memory.pop("task_ledger", None)
+        return state
+
+    @staticmethod
     def _refresh_working_memory(session: AgentSession, turn_reply: str) -> None:
-        preserved_brief = copy.deepcopy(session.working_memory.get("task_brief"))
-        preserved_ledger = copy.deepcopy(session.working_memory.get("task_ledger"))
+        state = copy.deepcopy(AgentRunner._turn_state(session))
         active_changes = [
             item.path for item in session.changes if item.undo_status == "active"
         ]
@@ -2058,105 +2253,30 @@ class AgentRunner:
             ),
             None,
         )
-        requests = [
-            str(item.get("content") or "")[:800]
-            for item in session.conversation
-            if item.get("role") == "user"
-        ][-5:]
+        state["phase"] = session.phase.value
+        state["changed_files"] = list(dict.fromkeys(active_changes))[-30:]
+        state["relevant_files"] = relevant_files[-30:]
+        state["last_outcome"] = turn_reply[:1_200]
+        state["session_status"] = session.status.value
+        state["unresolved"] = [session.last_error] if session.last_error else []
+        if latest_verification is not None:
+            verification = state.setdefault("verification", [])
+            if not isinstance(verification, list):
+                verification = []
+                state["verification"] = verification
+            summary = (
+                f"{latest_verification['status']}: "
+                f"{latest_verification['command']} "
+                f"(exit {latest_verification['exit_code']})"
+            )
+            if summary not in verification:
+                verification.append(summary[:500])
+            del verification[:-12]
         session.working_memory = {
             "scope": "this session only",
             "turn": session.turn_count,
-            "current_goal": session.task[:1_200],
-            "recent_user_requests": requests,
-            "active_changed_files": list(dict.fromkeys(active_changes))[-30:],
-            "relevant_files": relevant_files[-30:],
-            "verification": latest_verification,
-            "last_outcome": turn_reply[:1_200],
-            "session_status": session.status.value,
-            "unresolved_reason": session.last_error,
+            "turn_state": state,
         }
-        if isinstance(preserved_brief, dict):
-            session.working_memory["task_brief"] = preserved_brief
-        if isinstance(preserved_ledger, dict):
-            preserved_ledger["changed_files"] = list(
-                dict.fromkeys(active_changes)
-            )[-30:]
-            preserved_ledger["relevant_files"] = relevant_files[-30:]
-            preserved_ledger["phase"] = session.phase.value
-            preserved_ledger["unresolved"] = (
-                [session.last_error] if session.last_error else []
-            )
-            session.working_memory["task_ledger"] = preserved_ledger
-
-    @staticmethod
-    def _acceptance_context(session: AgentSession) -> dict[str, Any]:
-        """Inject a compact, evidence-based convergence checklist for this step."""
-        latest_request = next(
-            (
-                str(item.get("content") or "")
-                for item in reversed(session.conversation)
-                if item.get("role") == "user"
-            ),
-            session.task,
-        )
-        brief = TaskBrief.from_dict(session.working_memory.get("task_brief"))
-        requirements = (
-            list(brief.acceptance_checks)
-            if brief is not None
-            else AgentRunner._extract_acceptance_requirements(latest_request)
-        )
-        active_paths = list(
-            dict.fromkeys(
-                item.path for item in session.changes if item.undo_status == "active"
-            )
-        )
-        inspections = sum(
-            1
-            for item in session.tool_executions
-            if item.ok and item.name in {"read_file", "list_files", "search_text"}
-        )
-        current_checks = [
-            item for item in session.verification_records if item.is_current
-        ]
-        verification = session.refresh_verification_status()
-        if verification == VerificationStatus.PASSED:
-            gate = (
-                "GREEN: current acceptance checks pass. Do not call more tools unless "
-                "you can name a specific unmet user requirement; otherwise answer now."
-            )
-        elif active_paths:
-            gate = "OPEN: changes exist but still need a relevant current acceptance check."
-        else:
-            gate = "OPEN: inspect the relevant project area, then implement or explain the blocker."
-        lines = [
-            "Runtime acceptance checklist (progress control, not a new user request):",
-            *[f"- Requirement {index}: {item}" for index, item in enumerate(requirements, 1)],
-            "Evidence already recorded:",
-            f"- successful project inspections: {inspections}",
-            f"- reused read/search observations: {session.observation_cache_hit_count}",
-            f"- active changed files: {', '.join(active_paths[-12:]) or 'none'}",
-            (
-                "- current checks: "
-                + (
-                    "; ".join(
-                        f"{item.command} ({'passed' if item.passed else 'failed'})"
-                        for item in current_checks[-4:]
-                    )
-                    or "none"
-                )
-            ),
-            f"Acceptance gate: {gate}",
-            (
-                "Before requesting another tool, map it to one unmet requirement. Reuse "
-                "unchanged reads and current checks. Finish related edits before verification, "
-                "and after the gate is GREEN provide the final answer without exploratory reads "
-                "or repeated tests."
-            ),
-        ]
-        ledger_text = render_task_ledger(session.working_memory.get("task_ledger"))
-        if ledger_text:
-            lines.extend(["", ledger_text])
-        return {"role": "developer", "content": "\n".join(lines)[:5_000]}
 
     @staticmethod
     def _ledger_add(ledger: dict[str, Any], key: str, value: str, limit: int) -> None:
@@ -2169,26 +2289,24 @@ class AgentRunner:
             items.append(compact)
         del items[:-limit]
 
-    def _update_task_ledger_after_tool(
+    def _update_turn_state_after_tool(
         self,
         session: AgentSession,
         call: ToolCall,
         result: ToolResult,
         status: ToolExecutionStatus,
     ) -> None:
-        ledger = session.working_memory.get("task_ledger")
-        if not isinstance(ledger, dict):
-            return
+        state = self._turn_state(session)
         arguments = call.arguments or {}
         path = arguments.get("path") or arguments.get("directory")
         if result.ok and call.name in {"read_file", "list_files", "search_text"}:
             if isinstance(path, str):
-                self._ledger_add(ledger, "relevant_files", path, 30)
+                self._ledger_add(state, "relevant_files", path, 30)
         if result.ok and call.name in {"write_file", "edit_file"}:
             if isinstance(path, str):
-                self._ledger_add(ledger, "changed_files", path, 30)
+                self._ledger_add(state, "changed_files", path, 30)
                 self._ledger_add(
-                    ledger,
+                    state,
                     "decisions",
                     f"Applied a focused change to {path}",
                     16,
@@ -2197,31 +2315,27 @@ class AgentRunner:
             arguments
         ):
             mode = str(result.data.get("verification_mode", "standard"))
-            state = "passed" if result.ok else "failed"
+            verification_state = "passed" if result.ok else "failed"
             self._ledger_add(
-                ledger,
+                self._turn_state(session),
                 "verification",
-                f"{state}: {str(arguments.get('command') or '')[:220]} ({mode})",
+                f"{verification_state}: {str(arguments.get('command') or '')[:220]} ({mode})",
                 12,
             )
         if status == ToolExecutionStatus.FAILED:
-            self._ledger_add(ledger, "unresolved", result.message, 8)
+            self._ledger_add(self._turn_state(session), "unresolved", result.message, 8)
         elif result.ok:
-            unresolved = ledger.get("unresolved")
+            state = self._turn_state(session)
+            unresolved = state.get("unresolved")
             if isinstance(unresolved, list) and call.name in {
                 "write_file",
                 "edit_file",
                 "run_command",
             }:
-                ledger["unresolved"] = unresolved[-4:]
-
-    @staticmethod
-    def _insert_progress_context(
-        messages: list[dict[str, Any]],
-        progress: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        """Append volatile progress after the cacheable conversation prefix."""
-        return [*messages, progress]
+                if call.name == "run_command" and result.ok:
+                    state["unresolved"] = []
+                else:
+                    state["unresolved"] = unresolved[-4:]
 
     @staticmethod
     def _call_signature(call: ToolCall) -> str:
@@ -2232,23 +2346,6 @@ class AgentRunner:
             ensure_ascii=False,
             default=str,
         )
-
-
-    @staticmethod
-    def _extract_acceptance_requirements(task: str, limit: int = 8) -> list[str]:
-        compact = task.strip()
-        if not compact:
-            return ["Complete the current user request"]
-        candidates = re.split(r"(?:\r?\n+|[；;。]+|(?<!\d)[1-9][.、)])", compact)
-        requirements: list[str] = []
-        for candidate in candidates:
-            item = " ".join(candidate.strip(" -\t:：").split())
-            if len(item) < 3 or item in requirements:
-                continue
-            requirements.append(item[:300])
-            if len(requirements) >= limit:
-                break
-        return requirements or [" ".join(compact.split())[:300]]
 
     def _emit(self, name: str, payload: dict[str, Any]) -> None:
         if self.event_callback is None:
@@ -2359,9 +2456,7 @@ class AgentRunner:
             return
         previous = session.phase
         session.set_phase(phase)
-        ledger = session.working_memory.get("task_ledger")
-        if isinstance(ledger, dict):
-            ledger["phase"] = phase.value
+        self._turn_state(session)["phase"] = phase.value
         self._emit(
             "phase_changed",
             {
