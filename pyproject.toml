@@ -28,7 +28,6 @@ Issues = "https://github.com/Sammy0520/mini-coder-agent/issues"
 mini-coder = "mini_coder.cli:main"
 mini-coder-eval = "mini_coder.evals.cli:main"
 mini-coder-gui = "mini_coder.gui.cli:main"
-mini-coder-bench = "mini_coder.benchmarks.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

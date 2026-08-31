@@ -30,6 +30,12 @@ def main() -> int:
     findings: list[str] = []
     for path in candidate_files(repository):
         relative = path.relative_to(repository).as_posix()
+        # During a cleanup commit, Git still reports tracked files that have
+        # already been removed from the working tree. They cannot contain a
+        # newly introduced secret, so do not turn a valid deletion into a
+        # false-positive scan failure.
+        if not path.exists():
+            continue
         name = path.name.casefold()
         forbidden_environment = name.startswith(".env.") and name != ".env.example"
         if name in FORBIDDEN_NAMES or forbidden_environment:

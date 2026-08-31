@@ -620,7 +620,7 @@ class CommandRiskApprovalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             store = SessionStore.for_workspace(workspace)
-            marker = workspace / "benchmark-marker.txt"
+            marker = workspace / "dependency-marker.txt"
             command = (
                 f'python -c "from pathlib import Path; '
                 f"Path(r'{marker}').write_text('ok')\""
@@ -630,7 +630,7 @@ class CommandRiskApprovalTests(unittest.TestCase):
                     ModelResponse(
                         tool_calls=[
                             ToolCall(
-                                id="call-benchmark-unknown",
+                                id="call-dependency-unknown",
                                 name="run_command",
                                 arguments={"command": command, "purpose": "other"},
                                 raw_arguments="{}",
@@ -651,7 +651,7 @@ class CommandRiskApprovalTests(unittest.TestCase):
                 session_store=store,
             )
 
-            result = runner.run("Run a command in a disposable benchmark container")
+            result = runner.run("Run a command in a disposable test container")
 
             self.assertEqual(result.status, "completed")
             self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
