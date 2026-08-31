@@ -502,9 +502,9 @@ class ToolTests(unittest.TestCase):
         result = self.execute("run_command", {"command": command})
 
         self.assertTrue(result.ok, result.data)
-        self.assertEqual(
-            os.path.normcase(os.path.abspath(result.data["stdout"].strip())),
-            os.path.normcase(os.path.abspath(runtime_directory)),
+        self.assertTrue(
+            os.path.samefile(result.data["stdout"].strip(), runtime_directory),
+            result.data,
         )
         self.assertTrue(runtime_directory.is_dir())
 
