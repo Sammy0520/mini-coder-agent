@@ -3,18 +3,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 
-DATASET_REPOSITORY = "TokenRhythm/Claw-SWE-Bench"
-DATASET_REVISION = "ca9da7416154a31015f43df71dcf742c6725b312"
-LITE_IDS_SHA256 = "09738eeb71e7fc4b2f2511da963c5cbd47b503a9cccba30cc561703d7003766f"
-LITE_PARQUET_SHA256 = "40fd4e1f9ac40c11c38ac68113b9b5b2026ae916a11d8ade39b40afd4adf0412"
+DATASET_REPOSITORY = "princeton-nlp/SWE-bench_Verified"
+DATASET_REVISION = "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
+VERIFIED_PARQUET_SHA256 = "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd"
+EASY_DIFFICULTY = "<15 min fix"
+EASY_POPULATION_SIZE = 194
 SELECTION_SEED = "7725d67d9825b931a2c91b832eb2fff3d3995d2d"
-SELECTION_NAMESPACE = "mini-coder-agent-claw-v1"
-LANGUAGES = ("Java", "Go", "Rust", "JS/TS", "C/C++", "Ruby", "PHP", "Python")
+SELECTION_NAMESPACE = "mini-coder-agent-swe-bench-verified-easy-v1"
+PHASE_SIZE = 8
 
 
 class PreregistrationError(ValueError):
@@ -33,97 +34,117 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_official_lite_ids(path: Path) -> list[dict[str, str]]:
-    if _file_sha256(path) != LITE_IDS_SHA256:
+def load_verified_easy(path: Path) -> list[dict[str, str]]:
+    if _file_sha256(path) != VERIFIED_PARQUET_SHA256:
         raise PreregistrationError(
-            "lite80_ids.json does not match the preregistered official revision"
+            "Verified parquet does not match the preregistered official revision"
         )
-    data = json.loads(path.read_text(encoding="utf-8"))
-    rows = data.get("instances") if isinstance(data, dict) else None
-    if not isinstance(rows, list) or len(rows) != 80:
-        raise PreregistrationError("official Lite manifest must contain exactly 80 instances")
+    from datasets import load_dataset
 
-    normalized: list[dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            raise PreregistrationError("Lite manifest contains a non-object instance")
-        selected = {
-            key: row.get(key)
-            for key in ("instance_id", "language", "repo", "source_dataset")
+    dataset = load_dataset("parquet", data_files=str(path.resolve()), split="train")
+    rows = [
+        {
+            "instance_id": str(row["instance_id"]),
+            "repo": str(row["repo"]),
+            "language": "Python",
+            "difficulty": str(row["difficulty"]),
+            "source_dataset": "verified-easy",
         }
-        if not all(isinstance(value, str) and value for value in selected.values()):
-            raise PreregistrationError("Lite manifest contains incomplete public metadata")
-        normalized.append(selected)  # type: ignore[arg-type]
-
-    if len({row["instance_id"] for row in normalized}) != 80:
-        raise PreregistrationError("Lite manifest contains duplicate instance IDs")
-    counts = Counter(row["language"] for row in normalized)
-    if counts != Counter({language: 10 for language in LANGUAGES}):
-        raise PreregistrationError(f"unexpected Lite language distribution: {dict(counts)}")
-    return normalized
+        for row in dataset
+        if row.get("difficulty") == EASY_DIFFICULTY
+    ]
+    if len(rows) != EASY_POPULATION_SIZE:
+        raise PreregistrationError(
+            f"expected {EASY_POPULATION_SIZE} official Easy instances, got {len(rows)}"
+        )
+    if len({row["instance_id"] for row in rows}) != len(rows):
+        raise PreregistrationError("Verified Easy population contains duplicate IDs")
+    return rows
 
 
 def build_manifest(rows: list[dict[str, str]], *, created_at: str) -> dict[str, Any]:
-    by_language: dict[str, list[dict[str, str]]] = defaultdict(list)
+    by_repo: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
-        by_language[row["language"]].append(row)
+        if row.get("difficulty") != EASY_DIFFICULTY:
+            raise PreregistrationError("selection input contains a non-Easy task")
+        by_repo[row["repo"]].append(row)
+    if len(by_repo) < PHASE_SIZE:
+        raise PreregistrationError(
+            f"selection requires at least {PHASE_SIZE} repositories"
+        )
 
     selected: list[dict[str, Any]] = []
-    for language in LANGUAGES:
-        ranked = sorted(
-            by_language[language],
-            key=lambda row: _sha256_text(
-                f"{SELECTION_NAMESPACE}|select|{SELECTION_SEED}|{row['instance_id']}"
+    selected_ids: set[str] = set()
+    for phase in ("phase1", "phase2"):
+        ranked_repos = sorted(
+            by_repo,
+            key=lambda repo: _sha256_text(
+                f"{SELECTION_NAMESPACE}|repo|{phase}|{SELECTION_SEED}|{repo}"
             ),
         )
-        for rank, row in enumerate(ranked[:2], start=1):
-            item = dict(row)
-            item["selection_rank_within_language"] = rank
-            item["phase"] = f"phase{rank}"
-            item["selection_hash"] = _sha256_text(
-                f"{SELECTION_NAMESPACE}|select|{SELECTION_SEED}|{row['instance_id']}"
+        phase_rows: list[dict[str, Any]] = []
+        for repo in ranked_repos:
+            candidates = sorted(
+                (
+                    row
+                    for row in by_repo[repo]
+                    if row["instance_id"] not in selected_ids
+                ),
+                key=lambda row: _sha256_text(
+                    f"{SELECTION_NAMESPACE}|select|{phase}|{SELECTION_SEED}|"
+                    f"{row['instance_id']}"
+                ),
             )
-            item["order_hash"] = _sha256_text(
-                f"{SELECTION_NAMESPACE}|order|{SELECTION_SEED}|{row['instance_id']}"
+            if not candidates:
+                continue
+            row = dict(candidates[0])
+            row["phase"] = phase
+            row["selection_hash"] = _sha256_text(
+                f"{SELECTION_NAMESPACE}|select|{phase}|{SELECTION_SEED}|"
+                f"{row['instance_id']}"
             )
-            selected.append(item)
-
-    for phase in ("phase1", "phase2"):
-        phase_rows = sorted(
-            (row for row in selected if row["phase"] == phase),
-            key=lambda row: row["order_hash"],
-        )
+            row["order_hash"] = _sha256_text(
+                f"{SELECTION_NAMESPACE}|order|{phase}|{SELECTION_SEED}|"
+                f"{row['instance_id']}"
+            )
+            phase_rows.append(row)
+            selected_ids.add(row["instance_id"])
+            if len(phase_rows) == PHASE_SIZE:
+                break
+        if len(phase_rows) != PHASE_SIZE:
+            raise PreregistrationError(f"could not select {PHASE_SIZE} tasks for {phase}")
+        phase_rows.sort(key=lambda row: row["order_hash"])
         for pair_order, row in enumerate(phase_rows, start=1):
             row["pair_order"] = pair_order
-            row["first_agent"] = "mini" if pair_order <= 4 else "codex"
+            row["first_agent"] = "mini" if pair_order <= PHASE_SIZE // 2 else "codex"
+        selected.extend(phase_rows)
 
-    selected.sort(key=lambda row: (row["phase"], row["pair_order"]))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": created_at,
         "status": "preregistered_before_model_runs",
         "dataset": {
             "repository": DATASET_REPOSITORY,
             "revision": DATASET_REVISION,
-            "config": "lite",
+            "config": "default",
             "split": "test",
-            "lite80_ids_sha256": LITE_IDS_SHA256,
-            "lite_test_parquet_sha256": LITE_PARQUET_SHA256,
-            "population_size": 80,
+            "parquet_sha256": VERIFIED_PARQUET_SHA256,
+            "difficulty": EASY_DIFFICULTY,
+            "population_size": EASY_POPULATION_SIZE,
         },
         "selection": {
             "namespace": SELECTION_NAMESPACE,
             "seed_public_git_commit": SELECTION_SEED,
             "rule": (
-                "For each of the eight official languages, sort the ten Lite instance IDs "
-                "by SHA-256(namespace|select|seed|instance_id) and select the first two. "
-                "Rank 1 is phase1 and rank 2 is phase2. Within each phase, order by "
-                "SHA-256(namespace|order|seed|instance_id); Mini Coder runs first for the "
-                "first four pairs and Codex first for the remaining four."
+                "For each phase, rank repositories by SHA-256(namespace|repo|phase|seed|repo), "
+                "then select one previously unused Easy task from each of the first eight "
+                "repositories using SHA-256(namespace|select|phase|seed|instance_id). Order "
+                "the eight pairs by an independent SHA-256 order hash; Mini Coder runs first "
+                "for the first four pairs and Codex first for the remaining four."
             ),
-            "selected_size": 16,
-            "phase1_size": 8,
-            "phase2_size": 8,
+            "selected_size": PHASE_SIZE * 2,
+            "phase1_size": PHASE_SIZE,
+            "phase2_size": PHASE_SIZE,
         },
         "instances": selected,
     }
@@ -131,7 +152,7 @@ def build_manifest(rows: list[dict[str, str]], *, created_at: str) -> dict[str, 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate the immutable Claw-SWE-Bench Lite pilot manifest."
+        description="Generate the immutable SWE-bench Verified Easy manifest."
     )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -142,7 +163,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    manifest = build_manifest(load_official_lite_ids(args.source), created_at=args.created_at)
+    manifest = build_manifest(load_verified_easy(args.source), created_at=args.created_at)
     rendered = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     if args.check:
         if not args.output.is_file() or args.output.read_text(encoding="utf-8") != rendered:

@@ -9,6 +9,9 @@ from claw_swebench.claws.base import BaseClawAdapter
 from claw_swebench.types import AgentResult
 
 from benchmarks.claw_swe_bench.support import (
+    BENCHMARK_INTEGRITY_NOTICE,
+    benchmark_integrity_violations,
+    classify_infrastructure_failure,
     codex_metrics,
     mini_session_metrics,
     newest_session,
@@ -32,10 +35,22 @@ def _require_path(value: str, label: str, *, directory: bool = True) -> str:
 
 
 def _proxy_args() -> list[str]:
-    proxy = os.environ.get("CLAW_AGENT_PROXY", "").strip()
+    proxy = (
+        os.environ.get("CLAW_RESTRICTED_PROXY_URL")
+        or os.environ.get("CLAW_AGENT_PROXY", "")
+    ).strip()
     if not proxy:
         return []
-    return ["-e", f"HTTP_PROXY={proxy}", "-e", f"HTTPS_PROXY={proxy}"]
+    return [
+        "-e", f"HTTP_PROXY={proxy}",
+        "-e", f"HTTPS_PROXY={proxy}",
+        "-e", "NO_PROXY=localhost,127.0.0.1",
+    ]
+
+
+def _network_args() -> list[str]:
+    network = os.environ.get("CLAW_AGENT_NETWORK", "").strip()
+    return ["--network", network] if network else []
 
 
 class MiniCoderAdapter(BaseClawAdapter):
@@ -72,9 +87,12 @@ class MiniCoderAdapter(BaseClawAdapter):
             "Mini Coder source root",
         )
         self.container_source_root = "/opt/mini-coder-src"
+        self.last_infrastructure_error: str | None = None
+        self.last_integrity_violations: list[str] = []
 
     def container_run_args(self, instance_id: str) -> list[str]:
         return [
+            *_network_args(),
             "-v", f"{self.python_home}:{self.python_home}:ro",
             "-v", f"{self.environment}:{self.environment}:ro",
             "-v", f"{self.source_root}:{self.container_source_root}:ro",
@@ -105,11 +123,14 @@ class MiniCoderAdapter(BaseClawAdapter):
         event_path = artifact_dir / "mini-coder.events.jsonl"
         session_dir = artifact_dir / "mini-coder-sessions"
         container_event_path = f"/tmp/{agent_id}-mini-coder-events.jsonl"
+        max_model_calls = int(os.environ.get("CLAW_MINI_MAX_MODEL_CALLS", "12"))
+        max_tool_calls = int(os.environ.get("CLAW_MINI_MAX_TOOL_CALLS", "60"))
+        max_total_tokens = int(os.environ.get("CLAW_MINI_MAX_TOTAL_TOKENS", "120000"))
         command = [
             "docker", "exec", "-w", "/testbed",
             "-e", "OPENAI_API_KEY",
             "-e", "HOME=/tmp/mini-coder-home",
-            "-e", "CODING_AGENT_PROMPT_CACHE_KEY=claw-swe-bench-lite-v1",
+            "-e", "CODING_AGENT_PROMPT_CACHE_KEY=swe-bench-verified-easy-v1",
             "-e", f"PYTHONPATH={self.container_source_root}",
             container_name,
             self.python, "-m", "mini_coder",
@@ -119,18 +140,18 @@ class MiniCoderAdapter(BaseClawAdapter):
             "--wire-api", "responses",
             "--reasoning-effort", self.reasoning_effort,
             "--verbosity", self.verbosity,
-            "--max-steps", str(self.max_turns or 300),
+            "--max-steps", str(min(self.max_turns or 300, max_model_calls)),
             "--max-seconds", str(self.timeout),
-            "--max-model-calls", str(self.max_turns or 300),
-            "--max-tool-calls", str((self.max_turns or 300) * 4),
-            "--max-total-tokens", "240000",
+            "--max-model-calls", str(min(self.max_turns or 300, max_model_calls)),
+            "--max-tool-calls", str(max_tool_calls),
+            "--max-total-tokens", str(max_total_tokens),
             "--max-retries", "1",
             "--auto",
             "--preserve-project-command-path",
             "--auto-approve-unknown-commands",
             "--external-evaluation",
             "--log", container_event_path,
-            prompt,
+            f"{BENCHMARK_INTEGRITY_NOTICE}\n{prompt}",
         ]
         start = time.monotonic()
         timed_out = False
@@ -173,9 +194,22 @@ class MiniCoderAdapter(BaseClawAdapter):
         session = newest_session(session_dir)
         usage = mini_session_metrics(session)
         session_id = str(usage.get("session_id")) if usage.get("session_id") else None
-        finish_reason = "timeout" if timed_out else ("stop" if exit_code == 0 else "error")
+        events = read_jsonl(event_path)
+        self.last_infrastructure_error = classify_infrastructure_failure(stdout, stderr)
+        self.last_integrity_violations = benchmark_integrity_violations(events)
+        if self.last_infrastructure_error:
+            finish_reason = "infrastructure_error"
+        elif self.last_integrity_violations:
+            finish_reason = "integrity_violation"
+        else:
+            finish_reason = "timeout" if timed_out else ("stop" if exit_code == 0 else "error")
         return AgentResult(
-            success=exit_code == 0 and not timed_out,
+            success=(
+                exit_code == 0
+                and not timed_out
+                and not self.last_infrastructure_error
+                and not self.last_integrity_violations
+            ),
             timeout=timed_out,
             exit_code=exit_code,
             finish_reason=finish_reason,
@@ -219,9 +253,12 @@ class CodexAdapter(BaseClawAdapter):
             "CODEX_CODE_MODE_HOST",
             directory=False,
         )
+        self.last_infrastructure_error: str | None = None
+        self.last_integrity_violations: list[str] = []
 
     def container_run_args(self, instance_id: str) -> list[str]:
         return [
+            *_network_args(),
             "-v", f"{self.executable}:{self.executable}:ro",
             "-v", f"{self.code_mode_host}:{self.code_mode_host}:ro",
             *_proxy_args(),
@@ -285,7 +322,7 @@ class CodexAdapter(BaseClawAdapter):
         try:
             completed = subprocess.run(
                 command,
-                input=prompt,
+                input=f"{BENCHMARK_INTEGRITY_NOTICE}\n{prompt}",
                 capture_output=True,
                 text=True,
                 errors="replace",
@@ -306,9 +343,21 @@ class CodexAdapter(BaseClawAdapter):
         events = read_jsonl(stdout_path)
         usage = codex_metrics(events)
         thread_id = str(usage.get("thread_id")) if usage.get("thread_id") else None
-        finish_reason = "timeout" if timed_out else ("stop" if exit_code == 0 else "error")
+        self.last_infrastructure_error = classify_infrastructure_failure(stdout, stderr)
+        self.last_integrity_violations = benchmark_integrity_violations(events)
+        if self.last_infrastructure_error:
+            finish_reason = "infrastructure_error"
+        elif self.last_integrity_violations:
+            finish_reason = "integrity_violation"
+        else:
+            finish_reason = "timeout" if timed_out else ("stop" if exit_code == 0 else "error")
         return AgentResult(
-            success=exit_code == 0 and not timed_out,
+            success=(
+                exit_code == 0
+                and not timed_out
+                and not self.last_infrastructure_error
+                and not self.last_integrity_violations
+            ),
             timeout=timed_out,
             exit_code=exit_code,
             finish_reason=finish_reason,

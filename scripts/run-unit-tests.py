@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from pathlib import Path
 
 
 def _workflow_escape(value: str) -> str:
@@ -14,6 +15,9 @@ def _workflow_escape(value: str) -> str:
 
 
 def main() -> int:
+    repository_root = Path(__file__).resolve().parents[1]
+    if str(repository_root) not in sys.path:
+        sys.path.insert(0, str(repository_root))
     suite = unittest.defaultTestLoader.discover("tests")
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if result.wasSuccessful():

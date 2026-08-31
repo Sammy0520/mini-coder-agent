@@ -9,10 +9,9 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_PARQUET_SHA256 = "40fd4e1f9ac40c11c38ac68113b9b5b2026ae916a11d8ade39b40afd4adf0412"
+EXPECTED_PARQUET_SHA256 = "a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd"
 DATASET_NAMES = {
-    "multilingual": "SWE-bench/SWE-bench_Multilingual",
-    "verified-mini": "princeton-nlp/SWE-bench_Verified",
+    "verified-easy": "princeton-nlp/SWE-bench_Verified",
 }
 DEFAULT_SWEBENCH_SOURCE = Path("/home/sammy/minicoder-eval/swe-bench-v4.1.0")
 EXPECTED_SWEBENCH_REVISION = "726c5461e2ef52d83cf1ea2107870a8bb3328d57"
@@ -104,6 +103,39 @@ def _load_official_report(
     return report
 
 
+def _write_filtered_predictions(
+    source: Path,
+    destination: Path,
+    instance_ids: list[str],
+) -> Path:
+    expected = set(instance_ids)
+    selected: dict[str, dict[str, Any]] = {}
+    for line in source.read_text(encoding="utf-8-sig").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        instance_id = str(item.get("instance_id") or "")
+        if instance_id in expected:
+            if instance_id in selected:
+                raise RuntimeError(
+                    f"duplicate prediction for {instance_id} in {source}"
+                )
+            selected[instance_id] = item
+    missing = expected - set(selected)
+    if missing:
+        raise RuntimeError(
+            f"prediction file is missing selected IDs: {sorted(missing)}"
+        )
+    destination.write_text(
+        "".join(
+            json.dumps(selected[instance_id], ensure_ascii=False) + "\n"
+            for instance_id in instance_ids
+        ),
+        encoding="utf-8",
+    )
+    return destination
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Score preregistered predictions with the official SWE-bench harness."
@@ -123,7 +155,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--phase", choices=["phase1", "phase2"], default="phase1")
     parser.add_argument("--agent", choices=["mini", "codex", "both"], default="both")
-    parser.add_argument("--run-prefix", default="minicoder-claw-lite-v1")
+    parser.add_argument("--run-prefix", default="minicoder-swe-verified-easy-v1")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -159,7 +191,7 @@ def _jobs(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if _sha256(args.parquet) != EXPECTED_PARQUET_SHA256:
-        raise RuntimeError("Lite parquet does not match the preregistered dataset revision")
+        raise RuntimeError("Verified parquet does not match the preregistered dataset revision")
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     jobs = _jobs(
         manifest, phase=args.phase, agent=args.agent, run_prefix=args.run_prefix
@@ -195,18 +227,28 @@ def main(argv: list[str] | None = None) -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
+    summaries: list[dict[str, Any]] = []
     for job in jobs:
-        predictions = (
+        all_predictions = (
             args.claw_root / "artifacts" / job["inference_run"] / "predictions.jsonl"
         )
-        if not predictions.is_file():
-            raise FileNotFoundError(f"prediction file not found: {predictions}")
+        if not all_predictions.is_file():
+            raise FileNotFoundError(f"prediction file not found: {all_predictions}")
         exact_dataset = exact_dataset_dir / (
             f"{args.phase}-{job['source_dataset']}.json"
         )
         exact_rows = [rows[instance_id] for instance_id in job["instance_ids"]]
         exact_dataset.write_text(
             json.dumps(exact_rows, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        predictions = _write_filtered_predictions(
+            all_predictions,
+            exact_dataset_dir
+            / (
+                f"{args.phase}-{job['agent']}-{job['source_dataset']}"
+                ".predictions.jsonl"
+            ),
+            job["instance_ids"],
         )
         command = [
             str(args.swebench_python),
@@ -224,6 +266,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         if completed.returncode != 0:
             failures += 1
+            summaries.append(
+                {
+                    "agent": job["agent"],
+                    "source_dataset": job["source_dataset"],
+                    "instance_ids": job["instance_ids"],
+                    "status": "harness_error",
+                }
+            )
             print(f"FAILED evaluation job: {job['evaluation_run']}")
             continue
         try:
@@ -232,14 +282,85 @@ def main(argv: list[str] | None = None) -> int:
             )
         except RuntimeError as exc:
             failures += 1
+            summaries.append(
+                {
+                    "agent": job["agent"],
+                    "source_dataset": job["source_dataset"],
+                    "instance_ids": job["instance_ids"],
+                    "status": "report_error",
+                    "error": str(exc),
+                }
+            )
             print(f"FAILED evaluation report: {exc}")
             continue
+        summaries.append(
+            {
+                "agent": job["agent"],
+                "source_dataset": job["source_dataset"],
+                "instance_ids": job["instance_ids"],
+                "status": "complete",
+                "resolved_ids": report.get("resolved_ids") or [],
+                "unresolved_ids": report.get("unresolved_ids") or [],
+                "empty_patch_ids": report.get("empty_patch_ids") or [],
+                "resolved_instances": report.get("resolved_instances", 0),
+                "unresolved_instances": report.get("unresolved_instances", 0),
+                "empty_patch_instances": report.get("empty_patch_instances", 0),
+                "error_instances": report.get("error_instances", 0),
+            }
+        )
         print(
             f"RESULT {job['agent']} {job['source_dataset']}: "
             f"resolved={report.get('resolved_instances', 0)} "
-            f"unresolved={report.get('unresolved_instances', 0)}",
+            f"unresolved={report.get('unresolved_instances', 0)} "
+            f"empty={report.get('empty_patch_instances', 0)}",
             flush=True,
         )
+    agent_summaries: dict[str, dict[str, Any]] = {}
+    for item in summaries:
+        agent = str(item["agent"])
+        aggregate = agent_summaries.setdefault(
+            agent,
+            {
+                "total_instances": 0,
+                "resolved_instances": 0,
+                "unresolved_instances": 0,
+                "empty_patch_instances": 0,
+                "error_instances": 0,
+            },
+        )
+        aggregate["total_instances"] += len(item.get("instance_ids") or [])
+        for key in (
+            "resolved_instances",
+            "unresolved_instances",
+            "empty_patch_instances",
+            "error_instances",
+        ):
+            aggregate[key] += int(item.get(key, 0))
+    for aggregate in agent_summaries.values():
+        aggregate["not_resolved_instances"] = (
+            aggregate["total_instances"] - aggregate["resolved_instances"]
+        )
+    summary_path = (
+        args.claw_root
+        / "artifacts"
+        / f"{args.run_prefix}-{args.phase}-official-summary.json"
+    )
+    summary_path.write_text(
+        json.dumps(
+            {
+                "phase": args.phase,
+                "run_prefix": args.run_prefix,
+                "evaluation_failures": failures,
+                "agents": agent_summaries,
+                "jobs": summaries,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"WROTE summary: {summary_path}")
     return 1 if failures else 0
 
 

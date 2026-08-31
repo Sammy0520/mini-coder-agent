@@ -1,1 +1,1 @@
-"""Reproducible Claw-SWE-Bench Lite comparison utilities."""
+"""Reproducible SWE-bench Verified Easy comparison utilities."""
