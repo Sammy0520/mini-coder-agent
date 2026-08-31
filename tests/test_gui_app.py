@@ -142,6 +142,10 @@ class GuiHttpTests(unittest.TestCase):
             self.assertIn('id="undoButton"', index)
             self.assertIn('id="changesToggleButton"', index)
             self.assertIn('id="turnSummary"', index)
+            self.assertIn('id="deleteSessionModal"', index)
+            self.assertIn('id="renameSessionModal"', index)
+            self.assertIn('id="sessionInfoModal"', index)
+            self.assertNotIn('id="conversationProject"', index)
             self.assertNotIn('id="usageSummary"', index)
             self.assertEqual(Path(bootstrap["default_workspace"]), Path.cwd().resolve())
             self.assertEqual(
@@ -340,6 +344,93 @@ class GuiHttpTests(unittest.TestCase):
 
             self.assertEqual(caught.exception.code, 409)
             self.assertEqual(target.read_text(encoding="utf-8"), "user version\n")
+
+    def test_delete_session_keeps_project_files_and_blocks_running_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            project_file = workspace / "app.py"
+            project_file.write_text("print('keep me')\n", encoding="utf-8")
+            session = AgentSession.create(
+                task="Inspect app.py",
+                title="Disposable conversation",
+                workspace=workspace,
+                model={"model": "fake"},
+            )
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(SessionStatus.COMPLETED_UNVERIFIED, final_text="done")
+            store = SessionStore.for_workspace(workspace)
+            store.save(session)
+            runtime = workspace / ".mini-coder" / "runtime" / session.session_id
+            runtime.mkdir(parents=True)
+            (runtime / "scratch.txt").write_text("temporary\n", encoding="utf-8")
+
+            base = f"http://127.0.0.1:{self.port}"
+            query = urllib.parse.urlencode({"workspace": directory})
+            with urllib.request.urlopen(f"{base}/api/sessions?{query}", timeout=3):
+                pass
+            request = urllib.request.Request(
+                f"{base}/api/sessions/{session.session_id}",
+                method="DELETE",
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                deleted = json.load(response)
+
+            self.assertTrue(deleted["deleted"])
+            self.assertTrue(deleted["runtime_removed"])
+            self.assertTrue(project_file.is_file())
+            self.assertFalse(store.path_for(session.session_id).exists())
+            self.assertFalse(runtime.exists())
+
+            running = AgentSession.create(
+                task="Still running",
+                title="Active conversation",
+                workspace=workspace,
+                model={"model": "fake"},
+            )
+            running.set_status(SessionStatus.RUNNING)
+            store.save(running)
+            running_request = urllib.request.Request(
+                f"{base}/api/sessions/{running.session_id}",
+                method="DELETE",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(running_request, timeout=3)
+
+            self.assertEqual(caught.exception.code, 409)
+            self.assertTrue(store.path_for(running.session_id).exists())
+
+    def test_rename_session_persists_title_and_updates_last_active_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            session = AgentSession.create(
+                task="Inspect app.py",
+                title="Old conversation name",
+                workspace=workspace,
+                model={"model": "fake"},
+            )
+            original_updated_at = session.updated_at
+            store = SessionStore.for_workspace(workspace)
+            store.save(session)
+
+            base = f"http://127.0.0.1:{self.port}"
+            query = urllib.parse.urlencode({"workspace": directory})
+            with urllib.request.urlopen(f"{base}/api/sessions?{query}", timeout=3):
+                pass
+            body = json.dumps({"title": "  New conversation name  "}).encode("utf-8")
+            request = urllib.request.Request(
+                f"{base}/api/sessions/{session.session_id}",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="PATCH",
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                renamed = json.load(response)
+
+            restored = store.load(session.session_id)
+            self.assertEqual(renamed["title"], "New conversation name")
+            self.assertEqual(restored.title, "New conversation name")
+            self.assertGreaterEqual(restored.updated_at, original_updated_at)
+            self.assertEqual(renamed["turn_count"], 1)
 
     def test_single_file_undo_only_reverts_the_requested_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

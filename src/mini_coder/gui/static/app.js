@@ -28,11 +28,15 @@ const state = {
   sessionPoller: null,
   taskBrief: null,
   phase: "discover",
+  pendingDeleteSession: null,
+  pendingRenameSession: null,
+  sessionMenuSession: null,
+  sessionMenuButton: null,
 };
 
 const elementIds = [
   "newSessionButton", "sessionCount", "sessionList",
-  "connectionDot", "connectionLabel", "conversationEyebrow", "conversationTitle", "conversationProject",
+  "connectionDot", "connectionLabel", "conversationEyebrow", "conversationTitle",
   "detailsToggleButton", "stopRunButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
   "welcomeState", "messageList", "task", "composerHint", "runButton", "inspector", "closeInspectorButton",
   "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
@@ -44,6 +48,12 @@ const elementIds = [
   "folderCurrentHint", "codeModal", "codeModalClose", "codeModalDone", "codeDialogTitle",
   "codeVersionWarning", "diffTabButton", "afterTabButton", "beforeTabButton", "fullCodeView",
   "fullCodeStats", "toast",
+  "deleteSessionModal", "deleteSessionClose", "deleteSessionCancel",
+  "deleteSessionConfirm", "deleteSessionName",
+  "sessionActionMenu", "renameSessionMenuItem", "deleteSessionMenuItem", "sessionInfoMenuItem",
+  "renameSessionModal", "renameSessionClose", "renameSessionCancel", "renameSessionConfirm", "renameSessionInput",
+  "sessionInfoModal", "sessionInfoClose", "sessionInfoDone", "sessionInfoWorkspace",
+  "sessionInfoCreatedAt", "sessionInfoUpdatedAt", "sessionInfoTurns",
 ];
 const els = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 const terminalEvents = new Set(["controller_run_finished", "controller_run_failed"]);
@@ -59,6 +69,41 @@ function bindEvents() {
   els.sessionModalConfirm.addEventListener("click", confirmSessionSetup);
   els.sessionModal.addEventListener("click", (event) => {
     if (event.target === els.sessionModal) closeSessionModal();
+  });
+  els.deleteSessionClose.addEventListener("click", closeDeleteSessionModal);
+  els.deleteSessionCancel.addEventListener("click", closeDeleteSessionModal);
+  els.deleteSessionConfirm.addEventListener("click", deletePendingSession);
+  els.deleteSessionModal.addEventListener("click", (event) => {
+    if (event.target === els.deleteSessionModal) closeDeleteSessionModal();
+  });
+  els.renameSessionMenuItem.addEventListener("click", () => {
+    const session = state.sessionMenuSession;
+    closeSessionActionMenu();
+    if (session) openRenameSessionModal(session);
+  });
+  els.deleteSessionMenuItem.addEventListener("click", () => {
+    const session = state.sessionMenuSession;
+    closeSessionActionMenu();
+    if (session) openDeleteSessionModal(session);
+  });
+  els.sessionInfoMenuItem.addEventListener("click", () => {
+    const session = state.sessionMenuSession;
+    closeSessionActionMenu();
+    if (session) openSessionInfoModal(session);
+  });
+  els.renameSessionClose.addEventListener("click", closeRenameSessionModal);
+  els.renameSessionCancel.addEventListener("click", closeRenameSessionModal);
+  els.renameSessionConfirm.addEventListener("click", renamePendingSession);
+  els.renameSessionInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") renamePendingSession();
+  });
+  els.renameSessionModal.addEventListener("click", (event) => {
+    if (event.target === els.renameSessionModal) closeRenameSessionModal();
+  });
+  els.sessionInfoClose.addEventListener("click", closeSessionInfoModal);
+  els.sessionInfoDone.addEventListener("click", closeSessionInfoModal);
+  els.sessionInfoModal.addEventListener("click", (event) => {
+    if (event.target === els.sessionInfoModal) closeSessionInfoModal();
   });
   els.selectWorkspaceButton.addEventListener("click", openFolderBrowser);
   els.folderCloseButton.addEventListener("click", closeFolderBrowser);
@@ -100,10 +145,21 @@ function bindEvents() {
   els.diffTabButton.addEventListener("click", () => selectCodeTab("diff"));
   els.afterTabButton.addEventListener("click", () => selectCodeTab("after"));
   els.beforeTabButton.addEventListener("click", () => selectCodeTab("before"));
+  document.addEventListener("click", (event) => {
+    if (
+      !els.sessionActionMenu.classList.contains("hidden")
+      && !els.sessionActionMenu.contains(event.target)
+      && !event.target.closest(".session-menu-button")
+    ) closeSessionActionMenu();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (!els.codeModal.classList.contains("hidden")) closeCodeModal();
+    if (!els.sessionActionMenu.classList.contains("hidden")) closeSessionActionMenu();
+    else if (!els.codeModal.classList.contains("hidden")) closeCodeModal();
     else if (!els.folderModal.classList.contains("hidden")) closeFolderBrowser();
+    else if (!els.renameSessionModal.classList.contains("hidden")) closeRenameSessionModal();
+    else if (!els.deleteSessionModal.classList.contains("hidden")) closeDeleteSessionModal();
+    else if (!els.sessionInfoModal.classList.contains("hidden")) closeSessionInfoModal();
     else if (!els.sessionModal.classList.contains("hidden")) closeSessionModal();
   });
 }
@@ -147,9 +203,7 @@ function openSessionModal(startAfterSetup = false) {
 
 function closeSessionModal() {
   els.sessionModal.classList.add("hidden");
-  if (els.folderModal.classList.contains("hidden") && els.codeModal.classList.contains("hidden")) {
-    document.body.classList.remove("modal-open");
-  }
+  syncModalOpenState();
   state.startAfterSetup = false;
 }
 
@@ -190,7 +244,6 @@ function saveProject() {
 }
 
 function updateProjectDisplay() {
-  els.conversationProject.textContent = state.workspace || "尚未选择工作文件夹";
   els.composerHint.textContent = state.workspace
     ? `工作文件夹：${state.workspace}`
     : "新建会话时选择工作文件夹";
@@ -221,15 +274,176 @@ function renderSessions(sessions) {
   sessions.forEach((session) => {
     const activeRun = activeRunForSession(session.session_id);
     const displayStatus = activeRun?.status || session.status;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `session-item${state.sessionId === session.session_id ? " active" : ""}`;
-    button.innerHTML = `
+    const item = document.createElement("div");
+    item.className = `session-item${state.sessionId === session.session_id ? " active" : ""}`;
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "session-open-button";
+    openButton.innerHTML = `
       <span class="session-item-icon">${sessionIcon(displayStatus)}</span>
       <span><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(pathName(session.workspace))} · ${escapeHtml(sessionTime(session.updated_at))} · ${escapeHtml(labelStatus(displayStatus))}</small></span>`;
-    button.addEventListener("click", () => loadSession(session.session_id));
-    els.sessionList.appendChild(button);
+    openButton.addEventListener("click", () => loadSession(session.session_id));
+    const menuButton = document.createElement("button");
+    menuButton.type = "button";
+    menuButton.className = "session-menu-button";
+    menuButton.textContent = "…";
+    menuButton.title = "会话操作";
+    menuButton.setAttribute("aria-label", `会话操作：${session.title || "未命名会话"}`);
+    menuButton.setAttribute("aria-haspopup", "menu");
+    menuButton.setAttribute("aria-expanded", "false");
+    menuButton.addEventListener("click", (event) => openSessionActionMenu(event, session, menuButton));
+    item.append(openButton, menuButton);
+    els.sessionList.appendChild(item);
   });
+}
+
+function openSessionActionMenu(event, session, button) {
+  event.stopPropagation();
+  if (state.sessionMenuSession?.session_id === session.session_id) {
+    closeSessionActionMenu();
+    return;
+  }
+  closeSessionActionMenu();
+  state.sessionMenuSession = session;
+  state.sessionMenuButton = button;
+  button.setAttribute("aria-expanded", "true");
+  const sessionIsActive = Boolean(activeRunForSession(session.session_id));
+  els.renameSessionMenuItem.disabled = sessionIsActive;
+  els.renameSessionMenuItem.title = sessionIsActive
+    ? "请先停止正在运行的任务"
+    : "重命名会话";
+  els.deleteSessionMenuItem.disabled = sessionIsActive;
+  els.deleteSessionMenuItem.title = els.deleteSessionMenuItem.disabled
+    ? "请先停止正在运行的任务"
+    : "删除会话";
+  els.sessionActionMenu.classList.remove("hidden");
+  const rect = button.getBoundingClientRect();
+  const menuRect = els.sessionActionMenu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - menuRect.width - 8, rect.right - menuRect.width));
+  let top = rect.bottom + 4;
+  if (top + menuRect.height > window.innerHeight - 8) top = rect.top - menuRect.height - 4;
+  els.sessionActionMenu.style.left = `${left}px`;
+  els.sessionActionMenu.style.top = `${Math.max(8, top)}px`;
+  window.setTimeout(() => els.renameSessionMenuItem.focus(), 0);
+}
+
+function closeSessionActionMenu() {
+  if (state.sessionMenuButton) state.sessionMenuButton.setAttribute("aria-expanded", "false");
+  els.sessionActionMenu.classList.add("hidden");
+  state.sessionMenuSession = null;
+  state.sessionMenuButton = null;
+}
+
+function openRenameSessionModal(session) {
+  state.pendingRenameSession = session;
+  els.renameSessionInput.value = session.title || "未命名会话";
+  els.renameSessionConfirm.disabled = false;
+  els.renameSessionConfirm.textContent = "保存";
+  els.renameSessionModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => {
+    els.renameSessionInput.focus();
+    els.renameSessionInput.select();
+  }, 0);
+}
+
+function closeRenameSessionModal() {
+  if (els.renameSessionConfirm.disabled) return;
+  els.renameSessionModal.classList.add("hidden");
+  state.pendingRenameSession = null;
+  syncModalOpenState();
+}
+
+async function renamePendingSession() {
+  const session = state.pendingRenameSession;
+  if (!session) return;
+  const title = els.renameSessionInput.value.trim();
+  if (!title) {
+    toast("会话名称不能为空。", true);
+    els.renameSessionInput.focus();
+    return;
+  }
+  els.renameSessionConfirm.disabled = true;
+  els.renameSessionConfirm.textContent = "正在保存…";
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(session.session_id)}`, {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({title}),
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法重命名这个会话");
+    els.renameSessionModal.classList.add("hidden");
+    state.pendingRenameSession = null;
+    syncModalOpenState();
+    if (state.sessionId === session.session_id) {
+      state.sessionTitle = data.title;
+      els.conversationTitle.textContent = data.title;
+      els.sessionName.textContent = data.title;
+    }
+    await loadSessions({silent: true});
+    toast("会话名称已更新。");
+  } catch (error) {
+    els.renameSessionConfirm.disabled = false;
+    els.renameSessionConfirm.textContent = "保存";
+    toast(friendlyError(error.message), true);
+  }
+}
+
+function openSessionInfoModal(session) {
+  els.sessionInfoWorkspace.textContent = session.workspace || "—";
+  els.sessionInfoCreatedAt.textContent = formatDateTime(session.created_at);
+  els.sessionInfoUpdatedAt.textContent = formatDateTime(session.updated_at);
+  els.sessionInfoTurns.textContent = `${Math.max(1, Number(session.turn_count || 1))} 轮`;
+  els.sessionInfoModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => els.sessionInfoDone.focus(), 0);
+}
+
+function closeSessionInfoModal() {
+  els.sessionInfoModal.classList.add("hidden");
+  syncModalOpenState();
+}
+
+function openDeleteSessionModal(session) {
+  state.pendingDeleteSession = session;
+  els.deleteSessionName.textContent = `“${session.title || "未命名会话"}”`;
+  els.deleteSessionConfirm.disabled = false;
+  els.deleteSessionConfirm.textContent = "删除会话";
+  els.deleteSessionModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => els.deleteSessionCancel.focus(), 0);
+}
+
+function closeDeleteSessionModal() {
+  if (els.deleteSessionConfirm.disabled) return;
+  els.deleteSessionModal.classList.add("hidden");
+  state.pendingDeleteSession = null;
+  syncModalOpenState();
+}
+
+async function deletePendingSession() {
+  const session = state.pendingDeleteSession;
+  if (!session) return;
+  els.deleteSessionConfirm.disabled = true;
+  els.deleteSessionConfirm.textContent = "正在删除…";
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(session.session_id)}`, {
+      method: "DELETE",
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法删除这个会话");
+    els.deleteSessionModal.classList.add("hidden");
+    state.pendingDeleteSession = null;
+    syncModalOpenState();
+    if (state.sessionId === session.session_id) resetDraft();
+    await loadSessions({silent: true});
+    toast(data.warning || "会话已删除。", Boolean(data.warning));
+  } catch (error) {
+    els.deleteSessionConfirm.disabled = false;
+    els.deleteSessionConfirm.textContent = "删除会话";
+    toast(friendlyError(error.message), true);
+  }
 }
 
 async function syncActiveRuns() {
@@ -249,7 +463,9 @@ function activeRunForSession(sessionId) {
 
 async function refreshBackgroundRuns() {
   await syncActiveRuns();
-  await loadSessions({silent: true});
+  if (els.sessionActionMenu.classList.contains("hidden")) {
+    await loadSessions({silent: true});
+  }
   if (state.runActive && state.runId && !state.source && state.activeRuns.has(state.runId)) {
     const run = state.activeRuns.get(state.runId);
     connectEvents(run.run_id, run.latest_sequence || state.currentSequence);
@@ -1097,9 +1313,7 @@ function renderCode(content, isDiff) {
 function closeCodeModal() {
   els.codeModal.classList.add("hidden");
   state.codeDetail = null;
-  if (els.folderModal.classList.contains("hidden") && els.sessionModal.classList.contains("hidden")) {
-    document.body.classList.remove("modal-open");
-  }
+  syncModalOpenState();
 }
 
 function openFolderBrowser() {
@@ -1110,9 +1324,14 @@ function openFolderBrowser() {
 
 function closeFolderBrowser() {
   els.folderModal.classList.add("hidden");
-  if (els.sessionModal.classList.contains("hidden") && els.codeModal.classList.contains("hidden")) {
-    document.body.classList.remove("modal-open");
-  }
+  syncModalOpenState();
+}
+
+function syncModalOpenState() {
+  document.body.classList.toggle(
+    "modal-open",
+    Boolean(document.querySelector(".modal-backdrop:not(.hidden)")),
+  );
 }
 
 function chooseCurrentFolder() {
@@ -1353,6 +1572,18 @@ function sessionTime(value) {
     if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
     return date.toLocaleDateString([], {month: "2-digit", day: "2-digit"});
   } catch (_) { return ""; }
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function suggestedTitle(task) {

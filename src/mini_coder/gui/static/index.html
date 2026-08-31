@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mini Coder Agent</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260831-1">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260831-3">
 </head>
 <body>
   <div class="app-layout">
@@ -23,7 +23,7 @@
 
     <main class="main-pane">
       <header class="conversation-header">
-        <div><p class="eyebrow" id="conversationEyebrow">新会话</p><h2 id="conversationTitle">准备开始一个任务</h2><p id="conversationProject" class="conversation-project">D:\Code Agent</p></div>
+        <div><p class="eyebrow" id="conversationEyebrow">新会话</p><h2 id="conversationTitle">准备开始一个任务</h2></div>
         <div class="header-actions"><button id="stopRunButton" class="stop-button hidden" type="button">停止任务</button><button id="detailsToggleButton" class="outline-button" type="button">执行详情</button></div>
       </header>
       <section class="status-strip compact-status">
@@ -84,6 +84,41 @@
     </section>
   </div>
 
+  <div id="sessionActionMenu" class="session-action-menu hidden" role="menu" aria-label="会话操作">
+    <button id="renameSessionMenuItem" type="button" role="menuitem"><span aria-hidden="true">✎</span><span>重命名</span></button>
+    <button id="deleteSessionMenuItem" class="danger-menu-item" type="button" role="menuitem"><span aria-hidden="true">⌫</span><span>删除</span></button>
+    <button id="sessionInfoMenuItem" type="button" role="menuitem"><span aria-hidden="true">ⓘ</span><span>详细信息</span></button>
+  </div>
+
+  <div id="renameSessionModal" class="modal-backdrop hidden" role="presentation">
+    <section class="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="renameSessionTitle">
+      <div class="folder-dialog-header"><div><p class="eyebrow">重命名会话</p><h2 id="renameSessionTitle">修改会话名称</h2></div><button id="renameSessionClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="rename-dialog-body"><label for="renameSessionInput">会话名称</label><input id="renameSessionInput" maxlength="120" autocomplete="off"><p>使用简短、容易识别的名称。</p></div>
+      <div class="dialog-footer"><button id="renameSessionCancel" class="secondary-button" type="button">取消</button><button id="renameSessionConfirm" class="primary-button" type="button">保存</button></div>
+    </section>
+  </div>
+
+  <div id="deleteSessionModal" class="modal-backdrop hidden" role="presentation">
+    <section class="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="deleteSessionTitle">
+      <div class="folder-dialog-header"><div><p class="eyebrow warning">删除会话</p><h2 id="deleteSessionTitle">确认删除这个会话？</h2></div><button id="deleteSessionClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="delete-dialog-body"><p id="deleteSessionName" class="delete-session-name"></p><p>会话记录和专属临时文件将被删除，无法恢复。项目代码和已经完成的修改会保留，也不会自动撤销。</p></div>
+      <div class="dialog-footer"><button id="deleteSessionCancel" class="secondary-button" type="button">取消</button><button id="deleteSessionConfirm" class="danger-button" type="button">删除会话</button></div>
+    </section>
+  </div>
+
+  <div id="sessionInfoModal" class="modal-backdrop hidden" role="presentation">
+    <section class="session-info-dialog" role="dialog" aria-modal="true" aria-labelledby="sessionInfoTitle">
+      <div class="folder-dialog-header"><div><p class="eyebrow">会话信息</p><h2 id="sessionInfoTitle">详细信息</h2></div><button id="sessionInfoClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <dl class="session-info-list">
+        <div><dt>项目文件夹</dt><dd id="sessionInfoWorkspace"></dd></div>
+        <div><dt>创建时间</dt><dd id="sessionInfoCreatedAt"></dd></div>
+        <div><dt>最后一次活跃时间</dt><dd id="sessionInfoUpdatedAt"></dd></div>
+        <div><dt>对话轮数</dt><dd id="sessionInfoTurns"></dd></div>
+      </dl>
+      <div class="dialog-footer"><button id="sessionInfoDone" class="primary-button" type="button">完成</button></div>
+    </section>
+  </div>
+
   <div id="codeModal" class="modal-backdrop hidden" role="presentation">
     <section class="code-dialog" role="dialog" aria-modal="true" aria-labelledby="codeDialogTitle">
       <div class="folder-dialog-header"><div><p class="eyebrow">完整代码</p><h2 id="codeDialogTitle">代码变更</h2><p id="codeVersionWarning" class="code-warning hidden">文件后来又发生了变化，以下内容是当前磁盘版本。</p></div><button id="codeModalClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
@@ -94,6 +129,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/assets/app.js?v=20260831-1" defer></script>
+  <script src="/assets/app.js?v=20260831-3" defer></script>
 </body>
 </html>

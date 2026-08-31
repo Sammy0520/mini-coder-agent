@@ -5,6 +5,7 @@ import difflib
 import hashlib
 import json
 import os
+import shutil
 import string
 import threading
 from pathlib import Path
@@ -32,6 +33,10 @@ class StartRunBody(BaseModel):
 
 class ApprovalBody(BaseModel):
     approved: bool
+
+
+class RenameSessionBody(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
 
 
 class WorkspaceCatalog:
@@ -438,6 +443,70 @@ def create_app(
                 for change in session.changes
             ],
             "verifications": [item.to_dict() for item in session.verification_records],
+        }
+
+    @app.patch("/api/sessions/{session_id}")
+    def rename_session(session_id: str, body: RenameSessionBody) -> dict:
+        session = _resolve_catalog_session(catalog, session_id)
+        if any(
+            item.get("session_id") == session.session_id
+            for item in active_controller.active_runs()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="这个会话仍在运行，请停止任务后再重命名。",
+            )
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="会话名称不能为空")
+        session.title = title
+        session.touch()
+        try:
+            SessionStore.for_workspace(session.workspace).save(session)
+        except SessionError as exc:
+            raise HTTPException(status_code=500, detail="无法保存新的会话名称") from exc
+        return _session_summary(session)
+
+    @app.delete("/api/sessions/{session_id}")
+    def delete_session(session_id: str) -> dict:
+        session = _resolve_catalog_session(catalog, session_id)
+        if any(
+            item.get("session_id") == session.session_id
+            for item in active_controller.active_runs()
+        ) or session.status in {
+            SessionStatus.RUNNING,
+            SessionStatus.WAITING_FOR_APPROVAL,
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="这个会话仍在运行，请先停止任务再删除。",
+            )
+        workspace = Path(session.workspace).expanduser().resolve()
+        store = SessionStore.for_workspace(workspace)
+        try:
+            store.delete(session.session_id)
+        except SessionError as exc:
+            raise HTTPException(status_code=404, detail="找不到这个会话") from exc
+
+        runtime_root = (workspace / ".mini-coder" / "runtime").resolve()
+        runtime_directory = runtime_root / session.session_id
+        runtime_removed = False
+        runtime_warning = None
+        try:
+            if runtime_directory.is_symlink():
+                runtime_directory.unlink()
+                runtime_removed = True
+            elif runtime_directory.is_dir():
+                shutil.rmtree(runtime_directory)
+                runtime_removed = True
+        except OSError:
+            runtime_warning = "会话已删除，但部分临时运行文件暂时无法清理。"
+        return {
+            "deleted": True,
+            "session_id": session.session_id,
+            "title": session.title,
+            "runtime_removed": runtime_removed,
+            "warning": runtime_warning,
         }
 
     @app.get("/api/sessions/{session_id}/changes/{change_id}")

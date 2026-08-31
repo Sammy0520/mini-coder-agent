@@ -97,6 +97,18 @@ class SessionStore:
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return sessions
 
+    def delete(self, session_id: str) -> AgentSession:
+        """Delete exactly one persisted session and return its last saved state."""
+        session = self.load(session_id)
+        path = self.path_for(session.session_id)
+        try:
+            path.unlink()
+        except FileNotFoundError as exc:
+            raise SessionError(f"session does not exist: {path}") from exc
+        except OSError as exc:
+            raise SessionError(f"cannot delete session from {path}: {exc}") from exc
+        return session
+
     def resolve(self, identifier: str | Path) -> Path:
         candidate = Path(identifier).expanduser()
         if candidate.is_absolute() or candidate.parent != Path(".") or candidate.suffix == ".json":

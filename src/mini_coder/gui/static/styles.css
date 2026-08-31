@@ -50,9 +50,18 @@ button { color: inherit; }
 .session-section-label { display: flex; justify-content: space-between; padding: 14px 8px 7px; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
 .global-session-label { padding-top: 15px; border-top: 1px solid var(--border); }
 .session-list { min-height: 0; flex: 1; overflow-y: auto; }
-.session-item { width: 100%; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 8px; padding: 9px 8px; border: 0; border-radius: 10px; background: transparent; cursor: pointer; text-align: left; }
+.session-item { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 27px; align-items: center; gap: 2px; padding: 2px; border-radius: 10px; background: transparent; }
 .session-item:hover { background: #f0f3fa; }
 .session-item.active { background: #e9edfb; }
+.session-open-button { min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 8px; padding: 7px 6px; border: 0; background: transparent; cursor: pointer; text-align: left; }
+.session-menu-button { width: 25px; height: 25px; display: grid; place-items: center; padding: 0 0 7px; color: #69758b; border: 0; border-radius: 7px; background: transparent; cursor: pointer; font-size: 18px; font-weight: 800; line-height: 1; opacity: .58; }
+.session-menu-button:hover, .session-menu-button:focus-visible, .session-menu-button[aria-expanded="true"] { color: #35415a; background: #fff; opacity: 1; }
+.session-action-menu { position: fixed; z-index: 70; width: 158px; overflow: hidden; padding: 6px; border: 1px solid var(--border); border-radius: 11px; background: #fff; box-shadow: 0 18px 50px rgba(27, 43, 82, .2); }
+.session-action-menu button { width: 100%; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 7px; padding: 8px 9px; color: #35415a; border: 0; border-radius: 7px; background: transparent; cursor: pointer; text-align: left; font-size: 10px; font-weight: 720; }
+.session-action-menu button:hover, .session-action-menu button:focus-visible { background: #f0f3fa; }
+.session-action-menu button:disabled { cursor: not-allowed; opacity: .42; }
+.session-action-menu .danger-menu-item { color: #b52f48; }
+.session-action-menu .danger-menu-item:hover, .session-action-menu .danger-menu-item:focus-visible { background: #fff0f3; }
 .session-item-icon { width: 29px; height: 29px; display: grid; place-items: center; color: #6c7890; border-radius: 9px; background: #fff; border: 1px solid var(--border); font-size: 11px; }
 .session-item.active .session-item-icon { color: #fff; border-color: var(--blue); background: var(--blue); }
 .session-item strong, .session-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -67,7 +76,6 @@ button { color: inherit; }
 .main-pane { min-width: 0; min-height: 0; height: 100vh; overflow: hidden; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: rgba(255, 255, 255, .58); }
 .conversation-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 19px 25px 15px; background: rgba(255, 255, 255, .72); }
 .conversation-header h2 { margin: 4px 0 0; font-size: 20px; letter-spacing: -.03em; }
-.conversation-project { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
 .header-actions, .change-actions { display: flex; align-items: center; gap: 7px; }
 .outline-button { padding: 8px 12px; color: #4b5c78; border: 1px solid var(--border); border-radius: 9px; background: #fff; cursor: pointer; font-size: 10px; font-weight: 750; }
 .stop-button { padding: 8px 12px; color: #a62f45; border: 1px solid #efc5cd; border-radius: 9px; background: #fff5f7; cursor: pointer; font-size: 10px; font-weight: 800; }
@@ -191,8 +199,24 @@ button { color: inherit; }
 .execution-details { margin: 0; padding: 0 12px 10px 39px; color: var(--muted); font: 8px/1.55 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: rgba(30, 40, 65, .3); backdrop-filter: blur(5px); }
-.setup-dialog, .folder-dialog, .code-dialog { width: min(700px, 100%); max-height: calc(100vh - 36px); overflow: hidden; border: 1px solid var(--border); border-radius: 17px; background: #fff; box-shadow: 0 30px 100px rgba(25, 39, 75, .25); }
+.setup-dialog, .folder-dialog, .code-dialog, .delete-dialog, .rename-dialog, .session-info-dialog { width: min(700px, 100%); max-height: calc(100vh - 36px); overflow: hidden; border: 1px solid var(--border); border-radius: 17px; background: #fff; box-shadow: 0 30px 100px rgba(25, 39, 75, .25); }
 .setup-dialog { width: min(620px, 100%); }
+.delete-dialog, .rename-dialog, .session-info-dialog { width: min(480px, 100%); }
+.delete-dialog-body { padding: 18px; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.delete-dialog-body p { margin: 0; }
+.delete-session-name { margin-bottom: 9px !important; color: var(--text); font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }
+.rename-dialog-body { display: grid; gap: 7px; padding: 18px; }
+.rename-dialog-body label { font-size: 10px; font-weight: 800; }
+.rename-dialog-body input { width: 100%; padding: 11px 12px; color: var(--text); border: 1px solid var(--border); border-radius: 9px; outline: none; background: #fbfcff; font-size: 11px; }
+.rename-dialog-body input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(80, 104, 231, .1); }
+.rename-dialog-body p { margin: 0; color: var(--muted); font-size: 9px; }
+.session-info-list { display: grid; margin: 0; padding: 4px 18px; }
+.session-info-list > div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 13px 0; border-bottom: 1px solid #edf0f5; }
+.session-info-list > div:last-child { border-bottom: 0; }
+.session-info-list dt { color: var(--muted); font-size: 10px; }
+.session-info-list dd { min-width: 0; margin: 0; color: var(--text); font-size: 10px; font-weight: 750; overflow-wrap: anywhere; }
+.danger-button { padding: 8px 12px; color: #fff; border: 1px solid #b9324c; border-radius: 9px; background: #c83e55; cursor: pointer; font-size: 10px; font-weight: 800; }
+.danger-button:disabled { cursor: wait; opacity: .6; }
 .folder-dialog { display: grid; grid-template-rows: auto auto auto minmax(220px, 1fr) auto; }
 .code-dialog { width: min(1050px, 100%); display: grid; grid-template-rows: auto auto minmax(320px, 1fr) auto; }
 .folder-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 18px; border-bottom: 1px solid var(--border); }

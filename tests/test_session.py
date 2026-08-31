@@ -404,6 +404,23 @@ class SessionStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(SessionError, "does not match file name"):
                 store.load(mismatched)
 
+    def test_delete_removes_only_the_requested_session_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            first = make_session(workspace)
+            second = make_session(workspace)
+            store.save(first)
+            store.save(second)
+
+            deleted = store.delete(first.session_id)
+
+            self.assertEqual(deleted.session_id, first.session_id)
+            self.assertFalse(store.path_for(first.session_id).exists())
+            self.assertTrue(store.path_for(second.session_id).exists())
+            with self.assertRaisesRegex(SessionError, "does not exist"):
+                store.delete(first.session_id)
+
 
 class SessionRunnerTests(unittest.TestCase):
     def test_user_cancellation_is_persisted_as_resumable_interruption(self) -> None:
