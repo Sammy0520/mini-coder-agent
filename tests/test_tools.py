@@ -304,6 +304,87 @@ class ToolTests(unittest.TestCase):
             CommandRisk.UNKNOWN,
         )
 
+    def test_common_syntax_checks_are_read_only(self) -> None:
+        commands = (
+            "node --check app.js",
+            "node -c app.js",
+            "ruby -c app.rb",
+            "php -l app.php",
+            "perl -c app.pl",
+            "bash -n script.sh",
+            "sh -n script.sh",
+            "gcc -fsyntax-only main.c",
+            "clang++ -std=c++20 -fsyntax-only main.cpp",
+            "git branch --list",
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(assess_command(command).level, CommandRisk.READ_ONLY)
+
+    def test_common_development_verification_commands_are_workspace_scoped(self) -> None:
+        commands = (
+            "python -m pytest -q",
+            "python -m doctest README.md",
+            "python -m compileall src",
+            "ruff check src",
+            "black --check src",
+            "mypy src",
+            "npm run test:unit",
+            "pnpm run typecheck",
+            "yarn run lint",
+            "bun test",
+            "vitest run",
+            "prettier --check .",
+            "deno fmt --check",
+            "cargo clippy --all-targets",
+            "go vet ./...",
+            "golangci-lint run",
+            "dotnet test",
+            "mvn -q test",
+            "gradlew --no-daemon check",
+            "ctest --test-dir build",
+            "cmake --build build",
+            "bundle exec rspec",
+            "phpunit",
+            "swift test",
+            "flutter analyze",
+            "mix test",
+            "rebar3 eunit",
+            "zig test src/main.zig",
+            "shellcheck script.sh",
+            "markdownlint README.md",
+            "terraform validate",
+            "helm lint chart",
+            "docker compose config",
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    assess_command(command).level,
+                    CommandRisk.WORKSPACE_WRITE,
+                )
+
+    def test_validation_names_do_not_hide_external_or_destructive_actions(self) -> None:
+        expectations = {
+            "npm audit": CommandRisk.EXTERNAL_EFFECT,
+            "python -m pip install pytest": CommandRisk.EXTERNAL_EFFECT,
+            "cargo audit": CommandRisk.EXTERNAL_EFFECT,
+            "terraform plan": CommandRisk.EXTERNAL_EFFECT,
+            "helm install demo chart": CommandRisk.EXTERNAL_EFFECT,
+            "git branch -d merged-work": CommandRisk.DANGEROUS,
+            "git branch -D old-work": CommandRisk.DANGEROUS,
+            "git diff --output report.txt": CommandRisk.DANGEROUS,
+            "npm test && git push": CommandRisk.UNKNOWN,
+            "node --check app.js & git push": CommandRisk.UNKNOWN,
+            "node --check app.js > result.txt": CommandRisk.DANGEROUS,
+        }
+
+        for command, expected in expectations.items():
+            with self.subTest(command=command):
+                self.assertEqual(assess_command(command).level, expected)
+
     def test_command_timeout_terminates_process_tree_and_records_truncation(self) -> None:
         command = f'"{sys.executable}" -c "import time; time.sleep(5)"'
 

@@ -29,6 +29,36 @@ class VerificationTrackerTests(unittest.TestCase):
             )
         )
 
+    def test_cross_language_checks_are_recognized_as_verification(self) -> None:
+        tracker = VerificationTracker()
+        commands = (
+            "node --check app.js",
+            "ruff check src",
+            "npm run test:unit",
+            "deno check app.ts",
+            "cargo clippy",
+            "go vet ./...",
+            "dotnet test",
+            "mvn -q verify",
+            "gradlew check",
+            "ctest --test-dir build",
+            "bundle exec rspec",
+            "phpunit",
+            "swift test",
+            "flutter analyze",
+            "mix test",
+            "zig test src/main.zig",
+            "shellcheck script.sh",
+            "terraform validate",
+            "helm lint chart",
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    tracker.is_verification_command({"command": command})
+                )
+
     def test_latest_current_record_controls_status(self) -> None:
         passed = VerificationRecord.create(
             tool_execution_id="execution-pass",

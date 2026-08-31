@@ -7,15 +7,22 @@ from .models import VerificationRecord, VerificationStatus
 
 
 _VERIFICATION_PATTERNS = (
-    r"(?:^|\s)(?:python(?:\.exe)?\s+-m\s+)?(?:unittest|pytest)(?:\s|$)",
-    r"(?:^|\s)(?:py\.test|tox|nox|vitest|jest)(?:\s|$)",
-    r"(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|check|typecheck))(?:\s|$)",
-    r"(?:^|\s)cargo\s+(?:test|check|clippy)(?:\s|$)",
-    r"(?:^|\s)go\s+test(?:\s|$)",
-    r"(?:^|\s)dotnet\s+(?:test|build)(?:\s|$)",
-    r"(?:^|\s)(?:mvn|mvnw|gradle|gradlew)(?:\.cmd|\.bat)?\s+.*(?:test|verify|check|build)(?:\s|$)",
-    r"(?:^|\s)make\s+(?:test|check|lint)(?:\s|$)",
-    r"(?:^|\s)(?:ruff\s+check|mypy|pyright|eslint|tsc)(?:\s|$)",
+    r"(?:^|\s)(?:python(?:\.exe)?\s+-m\s+)?(?:unittest|pytest|doctest|compileall|py_compile)(?:\s|$)",
+    r"(?:^|\s)(?:py\.test|tox|nox|ruff\s+(?:check|format)|black|isort|flake8|pylint|mypy|pyright|basedpyright|bandit)(?:\s|$)",
+    r"(?:^|\s)(?:node\s+(?:--check|-c)|vitest|jest|eslint|stylelint|tsc|biome\s+(?:check|lint)|prettier\s+(?:--check|--list-different))(?:\s|$)",
+    r"(?:^|\s)(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|check|typecheck|format)(?::[\w.-]+)?)(?:\s|$)",
+    r"(?:^|\s)deno\s+(?:test|check|lint|fmt\s+--check)(?:\s|$)",
+    r"(?:^|\s)cargo\s+(?:test|check|clippy|build|fmt)(?:\s|$)",
+    r"(?:^|\s)go\s+(?:test|vet)(?:\s|$)",
+    r"(?:^|\s)(?:golangci-lint\s+run|staticcheck)(?:\s|$)",
+    r"(?:^|\s)dotnet\s+(?:test|build|format)(?:\s|$)",
+    r"(?:^|\s)(?:mvn|mvnw|gradle|gradlew)(?:\.cmd|\.bat)?\s+.*(?:test|verify|check|build|package|assemble)(?:\s|$)",
+    r"(?:^|\s)(?:ant|make)\s+(?:test|check|build|lint)(?:\s|$)",
+    r"(?:^|\s)(?:ctest|cmake\s+--build|ninja\s+(?:test|check)|meson\s+(?:test|compile)|javac)(?:\s|$)",
+    r"(?:^|\s)(?:(?:bundle\s+exec\s+)?rspec|rake\s+(?:test|spec)|phpunit|phpstan\s+analyse|psalm|composer\s+(?:test|run\s+test))(?:\s|$)",
+    r"(?:^|\s)(?:swift\s+(?:test|build)|dart\s+(?:test|analyze)|flutter\s+(?:test|analyze)|mix\s+(?:test|compile|format)|rebar3\s+(?:eunit|ct|compile)|zig\s+(?:test|build))(?:\s|$)",
+    r"(?:^|\s)(?:shellcheck|shfmt\s+-d|markdownlint|markdownlint-cli|rstcheck|vale|yamllint|taplo\s+check|actionlint|hadolint)(?:\s|$)",
+    r"(?:^|\s)(?:docker\s+compose\s+config|(?:terraform|tofu)\s+(?:validate|fmt\s+-check)|helm\s+(?:lint|template)|mkdocs\s+build|sphinx-build)(?:\s|$)",
 )
 
 _DOCUMENTATION_SUFFIXES = {".md", ".markdown", ".rst"}
@@ -26,7 +33,11 @@ _DOMAIN_SUFFIXES = {
     "python": {".py", ".pyi", ".pyx"},
     "web": {".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".css", ".scss", ".html"},
     "docs": _DOCUMENTATION_SUFFIXES,
-    "native": {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".rs", ".go", ".java", ".kt", ".cs"},
+    "native": {
+        ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".rs", ".go",
+        ".java", ".kt", ".cs", ".rb", ".php", ".swift", ".dart",
+        ".ex", ".exs", ".erl", ".hrl", ".zig", ".sh",
+    },
 }
 _CONFIG_NAMES = {
     "pyproject.toml",
@@ -40,6 +51,17 @@ _CONFIG_NAMES = {
     "go.mod",
     "pom.xml",
     "build.gradle",
+    "build.gradle.kts",
+    "composer.json",
+    "gemfile",
+    "package.swift",
+    "pubspec.yaml",
+    "mix.exs",
+    "rebar.config",
+    "cmakelists.txt",
+    "makefile",
+    "docker-compose.yml",
+    "compose.yaml",
 }
 
 
@@ -228,9 +250,14 @@ def _scope_domains(arguments: dict[str, Any]) -> tuple[str, ...]:
         return ("docs",)
     if re.search(r"(?:python|pytest|unittest|ruff|mypy|pyright|tox|nox)", lowered):
         return ("python", "config")
-    if re.search(r"(?:npm|pnpm|yarn|bun|vitest|jest|eslint|tsc)", lowered):
+    if re.search(r"(?:node|npm|pnpm|yarn|bun|deno|vitest|jest|eslint|tsc|biome|prettier|stylelint)", lowered):
         return ("web", "config")
-    if re.search(r"(?:cargo|go\s+test|dotnet|mvn|gradle|make)", lowered):
+    if re.search(
+        r"(?:cargo|go\s+(?:test|vet)|golangci|staticcheck|dotnet|mvn|gradle|"
+        r"ant|make|cmake|ctest|ninja|meson|javac|rspec|rake|phpunit|phpstan|"
+        r"psalm|swift|dart|flutter|mix|rebar3|zig|shellcheck)",
+        lowered,
+    ):
         return ("native", "config")
     return ("all",)
 

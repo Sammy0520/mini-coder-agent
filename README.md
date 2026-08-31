@@ -202,6 +202,8 @@ mini-coder --config agent.toml --workspace D:\path\to\project `
 
 命令风险分类是保守的本地策略，不是通用 shell 静态分析或操作系统沙箱。已知只读命令可直接执行；`safe` 模式仍会确认写工作区的命令；`--auto` 仅可自动批准已知 `read_only` 和 `workspace_write`。安装依赖、联网、Git 远端操作等 `external_effect`，删除/覆盖等 `dangerous`，以及无法理解的 `unknown` 命令始终要求人工确认。审批提示会显示命令、工作目录、风险等级和预期副作用。
 
+本地策略覆盖常见开发验证入口：Python unittest/pytest/doctest/编译检查和主流 lint/type check，Node 语法检查及 npm/pnpm/yarn/bun 的标准 test/build/lint/check 脚本，Deno、Rust、Go、JVM、.NET、C/C++ 构建测试，Ruby、PHP、Swift、Dart/Flutter、Elixir/Erlang、Zig，以及 Shell、文档、YAML/TOML、Compose 配置、Terraform/OpenTofu validate 和 Helm lint。可能生成缓存或构建产物的命令归为 `workspace_write`，不假装成纯只读。带安装、发布、部署、联网审计、远端操作、删除、覆盖、重定向或复合 shell 语法的相似命令仍不会自动放行。
+
 ## 项目理解、分页与 Git 基线
 
 新任务开始时，本地会做一次有界、确定性的工作区发现，并把摘要作为 developer 消息提供给模型。它只记录理解项目所需的元数据，不把整个仓库内容塞入上下文：
