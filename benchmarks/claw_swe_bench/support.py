@@ -87,6 +87,19 @@ def classify_infrastructure_failure(*texts: str) -> str | None:
     return None
 
 
+def classify_process_infrastructure_failure(
+    *, stdout: str, stderr: str, exit_code: int
+) -> str | None:
+    """Classify process failures without treating successful agent prose as errors."""
+
+    # Agent messages can legitimately discuss HTTP 401, authentication, quota,
+    # and network failures in the repository being repaired. A successful CLI
+    # process must not be marked as infrastructure failure from that prose.
+    if exit_code == 0:
+        return classify_infrastructure_failure(stderr)
+    return classify_infrastructure_failure(stdout, stderr)
+
+
 def provider_preflight(
     *, api_key: str, base_url: str, model: str, timeout: float = 45.0
 ) -> None:

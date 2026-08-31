@@ -11,7 +11,7 @@ from claw_swebench.types import AgentResult
 from benchmarks.claw_swe_bench.support import (
     BENCHMARK_INTEGRITY_NOTICE,
     benchmark_integrity_violations,
-    classify_infrastructure_failure,
+    classify_process_infrastructure_failure,
     codex_metrics,
     mini_session_metrics,
     newest_session,
@@ -195,7 +195,9 @@ class MiniCoderAdapter(BaseClawAdapter):
         usage = mini_session_metrics(session)
         session_id = str(usage.get("session_id")) if usage.get("session_id") else None
         events = read_jsonl(event_path)
-        self.last_infrastructure_error = classify_infrastructure_failure(stdout, stderr)
+        self.last_infrastructure_error = classify_process_infrastructure_failure(
+            stdout=stdout, stderr=stderr, exit_code=exit_code
+        )
         self.last_integrity_violations = benchmark_integrity_violations(events)
         if self.last_infrastructure_error:
             finish_reason = "infrastructure_error"
@@ -343,7 +345,9 @@ class CodexAdapter(BaseClawAdapter):
         events = read_jsonl(stdout_path)
         usage = codex_metrics(events)
         thread_id = str(usage.get("thread_id")) if usage.get("thread_id") else None
-        self.last_infrastructure_error = classify_infrastructure_failure(stdout, stderr)
+        self.last_infrastructure_error = classify_process_infrastructure_failure(
+            stdout=stdout, stderr=stderr, exit_code=exit_code
+        )
         self.last_integrity_violations = benchmark_integrity_violations(events)
         if self.last_infrastructure_error:
             finish_reason = "infrastructure_error"

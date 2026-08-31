@@ -23,6 +23,7 @@ from benchmarks.claw_swe_bench.run_experiment import (
 from benchmarks.claw_swe_bench.support import (
     benchmark_integrity_violations,
     classify_infrastructure_failure,
+    classify_process_infrastructure_failure,
     codex_metrics,
     mini_session_metrics,
     ProviderPreflightError,
@@ -235,6 +236,20 @@ class ClawUsageTests(unittest.TestCase):
         )
         self.assertIsNone(
             classify_infrastructure_failure("tests failed: assertion mismatch")
+        )
+
+    def test_successful_agent_prose_does_not_become_infrastructure_error(self) -> None:
+        prose = "Preserve the existing 401 Unauthorized authentication behavior."
+        self.assertIsNone(
+            classify_process_infrastructure_failure(
+                stdout=prose, stderr="", exit_code=0
+            )
+        )
+        self.assertEqual(
+            classify_process_infrastructure_failure(
+                stdout="HTTP 401 invalid_api_key", stderr="", exit_code=1
+            ),
+            "authentication",
         )
 
     def test_external_source_lookup_is_an_integrity_violation(self) -> None:
