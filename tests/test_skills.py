@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from mini_coder.skills import SkillRegistry, render_selected_skill
-from mini_coder.tasking import TaskIntent
+from mini_coder.tasking import TaskIntent, frame_task
 
 
 class SkillRegistryTests(unittest.TestCase):
@@ -23,6 +23,18 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertIn("bug-fix", prompt)
         self.assertNotIn("small-app", prompt)
         self.assertNotIn("project-docs", prompt)
+
+    def test_build_wording_wins_over_incidental_improve_word(self) -> None:
+        brief = frame_task(
+            "帮我从零做一个本地书签整理工具，尽量简单好用",
+            {"root_entries": ["README.txt"]},
+        )
+        registry = SkillRegistry.builtins_only()
+        selected = registry.select(brief.goal, brief.intent)
+
+        self.assertEqual(brief.intent, TaskIntent.BUILD)
+        self.assertEqual(selected.skill_id if selected else None, "small-app")
+        self.assertIn("node --check", render_selected_skill(selected))
 
     def test_custom_skill_round_trip_auto_selection_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

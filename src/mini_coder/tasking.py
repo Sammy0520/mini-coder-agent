@@ -281,11 +281,13 @@ def _detect_intent(lowered: str, workspace_kind: str) -> TaskIntent:
         return TaskIntent.FIX
     if any(marker in lowered for marker in _EXPLAIN_MARKERS):
         return TaskIntent.EXPLAIN
+    if any(marker in lowered for marker in _BUILD_MARKERS):
+        return TaskIntent.BUILD
     if any(marker in lowered for marker in _IMPROVE_MARKERS):
         return TaskIntent.IMPROVE
     if any(marker in lowered for marker in _FEATURE_MARKERS) and workspace_kind == "existing":
         return TaskIntent.FEATURE
-    if workspace_kind == "empty" or any(marker in lowered for marker in _BUILD_MARKERS):
+    if workspace_kind == "empty":
         return TaskIntent.BUILD
     return TaskIntent.FEATURE
 
