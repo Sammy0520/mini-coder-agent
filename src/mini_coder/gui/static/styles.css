@@ -50,19 +50,24 @@ button { color: inherit; }
 .session-section-label { display: flex; justify-content: space-between; padding: 14px 8px 7px; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
 .global-session-label { padding-top: 15px; border-top: 1px solid var(--border); }
 .session-list { min-height: 0; flex: 1; overflow-y: auto; }
-.session-item { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 27px; align-items: center; gap: 2px; padding: 2px; border-radius: 10px; background: transparent; }
+.session-item { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 31px; align-items: center; gap: 2px; padding: 3px; border-radius: 11px; background: transparent; }
 .session-item:hover { background: #f0f3fa; }
 .session-item.active { background: #e9edfb; }
-.session-open-button { min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 8px; padding: 7px 6px; border: 0; background: transparent; cursor: pointer; text-align: left; }
-.session-menu-button { width: 25px; height: 25px; display: grid; place-items: center; padding: 0 0 7px; color: #69758b; border: 0; border-radius: 7px; background: transparent; cursor: pointer; font-size: 18px; font-weight: 800; line-height: 1; opacity: .58; }
-.session-menu-button:hover, .session-menu-button:focus-visible, .session-menu-button[aria-expanded="true"] { color: #35415a; background: #fff; opacity: 1; }
+.session-open-button { min-width: 0; display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 5px; border: 0; background: transparent; cursor: pointer; text-align: left; }
+.session-menu-button { width: 29px; height: 29px; display: grid; place-items: center; padding: 0; color: #7a8498; border: 0; border-radius: 8px; background: transparent; cursor: pointer; opacity: .72; }
+.session-menu-button:hover, .session-menu-button:focus-visible, .session-menu-button[aria-expanded="true"] { color: #35415a; outline: none; background: #fff; box-shadow: 0 0 0 1px #d7ddea; opacity: 1; }
+.session-menu-dots { width: 19px; height: 19px; fill: currentColor; }
 .session-action-menu { position: fixed; z-index: 70; width: 158px; overflow: hidden; padding: 6px; border: 1px solid var(--border); border-radius: 11px; background: #fff; box-shadow: 0 18px 50px rgba(27, 43, 82, .2); }
-.session-action-menu button { width: 100%; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 7px; padding: 8px 9px; color: #35415a; border: 0; border-radius: 7px; background: transparent; cursor: pointer; text-align: left; font-size: 10px; font-weight: 720; }
-.session-action-menu button:hover, .session-action-menu button:focus-visible { background: #f0f3fa; }
+.session-action-menu button { width: 100%; display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 7px; padding: 9px 9px; color: #35415a; border: 0; border-radius: 7px; background: transparent; cursor: pointer; text-align: left; font-size: 10px; font-weight: 720; }
+.session-action-menu button:hover, .session-action-menu button:focus-visible { outline: none; background: #f0f3fa; box-shadow: inset 0 0 0 1px #dce2ef; }
 .session-action-menu button:disabled { cursor: not-allowed; opacity: .42; }
 .session-action-menu .danger-menu-item { color: #b52f48; }
 .session-action-menu .danger-menu-item:hover, .session-action-menu .danger-menu-item:focus-visible { background: #fff0f3; }
-.session-item-icon { width: 29px; height: 29px; display: grid; place-items: center; color: #6c7890; border-radius: 9px; background: #fff; border: 1px solid var(--border); font-size: 11px; }
+.menu-icon { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.session-item-icon { width: 35px; height: 35px; display: grid; place-items: center; color: #637087; border-radius: 11px; background: #fff; border: 1px solid var(--border); }
+.session-status-svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+.session-status-fill { fill: currentColor; stroke: none; }
+.session-status-fill.status-pulse { transform-origin: center; animation: pulse 1.5s infinite; }
 .session-item.active .session-item-icon { color: #fff; border-color: var(--blue); background: var(--blue); }
 .session-item strong, .session-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-item strong { padding-top: 1px; font-size: 11px; }

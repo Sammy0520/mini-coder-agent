@@ -286,7 +286,7 @@ function renderSessions(sessions) {
     const menuButton = document.createElement("button");
     menuButton.type = "button";
     menuButton.className = "session-menu-button";
-    menuButton.textContent = "…";
+    menuButton.innerHTML = '<svg class="session-menu-dots" aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>';
     menuButton.title = "会话操作";
     menuButton.setAttribute("aria-label", `会话操作：${session.title || "未命名会话"}`);
     menuButton.setAttribute("aria-haspopup", "menu");
@@ -1559,10 +1559,20 @@ function labelStatus(status) {
 }
 
 function sessionIcon(status) {
-  if (String(status).startsWith("completed")) return "✓";
-  if (status === "running" || status === "waiting_for_approval") return "●";
-  if (status === "failed" || status === "verification_failed") return "!";
-  return "○";
+  const common = 'class="session-status-svg" aria-hidden="true" viewBox="0 0 24 24"';
+  if (String(status).startsWith("completed")) {
+    return `<svg ${common}><path d="m5.5 12.5 4 4L18.5 7.5"></path></svg>`;
+  }
+  if (status === "running" || status === "waiting_for_approval" || status === "cancelling") {
+    return `<svg ${common}><circle class="session-status-fill status-pulse" cx="12" cy="12" r="5"></circle></svg>`;
+  }
+  if (status === "failed" || status === "verification_failed" || status === "denied") {
+    return `<svg ${common}><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5v6"></path><path d="M12 17v.2"></path></svg>`;
+  }
+  if (status === "interrupted" || status === "cancelled") {
+    return `<svg ${common}><circle cx="12" cy="12" r="8.5"></circle><path d="M9.5 9v6M14.5 9v6"></path></svg>`;
+  }
+  return `<svg ${common}><circle cx="12" cy="12" r="7"></circle></svg>`;
 }
 
 function sessionTime(value) {
