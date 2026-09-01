@@ -60,6 +60,35 @@ class SkillRegistryTests(unittest.TestCase):
             registry = SkillRegistry.with_user_skills(Path(directory))
             self.assertFalse(registry.delete_custom("bug-fix"))
 
+    def test_feature_intent_uses_fourth_builtin(self) -> None:
+        registry = SkillRegistry.builtins_only()
+        selected = registry.select("给现有页面增加搜索功能", TaskIntent.FEATURE)
+
+        self.assertEqual(len([skill for skill in registry.list() if skill.builtin]), 4)
+        self.assertEqual(selected.skill_id if selected else None, "feature-work")
+
+    def test_markdown_import_reads_frontmatter_and_persists_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = SkillRegistry.with_user_skills(Path(directory))
+            imported = registry.import_markdown(
+                """---
+name: 发布助手
+description: 发布前核对版本和测试结果
+---
+# 发布流程
+
+先运行已有测试，再核对版本号与变更记录。
+""",
+                source_name="SKILL.md",
+            )
+            restored = SkillRegistry.with_user_skills(Path(directory)).get(
+                imported.skill_id
+            )
+
+            self.assertEqual(imported.name, "发布助手")
+            self.assertEqual(restored.origin if restored else None, "markdown")
+            self.assertIn("运行已有测试", restored.instructions if restored else "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mini Coder Agent</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260901-3">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260901-4">
 </head>
 <body class="draft-mode">
   <div class="app-layout">
@@ -13,9 +13,9 @@
         <div class="brand-mark" aria-hidden="true"><span></span></div>
         <div><p class="eyebrow">LOCAL AGENT</p><h1>Mini Coder</h1></div>
       </div>
-      <button id="newSessionButton" class="new-session-button" type="button"><span>＋</span> 新建会话</button>
+      <button id="newSessionButton" class="new-session-button" type="button"><span>＋</span> <span id="newSessionLabel">新建会话</span></button>
       <section class="project-section">
-        <div class="session-section-label global-session-label"><span>所有会话</span><span id="sessionCount">0</span></div>
+        <div class="session-section-label global-session-label"><span id="allSessionsLabel">所有会话</span><span id="sessionCount">0</span></div>
         <div id="sessionList" class="session-list"><div class="sidebar-empty">还没有会话</div></div>
       </section>
       <div class="sidebar-footer">
@@ -47,55 +47,72 @@
       </section>
       <section id="conversation" class="conversation" aria-live="polite">
         <div id="welcomeState" class="welcome-state">
-          <div class="welcome-mark"><span></span></div><p class="eyebrow">开始协作</p><h3>你想让 Agent 完成什么？</h3>
-          <p>用一句话说想做什么就可以。Agent 会自己了解项目、补全安全的默认理解，修改前向你确认，完成后运行本地检查。</p>
+          <div class="welcome-mark"><span></span></div><p id="welcomeEyebrow" class="eyebrow">开始协作</p><h3 id="welcomeTitle">你想让 Agent 完成什么？</h3>
+          <p id="welcomeDescription">用一句话说想做什么就可以。Agent 会自己了解项目、补全安全的默认理解，修改前向你确认，完成后运行本地检查。</p>
           <div class="prompt-suggestions">
-            <button type="button" data-prompt="帮我把这个项目的说明整理得更容易看懂">完善项目文档</button>
-            <button type="button" data-prompt="这个项目运行时报错了，帮我找出原因并修好">修复运行问题</button>
-            <button type="button" data-prompt="帮我做一个简单的本地待办事项应用">从零创建小项目</button>
+            <button id="docsSuggestion" type="button" data-prompt-zh="帮我把这个项目的说明整理得更容易看懂" data-prompt-en="Improve this project's documentation and make it easier to understand">完善项目文档</button>
+            <button id="fixSuggestion" type="button" data-prompt-zh="这个项目运行时报错了，帮我找出原因并修好" data-prompt-en="This project fails when it runs. Find the cause and fix it">修复运行问题</button>
+            <button id="buildSuggestion" type="button" data-prompt-zh="帮我做一个简单的本地待办事项应用" data-prompt-en="Build a simple local to-do application for me">从零创建小项目</button>
           </div>
         </div>
         <div id="messageList" class="message-list"></div>
       </section>
       <footer id="composerShell" class="composer-shell">
-        <div class="composer"><textarea id="task" rows="3" placeholder="描述你希望 Agent 完成的任务…"></textarea><div class="composer-footer"><span id="composerHint">当前项目：D:\Code Agent</span><button id="runButton" class="send-button" type="button"><span>▶</span> 开始执行</button></div></div>
+        <div class="composer"><textarea id="task" rows="3" placeholder="描述你希望 Agent 完成的任务…"></textarea><div class="composer-footer"><span id="composerHint">当前项目：D:\Code Agent</span><button id="runButton" class="send-button" type="button"><span>▶</span> <span id="runButtonLabel">开始执行</span></button></div></div>
       </footer>
     </main>
 
     <aside id="inspector" class="inspector">
-      <div class="inspector-header"><div><p class="eyebrow">任务详情</p><h2>执行与变更</h2></div><button id="closeInspectorButton" class="icon-button" type="button" aria-label="关闭详情">×</button></div>
+      <div class="inspector-header"><div><p id="inspectorEyebrow" class="eyebrow">任务详情</p><h2 id="inspectorTitle">执行与变更</h2></div><button id="closeInspectorButton" class="icon-button" type="button" aria-label="关闭详情">×</button></div>
       <article id="approvalPanel" class="detail-card approval-card hidden">
         <div class="detail-card-header"><div><p class="eyebrow warning">需要你的确认</p><h3 id="approvalHeading">允许这次操作吗？</h3></div><span id="approvalRisk" class="risk-badge">WRITE</span></div>
         <p id="approvalTitle" class="approval-title"></p><details class="technical-details"><summary>查看技术参数</summary><pre id="approvalArguments" class="code-block"></pre></details>
         <div class="approval-actions"><button id="denyButton" class="secondary-button" type="button">拒绝</button><button id="approveButton" class="primary-button" type="button">允许操作</button></div>
       </article>
-      <article class="detail-card"><div class="detail-card-header"><div><p class="eyebrow">代码变更</p><h3>修改的文件</h3></div><div class="change-actions"><button id="undoButton" class="undo-button hidden" type="button">撤销上次修改</button><span id="diffStats" class="diff-stats">暂无修改</span></div></div><button id="changesToggleButton" class="changes-toggle" type="button" aria-expanded="false">展开 0 个文件</button><div id="changeList" class="change-list hidden"></div></article>
-      <article class="detail-card"><div class="detail-card-header"><div><p class="eyebrow">本地验证</p><h3>任务验收</h3></div><span id="verificationBadge" class="verification-badge neutral">未运行</span></div><p id="verificationMessage" class="verification-message">完成修改后，Agent 会运行项目内的检查命令。</p></article>
-      <article class="detail-card execution-card"><div class="detail-card-header"><div><p class="eyebrow">执行过程</p><h3>Agent 做了什么</h3><small id="turnSummary" class="turn-summary">第 1 轮 · 尚未开始</small></div><span id="eventCount" class="panel-count">0 项</span></div><div id="executionList" class="execution-list"><div class="detail-empty">执行步骤会以简明方式显示</div></div></article>
+      <article class="detail-card"><div class="detail-card-header"><div><p id="changesEyebrow" class="eyebrow">代码变更</p><h3 id="changesTitle">修改的文件</h3></div><div class="change-actions"><button id="undoButton" class="undo-button hidden" type="button">撤销上次修改</button><span id="diffStats" class="diff-stats">暂无修改</span></div></div><button id="changesToggleButton" class="changes-toggle" type="button" aria-expanded="false">展开 0 个文件</button><div id="changeList" class="change-list hidden"></div></article>
+      <article class="detail-card"><div class="detail-card-header"><div><p id="verificationEyebrow" class="eyebrow">本地验证</p><h3 id="verificationTitle">任务验收</h3></div><span id="verificationBadge" class="verification-badge neutral">未运行</span></div><p id="verificationMessage" class="verification-message">完成修改后，Agent 会运行项目内的检查命令。</p></article>
+      <article class="detail-card execution-card"><div class="detail-card-header"><div><p id="executionEyebrow" class="eyebrow">执行过程</p><h3 id="executionTitle">Agent 做了什么</h3><small id="turnSummary" class="turn-summary">第 1 轮 · 尚未开始</small></div><span id="eventCount" class="panel-count">0 项</span></div><div id="executionList" class="execution-list"><div class="detail-empty">执行步骤会以简明方式显示</div></div></article>
     </aside>
   </div>
 
   <div id="skillModal" class="modal-backdrop hidden" role="presentation">
     <section class="skill-dialog" role="dialog" aria-modal="true" aria-labelledby="skillDialogTitle">
       <div class="skill-page-header">
-        <div><p class="eyebrow">能力扩展</p><h2 id="skillDialogTitle">Skills</h2><p>Mini Coder 只在任务相关时加载一个 Skill，不会把全部说明塞进每轮对话。</p></div>
+        <div><p id="skillPageEyebrow" class="eyebrow">能力扩展</p><h2 id="skillDialogTitle">Skills</h2><p id="skillPageDescription">Mini Coder 只在任务相关时加载一个 Skill，不会把全部说明塞进每轮对话。</p></div>
         <div class="skill-page-actions"><button id="addSkillButton" class="primary-button" type="button">＋ 添加 Skill</button><button id="skillModalClose" class="icon-button" type="button" aria-label="关闭 Skills">×</button></div>
       </div>
       <div class="skill-page-body">
-        <section class="skill-section"><div class="skill-section-heading"><div><h3>内置 Skills</h3><p>覆盖最常见的轻量编程任务。</p></div><span id="builtinSkillCount" class="count-badge">3</span></div><div id="builtinSkillList" class="skill-grid"></div></section>
-        <section class="skill-section"><div class="skill-section-heading"><div><h3>我的 Skills</h3><p>添加团队约定或你常用的工作方式，Mini Coder 会根据名称和简介自动选择。</p></div><span id="customSkillCount" class="count-badge">0</span></div><div id="customSkillList" class="skill-grid"></div></section>
+        <section class="skill-section"><div class="skill-section-heading"><div><h3 id="builtinSkillsTitle">内置 Skills</h3><p id="builtinSkillsDescription">覆盖最常见的轻量编程任务。</p></div><span id="builtinSkillCount" class="count-badge">4</span></div><div id="builtinSkillList" class="skill-grid"></div></section>
+        <section class="skill-section"><div class="skill-section-heading"><div><h3 id="customSkillsTitle">我的 Skills</h3><p id="customSkillsDescription">添加团队约定或你常用的工作方式，Mini Coder 会根据名称和简介自动选择。</p></div><span id="customSkillCount" class="count-badge">0</span></div><div id="customSkillList" class="skill-grid"></div></section>
       </div>
     </section>
   </div>
 
   <div id="skillEditorModal" class="modal-backdrop hidden" role="presentation">
     <section class="skill-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="skillEditorTitle">
-      <div class="folder-dialog-header"><div><p class="eyebrow">自定义能力</p><h2 id="skillEditorTitle">添加 Skill</h2></div><button id="skillEditorClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
+      <div class="folder-dialog-header"><div><p id="skillEditorEyebrow" class="eyebrow">自定义能力</p><h2 id="skillEditorTitle">添加 Skill</h2></div><button id="skillEditorClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
       <div class="skill-editor-body">
-        <label for="skillNameInput">名称</label><input id="skillNameInput" maxlength="80" placeholder="例如：数据库迁移助手">
-        <label for="skillDescriptionInput">什么时候使用</label><input id="skillDescriptionInput" maxlength="240" placeholder="例如：处理数据库迁移、字段升级和兼容检查">
-        <label for="skillInstructionsInput">希望 Agent 遵循的做法</label><textarea id="skillInstructionsInput" rows="8" maxlength="8000" placeholder="用自然语言写清关键步骤、限制和验收方式…"></textarea>
-        <p>不用写提示词技巧，像给同事交代工作方式一样写即可。</p>
+        <div class="skill-import-tabs" role="tablist" aria-label="添加方式">
+          <button id="manualSkillTab" class="skill-import-tab active" data-skill-mode="manual" type="button">手动创建</button>
+          <button id="githubSkillTab" class="skill-import-tab" data-skill-mode="github" type="button">GitHub 地址</button>
+          <button id="markdownSkillTab" class="skill-import-tab" data-skill-mode="markdown" type="button">导入 Markdown</button>
+        </div>
+        <div id="manualSkillPanel" class="skill-editor-panel">
+          <label for="skillNameInput">名称</label><input id="skillNameInput" maxlength="80" placeholder="例如：数据库迁移助手">
+          <label for="skillDescriptionInput">什么时候使用</label><input id="skillDescriptionInput" maxlength="240" placeholder="例如：处理数据库迁移、字段升级和兼容检查">
+          <label for="skillInstructionsInput">希望 Agent 遵循的做法</label><textarea id="skillInstructionsInput" rows="8" maxlength="64000" placeholder="用自然语言写清关键步骤、限制和验收方式…"></textarea>
+          <p>不用写提示词技巧，像给同事交代工作方式一样写即可。</p>
+        </div>
+        <div id="githubSkillPanel" class="skill-editor-panel hidden">
+          <label for="skillGithubInput">公开 GitHub 地址</label>
+          <input id="skillGithubInput" type="url" placeholder="https://github.com/owner/repo/tree/main/skills/example">
+          <p>支持仓库、包含 SKILL.md 的目录，或 Markdown 文件地址。Mini Coder 会读取文件并保存在本机。</p>
+        </div>
+        <div id="markdownSkillPanel" class="skill-editor-panel hidden">
+          <input id="skillMarkdownFile" class="visually-hidden" type="file" accept=".md,.markdown,text/markdown">
+          <button id="chooseSkillMarkdownButton" class="markdown-import-card" type="button"><strong>选择本地 Markdown 文件</strong><span>支持 SKILL.md 或其他 .md / .markdown 文档，最多 64,000 个字符。</span></button>
+          <p id="skillMarkdownFileName">尚未选择文件</p>
+        </div>
       </div>
       <div class="dialog-footer"><button id="skillEditorCancel" class="secondary-button" type="button">取消</button><button id="skillEditorSave" class="primary-button" type="button">添加</button></div>
     </section>
@@ -104,7 +121,13 @@
   <div id="settingsModal" class="modal-backdrop hidden" role="presentation">
     <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
       <div class="folder-dialog-header"><div><p class="eyebrow">Mini Coder</p><h2 id="settingsTitle">设置</h2></div><button id="settingsModalClose" class="icon-button" type="button" aria-label="关闭">×</button></div>
-      <div class="settings-body"><label for="settingsConfigPath">公共模型配置文件</label><input id="settingsConfigPath" autocomplete="off" spellcheck="false"><p>这里只保存配置文件路径；API Key 不会显示在页面中。</p></div>
+      <div class="settings-body">
+        <label id="settingsLanguageLabel" for="settingsLanguage">语言 / Language</label>
+        <select id="settingsLanguage"><option value="zh-CN">中文</option><option value="en">English</option></select>
+        <label id="settingsConfigLabel" for="settingsConfigPath">公共模型配置文件</label>
+        <div class="settings-config-row"><input id="settingsConfigPath" autocomplete="off" spellcheck="false"><button id="settingsOpenConfig" class="secondary-button" type="button">打开</button></div>
+        <p id="settingsConfigHelp">这里只保存配置文件路径；API Key 不会显示在页面中。</p>
+      </div>
       <div class="dialog-footer"><button id="settingsCancel" class="secondary-button" type="button">取消</button><button id="settingsSave" class="primary-button" type="button">保存</button></div>
     </section>
   </div>
@@ -176,6 +199,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/assets/app.js?v=20260901-3" defer></script>
+  <script src="/assets/app.js?v=20260901-4" defer></script>
 </body>
 </html>

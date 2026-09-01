@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 import uvicorn
 
@@ -96,7 +97,7 @@ class GuiHttpTests(unittest.TestCase):
         base = f"http://127.0.0.1:{self.port}"
         with urllib.request.urlopen(f"{base}/api/skills", timeout=3) as response:
             initial = json.load(response)
-        self.assertEqual(initial["builtin_count"], 3)
+        self.assertEqual(initial["builtin_count"], 4)
         self.assertEqual(initial["custom_count"], 0)
 
         body = json.dumps(
@@ -127,6 +128,52 @@ class GuiHttpTests(unittest.TestCase):
         with urllib.request.urlopen(delete, timeout=3) as response:
             deleted = json.load(response)
         self.assertTrue(deleted["deleted"])
+
+    def test_skill_api_imports_markdown_and_public_github_content(self) -> None:
+        base = f"http://127.0.0.1:{self.port}"
+        markdown = """---
+name: 发布检查
+description: 发布前检查版本、变更记录和测试结果
+---
+# 发布检查
+
+先确认版本号，再运行已有测试并核对变更记录。
+"""
+        body = json.dumps(
+            {"content": markdown, "source_name": "SKILL.md"}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base}/api/skills/import-markdown",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            imported = json.load(response)
+        self.assertEqual(imported["name"], "发布检查")
+        self.assertEqual(imported["origin"], "markdown")
+
+        github_markdown = markdown.replace("发布检查", "依赖升级", 2).replace(
+            "发布前检查版本、变更记录和测试结果",
+            "升级依赖并检查兼容性和已有测试",
+        )
+        github_body = json.dumps(
+            {"url": "https://github.com/example/skills/blob/main/dependency.md"}
+        ).encode("utf-8")
+        github_request = urllib.request.Request(
+            f"{base}/api/skills/import-github",
+            data=github_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch(
+            "mini_coder.gui.app._download_github_markdown",
+            return_value=(github_markdown, "dependency.md"),
+        ):
+            with urllib.request.urlopen(github_request, timeout=3) as response:
+                github_imported = json.load(response)
+        self.assertEqual(github_imported["name"], "依赖升级")
+        self.assertEqual(github_imported["origin"], "github")
 
     def test_static_page_run_api_and_sse_form_one_vertical_slice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -178,6 +225,9 @@ class GuiHttpTests(unittest.TestCase):
             self.assertIn('id="stopRunButton"', index)
             self.assertIn('id="undoButton"', index)
             self.assertIn('id="changesToggleButton"', index)
+            self.assertIn('id="skillGithubInput"', index)
+            self.assertIn('id="skillMarkdownFile"', index)
+            self.assertIn('id="settingsLanguage"', index)
             self.assertIn('id="turnSummary"', index)
             self.assertIn('id="deleteSessionModal"', index)
             self.assertIn('id="renameSessionModal"', index)
@@ -207,6 +257,26 @@ class GuiHttpTests(unittest.TestCase):
             self.assertEqual(snapshot["title"], "Create answer file")
             self.assertEqual(snapshot["result"]["session_id"], "http-session")
             self.assertEqual(Path(snapshot["workspace"]), Path(directory).resolve())
+
+    def test_open_config_api_delegates_to_operating_system_handler(self) -> None:
+        base = f"http://127.0.0.1:{self.port}"
+        config_path = str((Path(self.catalog_directory.name) / "agent.toml").resolve())
+        body = json.dumps({"path": config_path}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base}/api/settings/open-config",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch(
+            "mini_coder.gui.app._open_local_config",
+            return_value=Path(config_path),
+        ) as opener:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                opened = json.load(response)
+
+        self.assertTrue(opened["opened"])
+        opener.assert_called_once_with(config_path)
 
     def test_session_history_and_full_change_api(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

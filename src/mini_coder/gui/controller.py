@@ -33,6 +33,7 @@ class RunRequest:
     session_id: str | None = None
     config_path: str | None = None
     auto: bool = False
+    language: str = "zh-CN"
 
 
 class RunnerLike(Protocol):
@@ -142,6 +143,9 @@ class RunController:
             title = session.title
         if len(title) > 120:
             raise ValueError("session title must not exceed 120 characters")
+        language = request.language if request.language in {"zh-CN", "en"} else ""
+        if not language:
+            raise ValueError("language must be zh-CN or en")
         normalized = RunRequest(
             task=task,
             workspace=str(workspace),
@@ -149,6 +153,7 @@ class RunController:
             session_id=session_id,
             config_path=str(config_path) if config_path is not None else None,
             auto=request.auto,
+            language=language,
         )
         record = RunRecord(
             run_id=uuid.uuid4().hex,
@@ -573,6 +578,7 @@ class RunController:
             cancellation_callback=cancellation_callback,
             session_store=SessionStore.for_workspace(config.workspace),
             session_title=request.title,
+            response_language=request.language,
         )
         session = (
             SessionStore.for_workspace(config.workspace).load(request.session_id)

@@ -42,6 +42,28 @@ def make_config(workspace: Path, **overrides) -> AgentConfig:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_gui_response_language_is_sent_as_stable_developer_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = FakeModel([ModelResponse(content="Done.")])
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                response_language="en",
+            )
+
+            runner.run("Explain this project")
+
+            language_messages = [
+                message["content"]
+                for message in model.requests[0][0]
+                if message.get("role") == "developer"
+                and "Runtime response language" in str(message.get("content"))
+            ]
+            self.assertEqual(len(language_messages), 1)
+            self.assertIn("English", language_messages[0])
+
     def test_selected_skill_is_injected_once_and_saved_in_turn_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -18,6 +18,7 @@ class Skill:
     description: str
     instructions: str
     builtin: bool = False
+    origin: str = "manual"
 
     def to_dict(self, *, include_instructions: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -25,6 +26,7 @@ class Skill:
             "name": self.name,
             "description": self.description,
             "builtin": self.builtin,
+            "origin": self.origin,
         }
         if include_instructions:
             data["instructions"] = self.instructions
@@ -42,6 +44,7 @@ _BUILTIN_SKILLS = (
             "无法复现时先收集证据，不凭猜测大改代码。"
         ),
         builtin=True,
+        origin="builtin",
     ),
     Skill(
         skill_id="small-app",
@@ -54,6 +57,19 @@ _BUILTIN_SKILLS = (
             "node --check 检查脚本；不要用 python -c 临时拼装一段新的验证程序，因为它无法被本地安全策略可靠分类。"
         ),
         builtin=True,
+        origin="builtin",
+    ),
+    Skill(
+        skill_id="feature-work",
+        name="完善现有功能",
+        description="在现有项目中添加或改进功能，同时保持原有结构和行为。",
+        instructions=(
+            "先沿用项目已有语言、框架、目录和交互方式，找到最小且完整的功能切入点。"
+            "不要因为局部需求重写整个项目；补齐直接相关的边界处理、测试或说明。"
+            "完成后运行项目已有检查，并确认未涉及的原有流程仍然可用。"
+        ),
+        builtin=True,
+        origin="builtin",
     ),
     Skill(
         skill_id="project-docs",
@@ -66,6 +82,7 @@ _BUILTIN_SKILLS = (
             "优先使用项目已有命令；静态 JavaScript 可用 node --check，不要用 python -c 临时拼装检查。"
         ),
         builtin=True,
+        origin="builtin",
     ),
 )
 
@@ -119,7 +136,14 @@ class SkillRegistry:
     def get(self, skill_id: str) -> Skill | None:
         return next((skill for skill in self.list() if skill.skill_id == skill_id), None)
 
-    def add_custom(self, *, name: str, description: str, instructions: str) -> Skill:
+    def add_custom(
+        self,
+        *,
+        name: str,
+        description: str,
+        instructions: str,
+        origin: str = "manual",
+    ) -> Skill:
         if self.user_directory is None:
             raise ValueError("用户 Skill 存储未启用")
         clean_name = " ".join(name.strip().split())
@@ -129,8 +153,8 @@ class SkillRegistry:
             raise ValueError("Skill 名称应为 2 到 80 个字符")
         if not 4 <= len(clean_description) <= 240:
             raise ValueError("Skill 简介应为 4 到 240 个字符")
-        if not 10 <= len(clean_instructions) <= 8_000:
-            raise ValueError("Skill 内容应为 10 到 8000 个字符")
+        if not 10 <= len(clean_instructions) <= 64_000:
+            raise ValueError("Skill 内容应为 10 到 64000 个字符")
         if any(skill.name.casefold() == clean_name.casefold() for skill in self.list()):
             raise ValueError("已经有同名 Skill")
         skill = Skill(
@@ -139,6 +163,7 @@ class SkillRegistry:
             description=clean_description,
             instructions=clean_instructions,
             builtin=False,
+            origin=origin if origin in {"manual", "markdown", "github"} else "manual",
         )
         self.user_directory.mkdir(parents=True, exist_ok=True)
         target = self._path_for(skill.skill_id)
@@ -149,6 +174,33 @@ class SkillRegistry:
         )
         os.replace(temporary, target)
         return skill
+
+    def import_markdown(
+        self,
+        content: str,
+        *,
+        source_name: str = "SKILL.md",
+        origin: str = "markdown",
+    ) -> Skill:
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Markdown 文件内容为空")
+        if len(content) > 64_000:
+            raise ValueError("Markdown Skill 不能超过 64000 个字符")
+        metadata, body = _split_frontmatter(content)
+        name = str(metadata.get("name") or "").strip() or _markdown_title(body)
+        if not name:
+            name = Path(source_name).stem.replace("_", " ").replace("-", " ")
+        description = str(metadata.get("description") or "").strip()
+        if not description:
+            description = _markdown_description(body)
+        if not description:
+            description = f"从 {source_name} 导入的自定义工作方式"
+        return self.add_custom(
+            name=name[:80],
+            description=" ".join(description.split())[:240],
+            instructions=body.strip(),
+            origin=origin,
+        )
 
     def delete_custom(self, skill_id: str) -> bool:
         if self.user_directory is None or not skill_id.startswith("custom-"):
@@ -177,6 +229,8 @@ class SkillRegistry:
             return self.get("bug-fix")
         if intent == TaskIntent.BUILD:
             return self.get("small-app")
+        if intent in {TaskIntent.FEATURE, TaskIntent.IMPROVE}:
+            return self.get("feature-work")
         return None
 
     def _select_custom(self, task: str, skills: list[Skill]) -> Skill | None:
@@ -202,6 +256,7 @@ class SkillRegistry:
                 name = str(data.get("name") or "").strip()
                 description = str(data.get("description") or "").strip()
                 instructions = str(data.get("instructions") or "").strip()
+                origin = str(data.get("origin") or "manual")
             except (OSError, json.JSONDecodeError, AttributeError):
                 continue
             if (
@@ -212,7 +267,14 @@ class SkillRegistry:
                 and instructions
             ):
                 skills.append(
-                    Skill(skill_id, name, description, instructions, builtin=False)
+                    Skill(
+                        skill_id,
+                        name,
+                        description,
+                        instructions,
+                        builtin=False,
+                        origin=origin,
+                    )
                 )
         return skills
 
@@ -232,7 +294,7 @@ def render_selected_skill(skill: Skill | None) -> str:
         f"- Purpose: {skill.description}\n"
         "Instructions:\n"
         f"{skill.instructions}"
-    )[:9_000]
+    )[:32_000]
 
 
 def _terms(value: str) -> set[str]:
@@ -241,3 +303,44 @@ def _terms(value: str) -> set[str]:
     for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", lowered):
         terms.update(chunk[index : index + 2] for index in range(len(chunk) - 1))
     return terms
+
+
+def _split_frontmatter(content: str) -> tuple[dict[str, str], str]:
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.startswith("---\n"):
+        return {}, normalized
+    end = normalized.find("\n---\n", 4)
+    if end < 0:
+        return {}, normalized
+    metadata: dict[str, str] = {}
+    for line in normalized[4:end].splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in {"name", "description"}:
+            metadata[key.strip()] = value.strip().strip("\"'")
+    return metadata, normalized[end + 5 :]
+
+
+def _markdown_title(content: str) -> str:
+    for line in content.splitlines():
+        match = re.match(r"^#{1,3}\s+(.+?)\s*$", line)
+        if match:
+            return match.group(1).strip(" #`*")
+    return ""
+
+
+def _markdown_description(content: str) -> str:
+    paragraph: list[str] = []
+    in_code = False
+    for line in content.splitlines():
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        stripped = line.strip()
+        if in_code or not stripped or stripped.startswith(("#", "-", "*", ">")):
+            if paragraph:
+                break
+            continue
+        paragraph.append(stripped)
+        if len(" ".join(paragraph)) >= 40:
+            break
+    return " ".join(paragraph)

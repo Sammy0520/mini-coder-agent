@@ -7,7 +7,12 @@ import json
 import os
 import shutil
 import string
+import subprocess
+import sys
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -30,6 +35,7 @@ class StartRunBody(BaseModel):
     session_id: str | None = Field(default=None, max_length=128)
     config_path: str | None = Field(default=None, max_length=2_000)
     auto: bool = False
+    language: str = Field(default="zh-CN", pattern=r"^(zh-CN|en)$")
 
 
 class ApprovalBody(BaseModel):
@@ -43,7 +49,104 @@ class RenameSessionBody(BaseModel):
 class AddSkillBody(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     description: str = Field(min_length=4, max_length=240)
-    instructions: str = Field(min_length=10, max_length=8_000)
+    instructions: str = Field(min_length=10, max_length=64_000)
+
+
+class ImportMarkdownSkillBody(BaseModel):
+    content: str = Field(min_length=1, max_length=64_000)
+    source_name: str = Field(default="SKILL.md", min_length=1, max_length=240)
+
+
+class ImportGitHubSkillBody(BaseModel):
+    url: str = Field(min_length=12, max_length=2_000)
+
+
+class OpenConfigBody(BaseModel):
+    path: str = Field(min_length=1, max_length=2_000)
+
+
+def _github_markdown_candidates(value: str) -> list[str]:
+    parsed = urllib.parse.urlparse(value.strip())
+    if parsed.scheme != "https":
+        raise ValueError("GitHub 地址必须使用 https")
+    host = parsed.hostname.casefold() if parsed.hostname else ""
+    parts = [urllib.parse.unquote(item) for item in parsed.path.split("/") if item]
+    if host == "raw.githubusercontent.com":
+        if len(parts) < 4 or not parts[-1].casefold().endswith((".md", ".markdown")):
+            raise ValueError("请提供指向 Markdown 文件的 GitHub 地址")
+        return [value.strip()]
+    if host != "github.com" or len(parts) < 2:
+        raise ValueError("目前只支持公开的 github.com Skill 地址")
+    owner, repository = parts[0], parts[1].removesuffix(".git")
+    if not re_fullmatch_github_name(owner) or not re_fullmatch_github_name(repository):
+        raise ValueError("GitHub 仓库地址格式不正确")
+    remainder = parts[2:]
+    raw_root = f"https://raw.githubusercontent.com/{owner}/{repository}"
+    if not remainder:
+        return [f"{raw_root}/main/SKILL.md", f"{raw_root}/master/SKILL.md"]
+    if len(remainder) >= 3 and remainder[0] == "blob":
+        ref = remainder[1]
+        path = "/".join(remainder[2:])
+        if not path.casefold().endswith((".md", ".markdown")):
+            raise ValueError("GitHub 文件必须是 Markdown")
+        return [f"{raw_root}/{ref}/{path}"]
+    if len(remainder) >= 2 and remainder[0] == "tree":
+        ref = remainder[1]
+        directory = "/".join(remainder[2:]).strip("/")
+        suffix = f"{directory}/SKILL.md" if directory else "SKILL.md"
+        return [f"{raw_root}/{ref}/{suffix}"]
+    raise ValueError("请提供仓库、目录或 SKILL.md 的 GitHub 地址")
+
+
+def re_fullmatch_github_name(value: str) -> bool:
+    return bool(value) and all(character.isalnum() or character in "-_." for character in value)
+
+
+def _download_github_markdown(value: str) -> tuple[str, str]:
+    last_error: Exception | None = None
+    for candidate in _github_markdown_candidates(value):
+        request = urllib.request.Request(
+            candidate,
+            headers={"User-Agent": "Mini-Coder-Agent/0.1"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                final_host = urllib.parse.urlparse(response.geturl()).hostname or ""
+                if final_host.casefold() != "raw.githubusercontent.com":
+                    raise ValueError("GitHub 下载跳转到了不受支持的地址")
+                raw = response.read(64_001)
+            if len(raw) > 64_000:
+                raise ValueError("GitHub Skill 超过 64000 个字符")
+            return raw.decode("utf-8-sig"), candidate.rsplit("/", 1)[-1]
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code == 404:
+                continue
+            raise ValueError(f"GitHub 下载失败（HTTP {exc.code}）") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise ValueError("无法连接 GitHub，请检查网络后重试") from exc
+        except UnicodeDecodeError as exc:
+            raise ValueError("GitHub Skill 不是 UTF-8 Markdown") from exc
+    raise ValueError("仓库根目录没有找到 SKILL.md") from last_error
+
+
+def _open_local_config(path_value: str) -> Path:
+    try:
+        path = Path(path_value).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("配置文件不存在") from exc
+    if not path.is_file() or path.suffix.casefold() != ".toml":
+        raise ValueError("只能打开本机的 TOML 配置文件")
+    try:
+        if os.name == "nt":
+            getattr(os, "startfile")(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)], start_new_session=True)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
+    except OSError as exc:
+        raise ValueError("系统无法打开这个配置文件") from exc
+    return path
 
 
 class WorkspaceCatalog:
@@ -406,6 +509,31 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return skill.to_dict()
 
+    @app.post("/api/skills/import-markdown", status_code=201)
+    def import_markdown_skill(body: ImportMarkdownSkillBody) -> dict:
+        try:
+            skill = skill_registry.import_markdown(
+                body.content,
+                source_name=body.source_name,
+                origin="markdown",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return skill.to_dict()
+
+    @app.post("/api/skills/import-github", status_code=201)
+    def import_github_skill(body: ImportGitHubSkillBody) -> dict:
+        try:
+            content, source_name = _download_github_markdown(body.url)
+            skill = skill_registry.import_markdown(
+                content,
+                source_name=source_name,
+                origin="github",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return skill.to_dict()
+
     @app.delete("/api/skills/{skill_id}")
     def delete_skill(skill_id: str) -> dict:
         try:
@@ -415,6 +543,14 @@ def create_app(
         if not deleted:
             raise HTTPException(status_code=404, detail="找不到可删除的自定义 Skill")
         return {"deleted": True, "id": skill_id}
+
+    @app.post("/api/settings/open-config")
+    def open_config_file(body: OpenConfigBody) -> dict:
+        try:
+            path = _open_local_config(body.path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"opened": True, "path": str(path)}
 
     @app.get("/api/directories")
     def list_directories(path: str | None = None) -> dict:
@@ -684,6 +820,7 @@ def create_app(
                     session_id=body.session_id or None,
                     config_path=body.config_path or None,
                     auto=body.auto,
+                    language=body.language,
                 )
             )
         except (ValueError, SessionError) as exc:

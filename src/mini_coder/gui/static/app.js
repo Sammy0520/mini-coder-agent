@@ -33,6 +33,10 @@ const state = {
   sessionMenuSession: null,
   sessionMenuButton: null,
   skills: [],
+  language: "zh-CN",
+  skillAddMode: "manual",
+  skillMarkdownContent: "",
+  skillMarkdownFileName: "",
 };
 
 const elementIds = [
@@ -58,12 +62,140 @@ const elementIds = [
   "skillsButton", "settingsButton", "skillModal", "skillModalClose", "addSkillButton",
   "builtinSkillCount", "customSkillCount", "builtinSkillList", "customSkillList",
   "skillEditorModal", "skillEditorClose", "skillEditorCancel", "skillEditorSave",
-  "skillNameInput", "skillDescriptionInput", "skillInstructionsInput",
+  "skillNameInput", "skillDescriptionInput", "skillInstructionsInput", "manualSkillPanel",
+  "githubSkillPanel", "markdownSkillPanel", "skillGithubInput", "skillMarkdownFile",
+  "chooseSkillMarkdownButton", "skillMarkdownFileName",
   "settingsModal", "settingsModalClose", "settingsCancel", "settingsSave", "settingsConfigPath",
+  "settingsLanguage", "settingsOpenConfig", "newSessionLabel", "allSessionsLabel",
+  "welcomeEyebrow", "welcomeTitle", "welcomeDescription", "docsSuggestion", "fixSuggestion",
+  "buildSuggestion", "runButtonLabel", "skillPageEyebrow", "skillPageDescription",
+  "builtinSkillsTitle", "builtinSkillsDescription", "customSkillsTitle", "customSkillsDescription",
+  "inspectorEyebrow", "inspectorTitle", "changesEyebrow", "changesTitle", "verificationEyebrow",
+  "verificationTitle", "executionEyebrow", "executionTitle", "skillEditorEyebrow", "skillEditorTitle",
+  "manualSkillTab", "githubSkillTab", "markdownSkillTab", "settingsTitle", "settingsLanguageLabel",
+  "settingsConfigLabel", "settingsConfigHelp",
 ];
 const els = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 const terminalEvents = new Set(["controller_run_finished", "controller_run_failed"]);
 const readTools = new Set(["read_file", "list_files", "search_text"]);
+const uiCopy = {
+  "zh-CN": {
+    newSession: "新建会话", allSessions: "所有会话", ready: "已就绪",
+    newConversation: "新会话", readyTitle: "准备开始一个任务", details: "执行详情",
+    stop: "停止任务", welcomeEyebrow: "开始协作", welcomeTitle: "你想让 Agent 完成什么？",
+    welcomeDescription: "用一句话说想做什么就可以。Agent 会自己了解项目、补全安全的默认理解，修改前向你确认，完成后运行本地检查。",
+    docs: "完善项目文档", fix: "修复运行问题", build: "从零创建小项目",
+    taskPlaceholder: "描述你希望 Agent 完成的任务…", continuePlaceholder: "继续告诉 Agent 接下来要做什么…", start: "开始执行", continue: "继续执行", running: "执行中",
+    workspace: "工作文件夹：{path}", chooseWorkspace: "新建会话时选择工作文件夹",
+    skillsEyebrow: "能力扩展", skillsDescription: "Mini Coder 只在任务相关时加载一个 Skill，不会把全部说明塞进每轮对话。",
+    builtins: "内置 Skills", builtinsDescription: "覆盖最常见的轻量编程任务。",
+    custom: "我的 Skills", customDescription: "添加团队约定或你常用的工作方式，Mini Coder 会根据名称和简介自动选择。",
+    saved: "设置已保存", openConfig: "已请求本机打开配置文件",
+    inspectorEyebrow: "任务详情", inspectorTitle: "执行与变更", changesEyebrow: "代码变更", changesTitle: "修改的文件",
+    verificationEyebrow: "本地验证", verificationTitle: "任务验收", executionEyebrow: "执行过程", executionTitle: "Agent 做了什么",
+    addSkill: "＋ 添加 Skill", skillEditorEyebrow: "自定义能力", skillEditorTitle: "添加 Skill",
+    manualSkill: "手动创建", githubSkill: "GitHub 地址", markdownSkill: "导入 Markdown",
+    settings: "设置", language: "语言 / Language", config: "公共模型配置文件", open: "打开", cancel: "取消", save: "保存",
+    configHelp: "这里只保存配置文件路径；API Key 不会显示在页面中。",
+    skillName: "名称", skillWhen: "什么时候使用", skillInstructions: "希望 Agent 遵循的做法",
+    githubPublic: "公开 GitHub 地址", chooseMarkdown: "选择本地 Markdown 文件",
+    chooseMarkdownHelp: "支持 SKILL.md 或其他 .md / .markdown 文档，最多 64,000 个字符。",
+    noFile: "尚未选择文件",
+  },
+  en: {
+    newSession: "New session", allSessions: "All sessions", ready: "Ready",
+    newConversation: "New session", readyTitle: "Start a new task", details: "Run details",
+    stop: "Stop task", welcomeEyebrow: "Start collaborating", welcomeTitle: "What should the Agent do?",
+    welcomeDescription: "Describe the outcome in one sentence. The Agent will inspect the project, fill in safe defaults, ask before sensitive changes, and run local checks when it finishes.",
+    docs: "Improve documentation", fix: "Fix a runtime issue", build: "Build a small project",
+    taskPlaceholder: "Describe what you want the Agent to accomplish…", continuePlaceholder: "Tell the Agent what to do next…", start: "Start", continue: "Continue", running: "Running",
+    workspace: "Workspace: {path}", chooseWorkspace: "Choose a workspace when creating a session",
+    skillsEyebrow: "Capabilities", skillsDescription: "Mini Coder loads one relevant Skill only when a task needs it, instead of injecting every instruction into every turn.",
+    builtins: "Built-in Skills", builtinsDescription: "Common workflows for lightweight coding tasks.",
+    custom: "My Skills", customDescription: "Add team conventions or personal workflows. Mini Coder selects them from their name and description.",
+    saved: "Settings saved", openConfig: "Asked your computer to open the configuration file",
+    inspectorEyebrow: "Task details", inspectorTitle: "Run and changes", changesEyebrow: "Code changes", changesTitle: "Changed files",
+    verificationEyebrow: "Local checks", verificationTitle: "Task verification", executionEyebrow: "Run progress", executionTitle: "What the Agent did",
+    addSkill: "＋ Add Skill", skillEditorEyebrow: "Custom capability", skillEditorTitle: "Add Skill",
+    manualSkill: "Create manually", githubSkill: "GitHub URL", markdownSkill: "Import Markdown",
+    settings: "Settings", language: "Language", config: "Shared model configuration", open: "Open", cancel: "Cancel", save: "Save",
+    configHelp: "Only the configuration file path is stored here. API keys are never displayed on this page.",
+    skillName: "Name", skillWhen: "When to use it", skillInstructions: "Instructions for the Agent",
+    githubPublic: "Public GitHub URL", chooseMarkdown: "Choose a local Markdown file",
+    chooseMarkdownHelp: "Supports SKILL.md and other .md / .markdown documents up to 64,000 characters.",
+    noFile: "No file selected",
+  },
+};
+
+function t(key, variables = {}) {
+  const template = (uiCopy[state.language] || uiCopy["zh-CN"])[key] || uiCopy["zh-CN"][key] || key;
+  return Object.entries(variables).reduce((value, [name, replacement]) => value.replace(`{${name}}`, replacement), template);
+}
+
+function applyLanguage(language) {
+  state.language = language === "en" ? "en" : "zh-CN";
+  document.documentElement.lang = state.language;
+  els.newSessionLabel.textContent = t("newSession");
+  els.allSessionsLabel.textContent = t("allSessions");
+  els.connectionLabel.textContent = t("ready");
+  els.detailsToggleButton.textContent = t("details");
+  els.stopRunButton.textContent = t("stop");
+  els.welcomeEyebrow.textContent = t("welcomeEyebrow");
+  els.welcomeTitle.textContent = t("welcomeTitle");
+  els.welcomeDescription.textContent = t("welcomeDescription");
+  els.docsSuggestion.textContent = t("docs");
+  els.fixSuggestion.textContent = t("fix");
+  els.buildSuggestion.textContent = t("build");
+  els.task.placeholder = t("taskPlaceholder");
+  els.skillPageEyebrow.textContent = t("skillsEyebrow");
+  els.skillPageDescription.textContent = t("skillsDescription");
+  els.builtinSkillsTitle.textContent = t("builtins");
+  els.builtinSkillsDescription.textContent = t("builtinsDescription");
+  els.customSkillsTitle.textContent = t("custom");
+  els.customSkillsDescription.textContent = t("customDescription");
+  els.inspectorEyebrow.textContent = t("inspectorEyebrow");
+  els.inspectorTitle.textContent = t("inspectorTitle");
+  els.changesEyebrow.textContent = t("changesEyebrow");
+  els.changesTitle.textContent = t("changesTitle");
+  els.verificationEyebrow.textContent = t("verificationEyebrow");
+  els.verificationTitle.textContent = t("verificationTitle");
+  els.executionEyebrow.textContent = t("executionEyebrow");
+  els.executionTitle.textContent = t("executionTitle");
+  els.addSkillButton.textContent = t("addSkill");
+  els.skillEditorEyebrow.textContent = t("skillEditorEyebrow");
+  els.skillEditorTitle.textContent = t("skillEditorTitle");
+  els.manualSkillTab.textContent = t("manualSkill");
+  els.githubSkillTab.textContent = t("githubSkill");
+  els.markdownSkillTab.textContent = t("markdownSkill");
+  els.settingsTitle.textContent = t("settings");
+  els.settingsLanguageLabel.textContent = t("language");
+  els.settingsConfigLabel.textContent = t("config");
+  els.settingsConfigHelp.textContent = t("configHelp");
+  els.settingsOpenConfig.textContent = t("open");
+  els.settingsCancel.textContent = t("cancel");
+  els.settingsSave.textContent = t("save");
+  els.manualSkillPanel.querySelector('label[for="skillNameInput"]').textContent = t("skillName");
+  els.manualSkillPanel.querySelector('label[for="skillDescriptionInput"]').textContent = t("skillWhen");
+  els.manualSkillPanel.querySelector('label[for="skillInstructionsInput"]').textContent = t("skillInstructions");
+  els.githubSkillPanel.querySelector('label[for="skillGithubInput"]').textContent = t("githubPublic");
+  els.chooseSkillMarkdownButton.querySelector("strong").textContent = t("chooseMarkdown");
+  els.chooseSkillMarkdownButton.querySelector("span").textContent = t("chooseMarkdownHelp");
+  if (!state.skillMarkdownFileName) els.skillMarkdownFileName.textContent = t("noFile");
+  if (state.draft && !state.sessionId) {
+    els.conversationEyebrow.textContent = t("newConversation");
+    els.conversationTitle.textContent = t("readyTitle");
+  }
+  setRunButton(state.runActive ? "running" : (state.sessionId ? "continue" : "start"));
+  if (state.skills.length) renderSkills();
+  updateProjectDisplay();
+}
+
+function setRunButton(mode) {
+  const icon = mode === "running" ? "●" : "▶";
+  const label = mode === "running" ? t("running") : (mode === "continue" ? t("continue") : t("start"));
+  els.runButton.innerHTML = `<span>${icon}</span> <span id="runButtonLabel">${escapeHtml(label)}</span>`;
+  els.runButtonLabel = document.getElementById("runButtonLabel");
+}
 
 bindEvents();
 bootstrap();
@@ -79,6 +211,11 @@ function bindEvents() {
   els.skillEditorClose.addEventListener("click", closeSkillEditor);
   els.skillEditorCancel.addEventListener("click", closeSkillEditor);
   els.skillEditorSave.addEventListener("click", saveCustomSkill);
+  document.querySelectorAll("[data-skill-mode]").forEach((button) => {
+    button.addEventListener("click", () => setSkillAddMode(button.dataset.skillMode));
+  });
+  els.chooseSkillMarkdownButton.addEventListener("click", () => els.skillMarkdownFile.click());
+  els.skillMarkdownFile.addEventListener("change", loadMarkdownSkillFile);
   els.skillEditorModal.addEventListener("click", (event) => {
     if (event.target === els.skillEditorModal) closeSkillEditor();
   });
@@ -86,6 +223,7 @@ function bindEvents() {
   els.settingsModalClose.addEventListener("click", closeSettings);
   els.settingsCancel.addEventListener("click", closeSettings);
   els.settingsSave.addEventListener("click", saveSettings);
+  els.settingsOpenConfig.addEventListener("click", openConfigFile);
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettings();
   });
@@ -152,9 +290,9 @@ function bindEvents() {
   els.task.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startRun();
   });
-  document.querySelectorAll("[data-prompt]").forEach((button) => {
+  document.querySelectorAll("[data-prompt-zh]").forEach((button) => {
     button.addEventListener("click", () => {
-      els.task.value = button.dataset.prompt || "";
+      els.task.value = state.language === "en" ? button.dataset.promptEn : button.dataset.promptZh;
       els.task.focus();
     });
   });
@@ -242,10 +380,23 @@ function createSkillCard(skill) {
   card.className = "skill-card";
   const main = document.createElement("div");
   main.className = "skill-card-main";
-  main.innerHTML = `<span class="skill-card-icon">${skill.builtin ? "◇" : "＋"}</span><div><h4>${escapeHtml(skill.name)}</h4><p>${escapeHtml(skill.description)}</p></div><span class="skill-source-badge${skill.builtin ? "" : " custom"}">${skill.builtin ? "内置" : "自定义"}</span>`;
+  const builtinEnglish = {
+    "bug-fix": ["Fix a runtime issue", "Reproduce the problem, find the root cause, make a focused fix, and verify it again."],
+    "small-app": ["Build a small project", "Turn a brief idea into a lightweight, runnable, and demonstrable local application."],
+    "feature-work": ["Improve an existing feature", "Add or refine functionality while preserving the project's existing structure and behavior."],
+    "project-docs": ["Improve project documentation", "Create accurate, actionable README and usage guidance from the real project structure."],
+  };
+  const localizedBuiltin = state.language === "en" && skill.builtin ? builtinEnglish[skill.id] : null;
+  const displayName = localizedBuiltin?.[0] || skill.name;
+  const displayDescription = localizedBuiltin?.[1] || skill.description;
+  const sourceLabels = state.language === "en"
+    ? {builtin: "Built-in", github: "GitHub", markdown: "Markdown", manual: "Custom"}
+    : {builtin: "内置", github: "GitHub", markdown: "Markdown", manual: "自定义"};
+  const source = skill.builtin ? "builtin" : (skill.origin || "manual");
+  main.innerHTML = `<span class="skill-card-icon">${skill.builtin ? "◇" : "＋"}</span><div><h4>${escapeHtml(displayName)}</h4><p>${escapeHtml(displayDescription)}</p></div><span class="skill-source-badge${skill.builtin ? "" : " custom"}">${sourceLabels[source] || sourceLabels.manual}</span>`;
   const details = document.createElement("details");
   const summary = document.createElement("summary");
-  summary.textContent = "查看使用说明";
+  summary.textContent = state.language === "en" ? "View instructions" : "查看使用说明";
   const instructions = document.createElement("div");
   instructions.className = "skill-card-instructions";
   instructions.textContent = skill.instructions || "";
@@ -257,7 +408,7 @@ function createSkillCard(skill) {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "skill-delete-button";
-    remove.textContent = "删除";
+    remove.textContent = state.language === "en" ? "Delete" : "删除";
     remove.addEventListener("click", () => deleteCustomSkill(skill));
     footer.appendChild(remove);
     card.appendChild(footer);
@@ -269,9 +420,59 @@ function openSkillEditor() {
   els.skillNameInput.value = "";
   els.skillDescriptionInput.value = "";
   els.skillInstructionsInput.value = "";
+  els.skillGithubInput.value = "";
+  els.skillMarkdownFile.value = "";
+  state.skillMarkdownContent = "";
+  state.skillMarkdownFileName = "";
+  els.skillMarkdownFileName.textContent = t("noFile");
+  setSkillAddMode("manual");
   els.skillEditorModal.classList.remove("hidden");
   document.body.classList.add("modal-open");
   window.setTimeout(() => els.skillNameInput.focus(), 0);
+}
+
+function setSkillAddMode(mode) {
+  const normalized = ["manual", "github", "markdown"].includes(mode) ? mode : "manual";
+  state.skillAddMode = normalized;
+  document.querySelectorAll("[data-skill-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.skillMode === normalized);
+  });
+  els.manualSkillPanel.classList.toggle("hidden", normalized !== "manual");
+  els.githubSkillPanel.classList.toggle("hidden", normalized !== "github");
+  els.markdownSkillPanel.classList.toggle("hidden", normalized !== "markdown");
+  els.skillEditorSave.textContent = normalized === "manual"
+    ? (state.language === "en" ? "Add" : "添加")
+    : (state.language === "en" ? "Import" : "导入");
+  window.setTimeout(() => {
+    if (normalized === "manual") els.skillNameInput.focus();
+    if (normalized === "github") els.skillGithubInput.focus();
+  }, 0);
+}
+
+async function loadMarkdownSkillFile() {
+  const file = els.skillMarkdownFile.files?.[0];
+  if (!file) return;
+  if (!/\.(md|markdown)$/i.test(file.name)) {
+    toast("请选择 .md 或 .markdown 文件。", true);
+    els.skillMarkdownFile.value = "";
+    return;
+  }
+  let content;
+  try {
+    content = await file.text();
+  } catch (_) {
+    toast("无法读取这个 Markdown 文件。", true);
+    els.skillMarkdownFile.value = "";
+    return;
+  }
+  if (!content.trim() || content.length > 64000) {
+    toast("Markdown 文件必须包含内容且不能超过 64,000 个字符。", true);
+    els.skillMarkdownFile.value = "";
+    return;
+  }
+  state.skillMarkdownContent = content;
+  state.skillMarkdownFileName = file.name;
+  els.skillMarkdownFileName.textContent = state.language === "en" ? `Selected: ${file.name}` : `已选择：${file.name}`;
 }
 
 function closeSkillEditor() {
@@ -280,19 +481,41 @@ function closeSkillEditor() {
 }
 
 async function saveCustomSkill() {
-  const name = els.skillNameInput.value.trim();
-  const description = els.skillDescriptionInput.value.trim();
-  const instructions = els.skillInstructionsInput.value.trim();
-  if (!name || !description || !instructions) {
-    toast("请把名称、使用场景和做法填写完整。", true);
-    return;
+  let endpoint = "/api/skills";
+  let payload;
+  if (state.skillAddMode === "github") {
+    const url = els.skillGithubInput.value.trim();
+    if (!url) {
+      toast("请填写公开的 GitHub 地址。", true);
+      return;
+    }
+    endpoint = "/api/skills/import-github";
+    payload = {url};
+  } else if (state.skillAddMode === "markdown") {
+    if (!state.skillMarkdownContent) {
+      toast("请先选择本地 Markdown 文件。", true);
+      return;
+    }
+    endpoint = "/api/skills/import-markdown";
+    payload = {content: state.skillMarkdownContent, source_name: state.skillMarkdownFileName};
+  } else {
+    const name = els.skillNameInput.value.trim();
+    const description = els.skillDescriptionInput.value.trim();
+    const instructions = els.skillInstructionsInput.value.trim();
+    if (!name || !description || !instructions) {
+      toast("请把名称、使用场景和做法填写完整。", true);
+      return;
+    }
+    payload = {name, description, instructions};
   }
   els.skillEditorSave.disabled = true;
+  const originalLabel = els.skillEditorSave.textContent;
+  els.skillEditorSave.textContent = state.skillAddMode === "manual" ? "添加中…" : "导入中…";
   try {
-    const response = await fetch("/api/skills", {
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name, description, instructions}),
+      body: JSON.stringify(payload),
     });
     const data = await readJson(response);
     if (!response.ok) throw new Error(data.detail || "无法添加 Skill");
@@ -303,6 +526,7 @@ async function saveCustomSkill() {
     toast(error.message, true);
   } finally {
     els.skillEditorSave.disabled = false;
+    els.skillEditorSave.textContent = originalLabel;
   }
 }
 
@@ -321,6 +545,7 @@ async function deleteCustomSkill(skill) {
 
 function openSettings() {
   els.settingsConfigPath.value = state.configPath || "agent.toml";
+  els.settingsLanguage.value = state.language;
   els.settingsModal.classList.remove("hidden");
   document.body.classList.add("modal-open");
 }
@@ -337,9 +562,33 @@ function saveSettings() {
     return;
   }
   state.configPath = configPath;
+  applyLanguage(els.settingsLanguage.value);
   saveProject();
   closeSettings();
-  toast("设置已保存");
+  toast(t("saved"));
+}
+
+async function openConfigFile() {
+  const path = els.settingsConfigPath.value.trim();
+  if (!path) {
+    toast("请填写模型配置文件路径。", true);
+    return;
+  }
+  els.settingsOpenConfig.disabled = true;
+  try {
+    const response = await fetch("/api/settings/open-config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path}),
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法打开配置文件");
+    toast(t("openConfig"));
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    els.settingsOpenConfig.disabled = false;
+  }
 }
 
 function openInspector() {
@@ -385,10 +634,12 @@ async function bootstrap() {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem("mini-coder-project") || "{}"); } catch (_) { saved = {}; }
     state.workspace = saved.workspace || data.default_workspace || "";
+    state.language = saved.language === "en" ? "en" : "zh-CN";
     const legacyProjectConfig = saved.workspace ? joinPath(saved.workspace, "agent.toml") : "";
     state.configPath = saved.configPath && !samePath(saved.configPath, legacyProjectConfig)
       ? saved.configPath
       : (data.default_config_path || "agent.toml");
+    applyLanguage(state.language);
     updateProjectDisplay();
     resetDraft();
     await syncActiveRuns();
@@ -450,6 +701,7 @@ function saveProject() {
     localStorage.setItem("mini-coder-project", JSON.stringify({
       workspace: state.workspace,
       configPath: state.configPath,
+      language: state.language,
     }));
   } catch (_) {
     // The page remains usable when browser storage is unavailable.
@@ -458,8 +710,8 @@ function saveProject() {
 
 function updateProjectDisplay() {
   els.composerHint.textContent = state.workspace
-    ? `工作文件夹：${state.workspace}`
-    : "新建会话时选择工作文件夹";
+    ? t("workspace", {path: state.workspace})
+    : t("chooseWorkspace");
 }
 
 async function loadSessions(options = {}) {
@@ -738,9 +990,9 @@ async function loadSession(sessionId) {
     renderTurnSummary("已完成");
     els.task.value = "";
     els.task.disabled = Boolean(activeRun);
-    els.task.placeholder = "继续告诉 Agent 接下来要做什么…";
+    els.task.placeholder = t("continuePlaceholder");
     els.runButton.disabled = Boolean(activeRun);
-    els.runButton.innerHTML = activeRun ? "<span>●</span> 执行中" : "<span>▶</span> 继续执行";
+    setRunButton(activeRun ? "running" : "continue");
     els.stopRunButton.classList.toggle("hidden", !activeRun);
     els.stopRunButton.disabled = false;
     els.stopRunButton.textContent = "停止任务";
@@ -796,9 +1048,9 @@ function resetDraft(options = {}) {
   els.welcomeState.classList.remove("hidden");
   els.messageList.replaceChildren();
   els.task.disabled = false;
-  els.task.placeholder = "描述你希望 Agent 完成的任务…";
+  els.task.placeholder = t("taskPlaceholder");
   els.runButton.disabled = false;
-  els.runButton.innerHTML = "<span>▶</span> 开始执行";
+  setRunButton("start");
   els.stopRunButton.classList.add("hidden");
   els.approvalPanel.classList.add("hidden");
   renderChanges();
@@ -833,6 +1085,7 @@ async function startRun() {
         workspace: state.workspace,
         config_path: state.configPath || null,
         auto: false,
+        language: state.language,
       }),
     });
     const data = await readJson(response);
@@ -848,7 +1101,7 @@ async function startRun() {
     els.runStatus.textContent = "启动失败";
     els.task.disabled = false;
     els.runButton.disabled = false;
-    els.runButton.innerHTML = `<span>▶</span> ${state.sessionId ? "继续执行" : "开始执行"}`;
+    setRunButton(state.sessionId ? "continue" : "start");
     state.runActive = false;
     state.runId = null;
     renderTaskStatus();
@@ -911,9 +1164,9 @@ function prepareRunningView(task) {
   els.runStatus.textContent = "正在启动";
   els.task.disabled = true;
   els.runButton.disabled = true;
-  els.runButton.innerHTML = "<span>●</span> 执行中";
+  setRunButton("running");
   els.stopRunButton.disabled = false;
-  els.stopRunButton.textContent = "停止任务";
+  els.stopRunButton.textContent = t("stop");
   els.stopRunButton.classList.remove("hidden");
   els.approvalPanel.classList.add("hidden");
   renderChanges();
@@ -1300,53 +1553,53 @@ function renderInlineMarkdown(value) {
 
 function finishRun(payload) {
   const completed = payload.result_status === "completed";
-  markProgressDone(completed ? "任务已完成" : "任务已停止");
+  markProgressDone(state.language === "en" ? (completed ? "Task completed" : "Task stopped") : (completed ? "任务已完成" : "任务已停止"));
   addMessage("assistant", conversationalFinalText(payload.final_text, completed));
-  els.conversationEyebrow.textContent = completed ? "会话已完成" : "会话已停止";
-  els.runStatus.textContent = completed ? "已完成" : labelStatus(payload.result_status);
+  els.conversationEyebrow.textContent = state.language === "en" ? (completed ? "Session completed" : "Session stopped") : (completed ? "会话已完成" : "会话已停止");
+  els.runStatus.textContent = completed ? labelStatus("completed") : labelStatus(payload.result_status);
   els.task.value = "";
   els.task.disabled = false;
-  els.task.placeholder = "继续告诉 Agent 接下来要做什么…";
+  els.task.placeholder = t("continuePlaceholder");
   els.runButton.disabled = false;
-  els.runButton.innerHTML = "<span>▶</span> 继续执行";
+  setRunButton("continue");
   state.runActive = false;
   state.cancellationRequested = false;
   state.runId = null;
   els.stopRunButton.classList.add("hidden");
   els.stopRunButton.disabled = false;
-  els.stopRunButton.textContent = "停止任务";
+  els.stopRunButton.textContent = t("stop");
   state.draft = true;
   state.phase = "finish";
-  els.composerHint.textContent = "可以继续提出修改、追问或新的验收要求";
-  renderTurnSummary(completed ? "已完成" : "已停止");
+  els.composerHint.textContent = state.language === "en" ? "Continue with another change, question, or verification request" : "可以继续提出修改、追问或新的验收要求";
+  renderTurnSummary(state.language === "en" ? (completed ? "Completed" : "Stopped") : (completed ? "已完成" : "已停止"));
   renderChanges();
   renderTaskStatus();
   setConnection(completed ? "执行完成" : "已停止");
 }
 
 function renderTurnSummary(status = "") {
-  const parts = [`第 ${Math.max(1, state.currentTurn)} 轮`];
+  const parts = [state.language === "en" ? `Turn ${Math.max(1, state.currentTurn)}` : `第 ${Math.max(1, state.currentTurn)} 轮`];
   if (status) parts.push(status);
-  if (state.turnModelCalls) parts.push(`思考 ${state.turnModelCalls} 次`);
-  if (state.turnToolCalls) parts.push(`操作 ${state.turnToolCalls} 项`);
-  if (state.usedSessionMemory) parts.push("已使用会话记忆，不重放旧工具记录");
+  if (state.turnModelCalls) parts.push(state.language === "en" ? `${state.turnModelCalls} model calls` : `思考 ${state.turnModelCalls} 次`);
+  if (state.turnToolCalls) parts.push(state.language === "en" ? `${state.turnToolCalls} tool calls` : `操作 ${state.turnToolCalls} 项`);
+  if (state.usedSessionMemory) parts.push(state.language === "en" ? "Used session memory without replaying old tool logs" : "已使用会话记忆，不重放旧工具记录");
   els.turnSummary.textContent = parts.join(" · ");
 }
 
 function failRun(message) {
-  markProgressDone("执行遇到问题");
-  addMessage("assistant", `这次任务没有顺利完成：${friendlyError(message)}`);
-  els.conversationEyebrow.textContent = "会话已停止";
-  els.runStatus.textContent = "执行失败";
+  markProgressDone(state.language === "en" ? "The run encountered a problem" : "执行遇到问题");
+  addMessage("assistant", state.language === "en" ? `The task did not finish successfully: ${friendlyError(message)}` : `这次任务没有顺利完成：${friendlyError(message)}`);
+  els.conversationEyebrow.textContent = state.language === "en" ? "Session stopped" : "会话已停止";
+  els.runStatus.textContent = labelStatus("failed");
   els.task.disabled = false;
   els.runButton.disabled = false;
-  els.runButton.innerHTML = "<span>▶</span> 继续执行";
+  setRunButton("continue");
   state.runActive = false;
   state.cancellationRequested = false;
   state.runId = null;
   els.stopRunButton.classList.add("hidden");
   state.draft = true;
-  renderTurnSummary("未完成");
+  renderTurnSummary(state.language === "en" ? "Incomplete" : "未完成");
   renderChanges();
   renderTaskStatus();
   setConnection("发生错误", "error");
@@ -1725,6 +1978,14 @@ function renderDirectories(directories) {
 
 function setVerificationFromSession(status, records) {
   const latest = records.length ? records[records.length - 1] : null;
+  if (state.language === "en") {
+    if (status === "passed") setVerification("passed", "Passed", latest ? friendlyVerification(latest) : "Project checks passed.");
+    else if (status === "failed") setVerification("failed", "Failed", latest ? friendlyVerification(latest) : "Project checks failed.");
+    else if (status === "stale") setVerification("neutral", "Run again", "The code changed after the checks completed.");
+    else if (status === "unverified") setVerification("neutral", "Unverified", "The changes have not passed a local check.");
+    else setVerification("neutral", "Not required", "This session did not require a project check.");
+    return;
+  }
   if (status === "passed") setVerification("passed", "已通过", latest ? friendlyVerification(latest) : "项目检查已通过。 ");
   else if (status === "failed") setVerification("failed", "未通过", latest ? friendlyVerification(latest) : "项目检查未通过。 ");
   else if (status === "stale") setVerification("neutral", "需要重跑", "检查完成后代码又发生了变化。 ");
@@ -1757,18 +2018,23 @@ async function refreshSnapshot(runId, refreshOpenSession = false) {
 }
 
 function setConnection(label, tone = "") {
-  els.connectionLabel.textContent = label;
+  const englishLabels = {
+    "已就绪": "Ready", "正在打开会话": "Opening session", "打开失败": "Open failed",
+    "启动信息读取失败": "Startup failed", "启动失败": "Start failed", "正在执行": "Running",
+    "正在启动": "Starting", "正在重新连接…": "Reconnecting…", "执行完成": "Completed",
+    "已停止": "Stopped", "发生错误": "Error", "等待确认": "Waiting for approval",
+  };
+  els.connectionLabel.textContent = state.language === "en" ? (englishLabels[label] || label) : label;
   els.connectionDot.className = `connection-dot${tone ? ` ${tone}` : ""}`;
 }
 
 function friendlyToolName(tool) {
-  const names = {
-    read_file: "读取文件",
-    list_files: "查看文件列表",
-    search_text: "搜索项目内容",
-    edit_file: "编辑文件",
-    write_file: "写入文件",
-    run_command: "运行本地命令",
+  const names = state.language === "en" ? {
+    read_file: "Read a file", list_files: "List files", search_text: "Search the project",
+    edit_file: "Edit a file", write_file: "Write a file", run_command: "Run a local command",
+  } : {
+    read_file: "读取文件", list_files: "查看文件列表", search_text: "搜索项目内容",
+    edit_file: "编辑文件", write_file: "写入文件", run_command: "运行本地命令",
   };
   return names[tool] || String(tool || "工具").replaceAll("_", " ");
 }
@@ -1870,7 +2136,20 @@ function friendlyError(message) {
 }
 
 function labelStatus(status) {
-  const labels = {
+  const labels = state.language === "en" ? {
+    created: "Created",
+    running: "Running",
+    waiting_for_approval: "Waiting for approval",
+    cancelling: "Stopping",
+    completed: "Completed",
+    completed_verified: "Completed",
+    completed_unverified: "Completed (unverified)",
+    verification_failed: "Verification failed",
+    failed: "Failed",
+    denied: "Denied",
+    interrupted: "Interrupted",
+    cancelled: "Cancelled",
+  } : {
     created: "已创建",
     running: "正在执行",
     waiting_for_approval: "等待确认",
@@ -1884,7 +2163,7 @@ function labelStatus(status) {
     interrupted: "已中断",
     cancelled: "已取消",
   };
-  return labels[String(status || "")] || String(status || "未知状态").replaceAll("_", " ");
+  return labels[String(status || "")] || String(status || (state.language === "en" ? "Unknown" : "未知状态")).replaceAll("_", " ");
 }
 
 function sessionIcon(status) {

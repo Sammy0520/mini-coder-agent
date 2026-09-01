@@ -98,6 +98,7 @@ class AgentRunner:
         session_store: SessionStore | None = None,
         session_title: str | None = None,
         skill_registry: SkillRegistry | None = None,
+        response_language: str | None = None,
     ) -> None:
         self.model = model
         self.registry = registry
@@ -110,6 +111,7 @@ class AgentRunner:
         self.session_store = session_store
         self.session_title = session_title
         self.skill_registry = skill_registry or SkillRegistry.builtins_only()
+        self.response_language = self._normalize_response_language(response_language)
         self.context = ContextManager(
             config.max_context_chars,
             max_tokens=config.max_context_tokens,
@@ -177,6 +179,9 @@ class AgentRunner:
             skill_prompt = render_selected_skill(selected_skill)
             if skill_prompt:
                 messages.append({"role": "developer", "content": skill_prompt})
+            language_prompt = self._response_language_prompt()
+            if language_prompt:
+                messages.append({"role": "developer", "content": language_prompt})
             messages.append({"role": "user", "content": task})
             usage: dict[str, int] = {}
             previous_signature: str | None = None
@@ -829,8 +834,36 @@ class AgentRunner:
         skill_prompt = render_selected_skill(selected_skill)
         if skill_prompt:
             messages.append({"role": "developer", "content": skill_prompt})
+        language_prompt = self._response_language_prompt()
+        if language_prompt:
+            messages.append({"role": "developer", "content": language_prompt})
         messages.append({"role": "user", "content": task})
         return messages
+
+    @staticmethod
+    def _normalize_response_language(value: str | None) -> str | None:
+        if not value:
+            return None
+        normalized = value.strip().casefold()
+        if normalized in {"en", "en-us", "english"}:
+            return "en"
+        if normalized in {"zh", "zh-cn", "chinese", "中文"}:
+            return "zh-CN"
+        raise ValueError(f"unsupported response language: {value}")
+
+    def _response_language_prompt(self) -> str:
+        if self.response_language == "en":
+            return (
+                "Runtime response language: English. Write all user-facing progress, "
+                "questions, explanations, and the final answer in English. Keep source "
+                "code, paths, commands, and identifiers unchanged."
+            )
+        if self.response_language == "zh-CN":
+            return (
+                "运行时回答语言：简体中文。所有面向用户的进度、问题、说明和最终回答"
+                "都使用简体中文；源代码、路径、命令和标识符保持原样。"
+            )
+        return ""
 
     @staticmethod
     def _record_selected_skill(
