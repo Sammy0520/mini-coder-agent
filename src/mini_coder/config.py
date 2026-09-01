@@ -92,6 +92,7 @@ class AgentConfig:
     max_response_tool_calls: int = 8
     max_response_write_calls: int = 3
     max_response_write_chars: int = 18_000
+    parallel_read_tools_enabled: bool = True
     preserve_project_command_path: bool = False
     auto_approve_unknown_commands: bool = False
     external_evaluation: bool = False
@@ -316,6 +317,14 @@ class AgentConfig:
             ),
             max_response_write_chars=_env_int(
                 "CODING_AGENT_MAX_RESPONSE_WRITE_CHARS", 18_000
+            ),
+            parallel_read_tools_enabled=_env_bool(
+                "CODING_AGENT_PARALLEL_READ_TOOLS",
+                _optional_bool(
+                    file_data.get("parallel_read_tools_enabled"),
+                    "parallel_read_tools_enabled",
+                    default=True,
+                ),
             ),
             subagents_enabled=_env_bool(
                 "CODING_AGENT_SUBAGENTS",

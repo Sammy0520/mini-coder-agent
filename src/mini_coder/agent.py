@@ -7,6 +7,7 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +82,12 @@ class AgentRunResult:
     messages: list[dict[str, Any]] = field(default_factory=list)
     total_usage: dict[str, int] = field(default_factory=dict)
     session_id: str | None = None
+
+
+@dataclass(slots=True)
+class _ParallelToolOutcome:
+    result: ToolResult
+    duration_seconds: float
 
 
 class AgentRunner:
@@ -667,13 +674,97 @@ class AgentRunner:
                     batch_decisions.update(
                         {call_id: approved_batch for call_id in batch_call_ids}
                     )
-                for call, record, repeated, batch_limit_error in zip(
-                    response.tool_calls,
-                    records,
-                    repeated_flags,
-                    batch_limit_errors,
-                    strict=True,
-                ):
+                tool_entries = list(
+                    zip(
+                        response.tool_calls,
+                        records,
+                        repeated_flags,
+                        batch_limit_errors,
+                        strict=True,
+                    )
+                )
+                entry_index = 0
+                while entry_index < len(tool_entries):
+                    parallel_entries: list[
+                        tuple[ToolCall, ToolExecutionRecord | None, bool, str | None]
+                    ] = []
+                    if self.config.parallel_read_tools_enabled:
+                        seen_signatures: set[str] = set()
+                        for candidate in tool_entries[entry_index : entry_index + 2]:
+                            candidate_call, _, candidate_repeated, candidate_error = candidate
+                            if not self._parallel_tool_candidate(
+                                candidate_call,
+                                repeated=candidate_repeated,
+                                batch_limit_error=candidate_error,
+                            ):
+                                break
+                            candidate_signature = self._call_signature(candidate_call)
+                            if candidate_signature in seen_signatures:
+                                break
+                            seen_signatures.add(candidate_signature)
+                            parallel_entries.append(candidate)
+                    if len(parallel_entries) >= 2:
+                        self._prepare_parallel_tool_batch(
+                            parallel_entries,
+                            messages=messages,
+                            usage=usage,
+                            session=session,
+                        )
+                        batch_id, outcomes, wall_duration = self._execute_parallel_tool_batch(
+                            [entry[0] for entry in parallel_entries]
+                        )
+                        for (
+                            parallel_call,
+                            parallel_record,
+                            _,
+                            _,
+                        ), outcome in zip(parallel_entries, outcomes, strict=True):
+                            self._process_tool_call(
+                                parallel_call,
+                                parallel_record,
+                                messages,
+                                usage,
+                                session,
+                                precomputed_result=outcome.result,
+                                parallel_prepared=True,
+                            )
+                            self._check_cancelled()
+                        serial_duration = sum(item.duration_seconds for item in outcomes)
+                        overlap = max(0.0, serial_duration - wall_duration)
+                        if session is not None:
+                            session.parallel_tool_batches += 1
+                            session.parallel_tool_calls += len(parallel_entries)
+                            session.parallel_tool_overlap_seconds += overlap
+                            session.parallel_tool_peak_concurrency = max(
+                                session.parallel_tool_peak_concurrency,
+                                len(parallel_entries),
+                            )
+                            self._persist(session, messages, usage)
+                        self._emit(
+                            "parallel_tool_batch_completed",
+                            {
+                                "batch_id": batch_id,
+                                "tool_count": len(parallel_entries),
+                                "tools": [entry[0].name for entry in parallel_entries],
+                                "duration_seconds": wall_duration,
+                                "serial_duration_seconds": serial_duration,
+                                "overlapped_seconds": overlap,
+                            },
+                        )
+                        entry_index += len(parallel_entries)
+                        if session is not None:
+                            budget_reason = self._budget_reason(session, before_model=False)
+                            if budget_reason is not None:
+                                return self._finish_budget(
+                                    budget_reason,
+                                    step,
+                                    messages,
+                                    usage,
+                                    session,
+                                )
+                        continue
+
+                    call, record, repeated, batch_limit_error = tool_entries[entry_index]
                     self._check_cancelled()
                     if batch_limit_error:
                         self._record_tool_result(
@@ -721,6 +812,7 @@ class AgentRunner:
                                 usage,
                                 session,
                             )
+                    entry_index += 1
 
                 if stop_for_repetition:
                     return self._finish(
@@ -1472,28 +1564,33 @@ class AgentRunner:
         *,
         reuse_approval: bool = False,
         approval_decision: bool | None = None,
+        precomputed_result: ToolResult | None = None,
+        parallel_prepared: bool = False,
     ) -> ToolResult:
         command_assessment = (
             assess_command(str(call.arguments.get("command", "")))
             if call.name == "run_command" and call.arguments is not None
             else None
         )
-        self._emit(
-            "tool_call_requested",
-            {
-                "tool": call.name,
-                "arguments": call.arguments,
-                "raw_arguments": call.raw_arguments,
-                "command_risk": (
-                    command_assessment.level.value if command_assessment is not None else None
-                ),
-                "expected_side_effects": (
-                    command_assessment.expected_side_effects
-                    if command_assessment is not None
-                    else None
-                ),
-            },
-        )
+        if not parallel_prepared:
+            self._emit(
+                "tool_call_requested",
+                {
+                    "tool": call.name,
+                    "arguments": call.arguments,
+                    "raw_arguments": call.raw_arguments,
+                    "command_risk": (
+                        command_assessment.level.value
+                        if command_assessment is not None
+                        else None
+                    ),
+                    "expected_side_effects": (
+                        command_assessment.expected_side_effects
+                        if command_assessment is not None
+                        else None
+                    ),
+                },
+            )
         if call.parse_error or call.arguments is None:
             message = f"Tool arguments were not valid JSON: {call.parse_error}"
             result = ToolResult(
@@ -1603,7 +1700,10 @@ class AgentRunner:
             )
             return cached_verification
 
-        if approval_decision is None:
+        if parallel_prepared:
+            approved = True
+            approval_automatic = True
+        elif approval_decision is None:
             approved = reuse_approval or tool.risk == RiskLevel.READ
             approval_automatic = approved
             if command_assessment is not None and command_assessment.level == CommandRisk.READ_ONLY:
@@ -1667,20 +1767,21 @@ class AgentRunner:
             )
             return result
 
-        self._emit(
-            "tool_call_approved",
-            {
-                "tool": tool.name,
-                "command_risk": (
-                    command_assessment.level.value
-                    if command_assessment is not None
-                    else tool.risk.value
-                ),
-                "automatic": approval_automatic,
-            },
-        )
+        if not parallel_prepared:
+            self._emit(
+                "tool_call_approved",
+                {
+                    "tool": tool.name,
+                    "command_risk": (
+                        command_assessment.level.value
+                        if command_assessment is not None
+                        else tool.risk.value
+                    ),
+                    "automatic": approval_automatic,
+                },
+            )
 
-        if record is not None:
+        if record is not None and not parallel_prepared:
             record.set_status(ToolExecutionStatus.APPROVED)
             if session is not None:
                 self._persist(session, messages, usage)
@@ -1742,6 +1843,8 @@ class AgentRunner:
                 )
             except ChangeError as exc:
                 result = ToolResult(False, str(exc))
+        elif precomputed_result is not None:
+            result = precomputed_result
         else:
             result = self.registry.execute(call.name, call.arguments, self.tool_context)
         if result.ok and call.name == "delegate_subagents":
@@ -1848,6 +1951,100 @@ class AgentRunner:
             status=ToolExecutionStatus.COMPLETED if result.ok else ToolExecutionStatus.FAILED,
         )
         return result
+
+    def _parallel_tool_candidate(
+        self,
+        call: ToolCall,
+        *,
+        repeated: bool,
+        batch_limit_error: str | None,
+    ) -> bool:
+        if repeated or batch_limit_error or call.parse_error or call.arguments is None:
+            return False
+        tool = self.registry.get(call.name)
+        if tool is None or not tool.parallel_safe or tool.risk != RiskLevel.READ:
+            return False
+        try:
+            self.registry.validate_arguments(call.name, call.arguments)
+        except ToolError:
+            return False
+        return not self._requires_interactive_approval(tool, call.arguments)
+
+    def _prepare_parallel_tool_batch(
+        self,
+        entries: list[tuple[ToolCall, ToolExecutionRecord | None, bool, str | None]],
+        *,
+        messages: list[dict[str, Any]],
+        usage: dict[str, int],
+        session: AgentSession | None,
+    ) -> None:
+        for call, record, _, _ in entries:
+            self._emit(
+                "tool_call_requested",
+                {
+                    "tool": call.name,
+                    "arguments": call.arguments,
+                    "raw_arguments": call.raw_arguments,
+                    "command_risk": None,
+                    "expected_side_effects": None,
+                },
+            )
+            self._emit(
+                "tool_call_approved",
+                {
+                    "tool": call.name,
+                    "command_risk": RiskLevel.READ.value,
+                    "automatic": True,
+                },
+            )
+            if record is not None:
+                record.approval_granted = True
+                record.set_status(ToolExecutionStatus.APPROVED)
+                record.set_status(ToolExecutionStatus.RUNNING)
+        if session is not None:
+            self._persist(session, messages, usage)
+
+    def _execute_parallel_tool_batch(
+        self,
+        calls: list[ToolCall],
+    ) -> tuple[str, list[_ParallelToolOutcome], float]:
+        batch_id = uuid.uuid4().hex
+        self._emit(
+            "parallel_tool_batch_started",
+            {
+                "batch_id": batch_id,
+                "tool_count": len(calls),
+                "tools": [call.name for call in calls],
+            },
+        )
+
+        def execute(call: ToolCall) -> _ParallelToolOutcome:
+            context = ToolContext(
+                policy=self.tool_context.policy,
+                command_timeout_seconds=self.tool_context.command_timeout_seconds,
+                max_output_chars=self.tool_context.max_output_chars,
+                cancellation_requested=self.tool_context.cancellation_requested,
+                runtime_directory=self.tool_context.runtime_directory,
+                preserve_project_command_path=(
+                    self.tool_context.preserve_project_command_path
+                ),
+                observation_revision=self.tool_context.observation_revision,
+            )
+            started = time.monotonic()
+            try:
+                result = self.registry.execute(call.name, call.arguments or {}, context)
+            except Exception as exc:  # Defensive boundary for opt-in third-party tools.
+                result = ToolResult(False, f"Parallel read failed: {type(exc).__name__}: {exc}")
+            return _ParallelToolOutcome(
+                result=result,
+                duration_seconds=max(0.0, time.monotonic() - started),
+            )
+
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=min(2, len(calls))) as executor:
+            futures = [executor.submit(execute, call) for call in calls]
+            outcomes = [future.result() for future in futures]
+        return batch_id, outcomes, max(0.0, time.monotonic() - started)
 
     def _check_cancelled(self) -> None:
         if self.cancellation_callback is not None and self.cancellation_callback():

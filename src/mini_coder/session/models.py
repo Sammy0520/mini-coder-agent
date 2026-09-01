@@ -18,7 +18,7 @@ from ..verification import (
     VerificationTracker,
 )
 
-CURRENT_SESSION_SCHEMA = 8
+CURRENT_SESSION_SCHEMA = 9
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -344,6 +344,10 @@ class AgentSession:
     invalid_tool_call_count: int = 0
     repeated_read_hint_count: int = 0
     observation_cache_hit_count: int = 0
+    parallel_tool_batches: int = 0
+    parallel_tool_calls: int = 0
+    parallel_tool_overlap_seconds: float = 0.0
+    parallel_tool_peak_concurrency: int = 0
     stop_reason: str | None = None
     final_text: str = ""
     last_error: str | None = None
@@ -393,6 +397,10 @@ class AgentSession:
             "invalid_tool_call_count": self.invalid_tool_call_count,
             "repeated_read_hint_count": self.repeated_read_hint_count,
             "observation_cache_hit_count": self.observation_cache_hit_count,
+            "parallel_tool_batches": self.parallel_tool_batches,
+            "parallel_tool_calls": self.parallel_tool_calls,
+            "parallel_tool_overlap_seconds": self.parallel_tool_overlap_seconds,
+            "parallel_tool_peak_concurrency": self.parallel_tool_peak_concurrency,
         }.items():
             if value < 0:
                 raise SessionError(f"session {name} must not be negative")
@@ -582,6 +590,10 @@ class AgentSession:
             "invalid_tool_call_count": self.invalid_tool_call_count,
             "repeated_read_hint_count": self.repeated_read_hint_count,
             "observation_cache_hit_count": self.observation_cache_hit_count,
+            "parallel_tool_batches": self.parallel_tool_batches,
+            "parallel_tool_calls": self.parallel_tool_calls,
+            "parallel_tool_overlap_seconds": self.parallel_tool_overlap_seconds,
+            "parallel_tool_peak_concurrency": self.parallel_tool_peak_concurrency,
             "stop_reason": self.stop_reason,
             "final_text": self.final_text,
             "last_error": self.last_error,
@@ -700,6 +712,14 @@ class AgentSession:
                 "observation_cache_hit_count",
                 minimum=0,
             ),
+            parallel_tool_batches=_required_int(data, "parallel_tool_batches", minimum=0),
+            parallel_tool_calls=_required_int(data, "parallel_tool_calls", minimum=0),
+            parallel_tool_overlap_seconds=_required_number(
+                data, "parallel_tool_overlap_seconds", minimum=0
+            ),
+            parallel_tool_peak_concurrency=_required_int(
+                data, "parallel_tool_peak_concurrency", minimum=0
+            ),
             stop_reason=_optional_string(data, "stop_reason"),
             final_text=_required_string(data, "final_text", allow_empty=True),
             last_error=_optional_string(data, "last_error"),
@@ -731,7 +751,7 @@ class AgentSession:
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version not in {1, 2, 3, 4, 5, 6, 7}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8}:
         return data
     migrated = copy.deepcopy(data)
     if version == 1:
@@ -827,6 +847,13 @@ def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     if version == 7:
         migrated["schema_version"] = 8
         migrated.setdefault("observation_cache_hit_count", 0)
+        version = 8
+    if version == 8:
+        migrated["schema_version"] = 9
+        migrated.setdefault("parallel_tool_batches", 0)
+        migrated.setdefault("parallel_tool_calls", 0)
+        migrated.setdefault("parallel_tool_overlap_seconds", 0.0)
+        migrated.setdefault("parallel_tool_peak_concurrency", 0)
     return migrated
 
 

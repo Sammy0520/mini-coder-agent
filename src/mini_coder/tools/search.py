@@ -11,6 +11,7 @@ from .base import Tool, ToolContext, ToolResult
 
 
 class SearchTextTool(Tool):
+    parallel_safe = True
     name = "search_text"
     description = (
         "Search text or a regular expression across workspace text files. "

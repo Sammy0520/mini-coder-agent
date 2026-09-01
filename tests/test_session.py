@@ -249,6 +249,24 @@ class SessionModelTests(unittest.TestCase):
             self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
             self.assertEqual(restored.observation_cache_hit_count, 0)
 
+    def test_migrates_schema_v8_session_to_parallel_tool_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 8
+            for name in (
+                "parallel_tool_batches",
+                "parallel_tool_calls",
+                "parallel_tool_overlap_seconds",
+                "parallel_tool_peak_concurrency",
+            ):
+                data.pop(name)
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.parallel_tool_batches, 0)
+            self.assertEqual(restored.parallel_tool_overlap_seconds, 0.0)
+
     def test_explicit_session_title_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             session = AgentSession.create(

@@ -148,6 +148,30 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(config.api_key, "environment-test-secret")
 
+    def test_parallel_read_tools_can_be_disabled_from_toml_or_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "agent.toml"
+            config_path.write_text(
+                'model = "test-model"\nparallel_read_tools_enabled = false\n',
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "test"}, clear=True):
+                config = AgentConfig.from_env(root, config_path=config_path)
+            self.assertFalse(config.parallel_read_tools_enabled)
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "test",
+                    "CODING_AGENT_PARALLEL_READ_TOOLS": "true",
+                },
+                clear=True,
+            ):
+                overridden = AgentConfig.from_env(root, config_path=config_path)
+            self.assertTrue(overridden.parallel_read_tools_enabled)
+
     def test_rejects_invalid_local_auth_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

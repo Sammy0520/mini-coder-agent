@@ -67,6 +67,9 @@ class Tool(ABC):
     description: str
     parameters: dict[str, Any]
     risk: RiskLevel = RiskLevel.READ
+    # Opt-in only: READ risk alone does not prove that a tool is safe to run
+    # concurrently with another observation.
+    parallel_safe: bool = False
 
     def definition(self) -> dict[str, Any]:
         return {

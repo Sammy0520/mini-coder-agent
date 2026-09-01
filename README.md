@@ -16,7 +16,7 @@
 
 | 证据 | 结果 |
 |---|---:|
-| 离线单元测试 | 195/195 通过 |
+| 离线单元测试 | 200/200 通过 |
 | 确定性端到端 Eval | 10/10 通过 |
 | 真实 Responses Eval | 1/1 `completed_verified` |
 | 两分钟多文件演示 | 5/5 测试通过，未修改测试 |
@@ -38,6 +38,7 @@
 - 任务成形：运行时识别构建、修复、加功能、改进和解释类意图，按 `discover → frame → locate → implement → verify → finish` 推进；TaskLedger 在同一会话内保留目标、假设、相关文件、修改、证据和未解决项。
 - 轻量 Skills：内置修复问题、从零构建小项目、完善现有功能和整理项目文档四种工作方式；运行时只按任务意图加载相关的一项，也支持用户手动创建、从本地 Markdown 或公开 GitHub 地址导入自己的 Skill，不把全部说明重复塞进模型上下文。
 - 有界并行 Subagents：只有存在两个真正独立的调查方向或实现切片时才委派，最多并行两个、最多两批；Scout 只能读取，Implementer 只在隔离副本中修改授权路径，补丁经主 Agent 一次确认和冲突检查后才原子写回真实工作区。
+- 轻量只读并行：同一模型响应中相邻且互不重复的文件列表、读取和搜索最多两路并行，不增加模型调用；每路使用独立观察缓存，结果严格按原请求顺序写回，写入、命令和 Subagent 始终是串行屏障。
 - 验证闭环：Session 记录真实验证命令、覆盖路径/技术区域、退出码、耗时和输出摘要；正常验收必须成功退出，负向输入检查只能作为补充证据，依赖或运行环境错误不能伪装成通过。
 - 项目理解：启动时注入有界工作区概览，识别清单、入口、测试、验证命令、项目说明和 Git 起始状态，并跳过依赖、缓存与构建目录。
 - 工具体验：文件列表和搜索支持分页，读取支持明确的继续行号，搜索返回过滤原因；失败结果包含稳定错误码和下一步建议。
@@ -250,7 +251,7 @@ mini-coder --config agent.toml --workspace D:\path\to\project `
 
 `list_files` 和 `search_text` 在结果截断时返回 `next_offset`，`read_file` 返回 `next_start_line`、总行数和文件大小。搜索最多遍历 10,000 个可见条目，超过后明确标记 `scan_truncated`；它还区分 `no_match`、`all_candidates_filtered` 和“已扫描文件无结果但存在被过滤候选”，并分别统计策略、glob、二进制、大文件和解码过滤。
 
-如果模型用不同范围重复读取同一个文件且至少一半内容重叠，结果会附带轻量效率提示。Session 记录失败工具数、非法工具数和重复读取提示数；连续完全相同的调用仍保留硬停止规则。真实 Eval 显示 Responses 可以在同一轮并行请求多个现有工具，因此没有再增加批量读取或批量搜索工具。
+如果模型用不同范围重复读取同一个文件且至少一半内容重叠，结果会附带轻量效率提示。Session 记录失败工具数、非法工具数和重复读取提示数；连续完全相同的调用仍保留硬停止规则。Responses 可以在同一轮请求多个现有工具；Agent 会把显式审计为 `parallel_safe` 的相邻纯读取最多两路并行执行，而模型可见的工具结果仍保持请求顺序。可通过 `parallel_read_tools_enabled = false` 或 `CODING_AGENT_PARALLEL_READ_TOOLS=false` 关闭。
 
 如果工作区属于 Git 仓库，本地只运行受控的只读状态查询，保存任务开始时已有改动和最多 2 MB 文件的指纹。最终报告只把 ChangeTracker 管理的写入归因给 Agent，并单独报告任务期间新增的非托管 Git 变化。它不会自动 commit、push、reset、checkout 或清理工作区；`run_command` 产生的文件变化也不会被错误包装成 ChangeTracker 修改。
 
@@ -308,7 +309,7 @@ mini-coder --config agent.toml --resume "<session-file>" `
 
 一次真实 Responses 跨进程恢复的脱敏验收结果见 [`docs/runs/session-resume-run.md`](docs/runs/session-resume-run.md)。
 
-当前 Session schema 为 v7，增加会话轮次、面向用户的对话记录、仅限当前 Session 的结构化工作记忆和逐次模型调用统计。v1～v6 Session 会逐级在内存中迁移并在下一次保存时写成 v7，不会丢失原有消息、工具执行或变更记录。
+当前 Session schema 为 v9，在会话轮次、结构化工作记忆和逐次模型调用统计之外，保存观察缓存与只读工具并行指标。v1～v8 Session 会逐级在内存中迁移并在下一次保存时写成 v9，不会丢失原有消息、工具执行或变更记录。
 
 ## Diff、变更历史与 Undo
 
@@ -359,7 +360,7 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 ## 测试
 
-核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 195 项：
+核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 200 项：
 
 ```powershell
 $env:PYTHONPATH = "src"

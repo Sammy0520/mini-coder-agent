@@ -41,6 +41,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 class ListFilesTool(Tool):
+    parallel_safe = True
     name = "list_files"
     description = (
         "List files and directories inside the workspace. Internal and sensitive paths are "
@@ -106,6 +107,7 @@ class ListFilesTool(Tool):
 
 
 class ReadFileTool(Tool):
+    parallel_safe = True
     name = "read_file"
     description = (
         "Read a UTF-8 text file from the workspace with line numbers and bounded output. "
