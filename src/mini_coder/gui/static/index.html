@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mini Coder Agent</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260901-1">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260901-2">
 </head>
-<body>
+<body class="draft-mode">
   <div class="app-layout">
     <aside class="sidebar">
       <div class="brand compact-brand">
@@ -26,11 +26,18 @@
         <div><p class="eyebrow" id="conversationEyebrow">新会话</p><h2 id="conversationTitle">准备开始一个任务</h2></div>
         <div class="header-actions"><button id="stopRunButton" class="stop-button hidden" type="button">停止任务</button><button id="detailsToggleButton" class="outline-button" type="button">执行详情</button></div>
       </header>
-      <section class="status-strip compact-status">
-        <div><span class="status-label">运行状态</span><strong id="runStatus" class="status-value">尚未开始</strong></div>
-        <div><span class="status-label">会话</span><strong id="sessionName" class="status-value">新会话</strong></div>
-        <div><span class="status-label">验证结果</span><strong id="verificationStatus" class="status-value">等待运行</strong></div>
-        <div><span class="status-label">修改文件</span><strong id="changeCount" class="status-value">0</strong></div>
+      <section id="taskStatusBar" class="phase-status" aria-live="polite">
+        <div id="phaseRail" class="phase-rail">
+          <span class="phase-step" data-phase="discover"><i>1</i><b>了解项目</b></span>
+          <span class="phase-step" data-phase="frame"><i>2</i><b>明确任务</b></span>
+          <span class="phase-step" data-phase="locate"><i>3</i><b>定位位置</b></span>
+          <span class="phase-step" data-phase="implement"><i>4</i><b>实现修改</b></span>
+          <span class="phase-step" data-phase="verify"><i>5</i><b>本地验证</b></span>
+          <span class="phase-step" data-phase="finish"><i>6</i><b>完成</b></span>
+        </div>
+        <div id="completionSummary" class="completion-summary hidden">
+          <strong id="runStatus">尚未开始</strong><span>·</span><span id="verificationStatus">未运行</span><span>·</span><span>修改 <strong id="changeCount">0</strong> 个文件</span><span id="sessionName" class="visually-hidden">新会话</span>
+        </div>
       </section>
       <section id="conversation" class="conversation" aria-live="polite">
         <div id="welcomeState" class="welcome-state">
@@ -44,7 +51,7 @@
         </div>
         <div id="messageList" class="message-list"></div>
       </section>
-      <footer class="composer-shell">
+      <footer id="composerShell" class="composer-shell">
         <div class="composer"><textarea id="task" rows="3" placeholder="描述你希望 Agent 完成的任务…"></textarea><div class="composer-footer"><span id="composerHint">当前项目：D:\Code Agent</span><button id="runButton" class="send-button" type="button"><span>▶</span> 开始执行</button></div></div>
       </footer>
     </main>
@@ -129,6 +136,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/assets/app.js?v=20260901-1" defer></script>
+  <script src="/assets/app.js?v=20260901-2" defer></script>
 </body>
 </html>

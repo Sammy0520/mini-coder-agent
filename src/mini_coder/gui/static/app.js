@@ -37,8 +37,8 @@ const state = {
 const elementIds = [
   "newSessionButton", "sessionCount", "sessionList",
   "connectionDot", "connectionLabel", "conversationEyebrow", "conversationTitle",
-  "detailsToggleButton", "stopRunButton", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
-  "welcomeState", "messageList", "task", "composerHint", "runButton", "inspector", "closeInspectorButton",
+  "detailsToggleButton", "stopRunButton", "taskStatusBar", "phaseRail", "completionSummary", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
+  "welcomeState", "messageList", "task", "composerHint", "runButton", "composerShell", "inspector", "closeInspectorButton",
   "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
   "denyButton", "undoButton", "changesToggleButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "turnSummary",
   "executionList", "sessionModal", "sessionModalClose", "sessionModalCancel", "sessionModalConfirm",
@@ -133,8 +133,8 @@ function bindEvents() {
       els.task.focus();
     });
   });
-  els.detailsToggleButton.addEventListener("click", () => els.inspector.classList.add("open"));
-  els.closeInspectorButton.addEventListener("click", () => els.inspector.classList.remove("open"));
+  els.detailsToggleButton.addEventListener("click", openInspector);
+  els.closeInspectorButton.addEventListener("click", closeInspector);
   els.approveButton.addEventListener("click", () => decideApproval(true));
   els.denyButton.addEventListener("click", () => decideApproval(false));
   els.codeModalClose.addEventListener("click", closeCodeModal);
@@ -161,6 +161,41 @@ function bindEvents() {
     else if (!els.deleteSessionModal.classList.contains("hidden")) closeDeleteSessionModal();
     else if (!els.sessionInfoModal.classList.contains("hidden")) closeSessionInfoModal();
     else if (!els.sessionModal.classList.contains("hidden")) closeSessionModal();
+  });
+}
+
+function openInspector() {
+  els.inspector.classList.add("open");
+  document.body.classList.add("show-draft-inspector");
+}
+
+function closeInspector() {
+  els.inspector.classList.remove("open");
+  document.body.classList.remove("show-draft-inspector");
+}
+
+function setConversationLayout(mode) {
+  const draft = mode === "draft";
+  document.body.classList.toggle("draft-mode", draft);
+  if (draft) closeInspector();
+  else document.body.classList.remove("show-draft-inspector");
+  renderTaskStatus();
+}
+
+function renderTaskStatus() {
+  const draft = document.body.classList.contains("draft-mode");
+  const running = state.runActive;
+  els.taskStatusBar.classList.toggle("hidden", draft);
+  els.phaseRail.classList.toggle("hidden", !running);
+  els.completionSummary.classList.toggle("hidden", running || draft);
+  const phases = ["discover", "frame", "locate", "implement", "verify", "finish"];
+  const normalizedPhase = state.phase === "analyze"
+    ? "discover"
+    : (state.phase === "summarize" ? "finish" : state.phase);
+  const activeIndex = Math.max(0, phases.indexOf(normalizedPhase));
+  els.phaseRail.querySelectorAll(".phase-step").forEach((step, index) => {
+    step.classList.toggle("active", running && index === activeIndex);
+    step.classList.toggle("done", running && index < activeIndex);
   });
 }
 
@@ -488,6 +523,7 @@ async function loadSession(sessionId) {
     state.runId = activeRun?.run_id || null;
     state.currentSequence = Number(activeRun?.latest_sequence || 0);
     state.runActive = Boolean(activeRun);
+    setConversationLayout("session");
     state.cancellationRequested = false;
     state.currentTurn = Math.max(1, Number(data.turn_count || 1));
     state.turnModelCalls = 0;
@@ -505,6 +541,7 @@ async function loadSession(sessionId) {
     state.taskBrief =
       data.working_memory?.turn_state || data.working_memory?.task_brief || null;
     state.phase = data.phase || "finish";
+    renderTaskStatus();
     state.changesExpanded = false;
     state.changes = new Map();
     (data.changes || []).filter((item) => item.undo_status === "active").forEach((item) => {
@@ -572,6 +609,7 @@ function resetDraft(options = {}) {
   state.changesExpanded = false;
   state.changes = new Map();
   state.pendingApproval = null;
+  setConversationLayout("draft");
   if (!options.keepTitle) state.sessionTitle = "";
   els.conversationEyebrow.textContent = "新会话";
   els.conversationTitle.textContent = state.sessionTitle || "准备开始一个任务";
@@ -635,6 +673,7 @@ async function startRun() {
     els.runButton.innerHTML = `<span>▶</span> ${state.sessionId ? "继续执行" : "开始执行"}`;
     state.runActive = false;
     state.runId = null;
+    renderTaskStatus();
     if (state.sessionId) state.currentTurn = Math.max(1, state.currentTurn - 1);
     els.stopRunButton.classList.add("hidden");
     renderTurnSummary("启动失败");
@@ -683,6 +722,7 @@ function prepareRunningView(task) {
   state.phase = "discover";
   if (!continuing) state.changes = new Map();
   state.pendingApproval = null;
+  setConversationLayout("session");
   els.welcomeState.classList.add("hidden");
   if (!continuing) els.messageList.replaceChildren();
   addMessage("user", task);
@@ -760,9 +800,12 @@ function handleEvent(envelope) {
   } else if (name === "phase_changed") {
     state.phase = payload.phase || state.phase;
     updatePhaseHeading(state.phase);
+    renderTaskStatus();
   } else if (name === "completion_reserve_started") {
+    state.phase = "finish";
     addExecution("开始收尾，优先完成和检查已有改动", "不再扩展可选内容", timestamp, "→");
     updatePhaseHeading("finish");
+    renderTaskStatus();
   } else if (name === "tool_call_requested") {
     state.turnToolCalls += 1;
     renderTurnSummary("执行中");
@@ -797,7 +840,9 @@ function handleEvent(envelope) {
     renderTurnSummary("执行中");
     addExecution("已整理较长的上下文", "保留重要信息后继续执行", timestamp, "·");
   } else if (name === "run_completed") {
+    state.phase = "finish";
     updatePhaseHeading("finish");
+    renderTaskStatus();
   } else if (name === "completion_evidence") {
     const paths = Array.isArray(payload.changed_files) ? payload.changed_files : [];
     const checks = Array.isArray(payload.checks) ? payload.checks : [];
@@ -967,9 +1012,110 @@ function addMessage(role, content) {
   wrapper.className = `message ${normalizedRole}`;
   const author = normalizedRole === "agent" ? "Mini Coder" : "你";
   const mark = normalizedRole === "agent" ? "AI" : "你";
-  wrapper.innerHTML = `<div class="message-author"><span class="author-dot">${mark}</span><span>${author}</span></div><div class="message-bubble">${escapeHtml(content || "任务已结束。")}</div>`;
+  wrapper.innerHTML = `<div class="message-author"><span class="author-dot">${mark}</span><span>${author}</span></div><div class="message-bubble markdown-body">${renderMarkdown(content || "任务已结束。")}</div>`;
   els.messageList.appendChild(wrapper);
   scrollConversation();
+}
+
+function renderMarkdown(value) {
+  const lines = String(value ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const output = [];
+  let paragraph = [];
+  let listType = null;
+  let listItems = [];
+  let codeLines = null;
+  let codeLanguage = "";
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    output.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!listType || !listItems.length) return;
+    output.push(`<${listType}>${listItems.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${listType}>`);
+    listType = null;
+    listItems = [];
+  };
+  const flushCode = () => {
+    if (codeLines === null) return;
+    const language = codeLanguage ? ` data-language="${escapeHtml(codeLanguage)}"` : "";
+    output.push(`<pre><code${language}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = null;
+    codeLanguage = "";
+  };
+
+  lines.forEach((line) => {
+    const fence = line.match(/^\s*```\s*([^`]*)$/);
+    if (fence) {
+      if (codeLines !== null) flushCode();
+      else {
+        flushParagraph();
+        flushList();
+        codeLines = [];
+        codeLanguage = fence[1].trim().slice(0, 32);
+      }
+      return;
+    }
+    if (codeLines !== null) {
+      codeLines.push(line);
+      return;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length;
+      output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      return;
+    }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      flushList();
+      output.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
+      return;
+    }
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      const nextType = ordered ? "ol" : "ul";
+      if (listType && listType !== nextType) flushList();
+      listType = nextType;
+      listItems.push((ordered || unordered)[1]);
+      return;
+    }
+    flushList();
+    paragraph.push(line);
+  });
+  flushParagraph();
+  flushList();
+  flushCode();
+  return output.join("") || "<p>任务已结束。</p>";
+}
+
+function renderInlineMarkdown(value) {
+  const codeSpans = [];
+  const protectedText = String(value ?? "").replace(/`([^`\n]+)`/g, (_, code) => {
+    const token = `\u0000CODE${codeSpans.length}\u0000`;
+    codeSpans.push(`<code>${escapeHtml(code)}</code>`);
+    return token;
+  });
+  let rendered = escapeHtml(protectedText);
+  rendered = rendered.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  rendered = rendered.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  rendered = rendered.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  rendered = rendered.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  codeSpans.forEach((span, index) => {
+    rendered = rendered.replace(`\u0000CODE${index}\u0000`, span);
+  });
+  return rendered;
 }
 
 function finishRun(payload) {
@@ -990,9 +1136,11 @@ function finishRun(payload) {
   els.stopRunButton.disabled = false;
   els.stopRunButton.textContent = "停止任务";
   state.draft = true;
+  state.phase = "finish";
   els.composerHint.textContent = "可以继续提出修改、追问或新的验收要求";
   renderTurnSummary(completed ? "已完成" : "已停止");
   renderChanges();
+  renderTaskStatus();
   setConnection(completed ? "执行完成" : "已停止");
 }
 
@@ -1020,6 +1168,7 @@ function failRun(message) {
   state.draft = true;
   renderTurnSummary("未完成");
   renderChanges();
+  renderTaskStatus();
   setConnection("发生错误", "error");
 }
 
