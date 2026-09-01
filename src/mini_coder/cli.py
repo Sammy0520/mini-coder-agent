@@ -243,6 +243,20 @@ def main(argv: list[str] | None = None) -> int:
             prompt_cache_enabled=config.prompt_cache_enabled,
             prompt_cache_key=config.prompt_cache_key,
         )
+        speculative_model = None
+        if config.speculative_finish_enabled:
+            speculative_model = OpenAICompatibleClient(
+                api_key=config.api_key or "not-required",
+                base_url=config.base_url,
+                model=config.model or "",
+                wire_api=config.wire_api,
+                reasoning_effort=config.speculative_finish_reasoning_effort,
+                verbosity="low",
+                timeout_seconds=config.model_timeout_seconds,
+                streaming=config.model_streaming,
+                prompt_cache_enabled=config.prompt_cache_enabled,
+                prompt_cache_key=config.prompt_cache_key,
+            )
         provider_label = config.model_provider or "environment/default"
         print(
             f"Provider: {provider_label} | model: {config.model} | "
@@ -284,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             approval_callback=_ask_approval,
             event_callback=event_callback,
             session_store=session_store,
+            speculative_model=speculative_model,
         )
         result = runner.run(task, session=resumed_session)
     except MiniCoderError as exc:

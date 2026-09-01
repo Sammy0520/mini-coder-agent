@@ -172,6 +172,33 @@ class ConfigTests(unittest.TestCase):
                 overridden = AgentConfig.from_env(root, config_path=config_path)
             self.assertTrue(overridden.parallel_read_tools_enabled)
 
+    def test_speculative_finish_is_opt_in_and_has_independent_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "agent.toml"
+            config_path.write_text(
+                'model = "test-model"\n'
+                'speculative_finish_enabled = false\n'
+                'speculative_finish_delay_ms = 900\n'
+                'speculative_finish_reasoning_effort = "low"\n',
+                encoding="utf-8",
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "OPENAI_API_KEY": "test",
+                    "CODING_AGENT_SPECULATIVE_FINISH": "true",
+                    "CODING_AGENT_SPECULATIVE_FINISH_DELAY_MS": "25",
+                    "CODING_AGENT_SPECULATIVE_FINISH_REASONING_EFFORT": "medium",
+                },
+                clear=True,
+            ):
+                config = AgentConfig.from_env(root, config_path=config_path)
+
+            self.assertTrue(config.speculative_finish_enabled)
+            self.assertEqual(config.speculative_finish_delay_ms, 25)
+            self.assertEqual(config.speculative_finish_reasoning_effort, "medium")
+
     def test_rejects_invalid_local_auth_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

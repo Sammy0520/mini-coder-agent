@@ -16,7 +16,7 @@
 
 | 证据 | 结果 |
 |---|---:|
-| 离线单元测试 | 200/200 通过 |
+| 离线单元测试 | 207/207 通过 |
 | 确定性端到端 Eval | 10/10 通过 |
 | 真实 Responses Eval | 1/1 `completed_verified` |
 | 两分钟多文件演示 | 5/5 测试通过，未修改测试 |
@@ -253,6 +253,8 @@ mini-coder --config agent.toml --workspace D:\path\to\project `
 
 如果模型用不同范围重复读取同一个文件且至少一半内容重叠，结果会附带轻量效率提示。Session 记录失败工具数、非法工具数和重复读取提示数；连续完全相同的调用仍保留硬停止规则。Responses 可以在同一轮请求多个现有工具；Agent 会把显式审计为 `parallel_safe` 的相邻纯读取最多两路并行执行，而模型可见的工具结果仍保持请求顺序。可通过 `parallel_read_tools_enabled = false` 或 `CODING_AGENT_PARALLEL_READ_TOOLS=false` 关闭。
 
+最终标准验证还支持一个默认关闭的 P1 实验：当验证超过 grace period 后，独立的低推理模型客户端可以同时生成一份无工具的候选交付说明。候选只有在真实验证通过、修改 revision 未变化、没有未解决事项、未请求工具且没有提前声称验证通过时才会提交；其他情况全部丢弃并返回普通主循环。快速验证不会触发额外请求。可通过 `speculative_finish_enabled = true` 启用，并用 `speculative_finish_delay_ms` 与 `speculative_finish_reasoning_effort` 控制。候选调用的 provider usage、接受/丢弃原因和实际重叠时间会进入 Session，因此这项优化必须在 API 稳定后用固定任务重新 A/B，不能把服务事故期间的数据当成性能或成本证据。完整边界见 [`docs/architecture/tool-model-overlap.md`](docs/architecture/tool-model-overlap.md)。
+
 如果工作区属于 Git 仓库，本地只运行受控的只读状态查询，保存任务开始时已有改动和最多 2 MB 文件的指纹。最终报告只把 ChangeTracker 管理的写入归因给 Agent，并单独报告任务期间新增的非托管 Git 变化。它不会自动 commit、push、reset、checkout 或清理工作区；`run_command` 产生的文件变化也不会被错误包装成 ChangeTracker 修改。
 
 ## Session 持久化与恢复
@@ -360,14 +362,14 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 ## 测试
 
-核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 200 项：
+核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 207 项：
 
 ```powershell
 $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖 Agent 工具循环、审批与风险分类、有限重试和 `Retry-After`、运行预算、集中脱敏、事件 envelope、日志故障隔离、进程树超时/Ctrl+C 清理、路径逃逸、敏感文件、命令执行、Token-aware 上下文压缩、同会话多轮、Responses 历史重放、Session 原子保存/迁移/恢复、ChangeTracker、Undo、本地验证完成规则以及 Eval/发布脚本。
+测试覆盖 Agent 工具循环、审批与风险分类、有限重试和 `Retry-After`、运行预算、集中脱敏、事件 envelope、日志故障隔离、进程树超时/Ctrl+C 清理、路径逃逸、敏感文件、命令执行、Token-aware 上下文压缩、同会话多轮、Responses 历史重放、Session 原子保存/迁移/恢复、ChangeTracker、Undo、本地验证完成规则、只读工具并行、推测收尾的 commit/abort 门以及 Eval/发布脚本。
 
 ## Eval 与可重复证据
 

@@ -1,6 +1,6 @@
 # Mini Coder 工具与模型重叠执行设计
 
-状态：设计冻结，尚未实现  
+状态：P0、P1 首版已实现；P1 默认关闭，等待稳定 API 环境重新 A/B
 范围：P0 只读工具并行；P1 最终验证与推测收尾重叠  
 非目标：通用异步 Agent 框架、任意工具 Future、推理服务器 KV cache 暂停/恢复
 
@@ -289,8 +289,8 @@ snapshot.change_revision == session.change_revision
 ### 4.7 失败与取消
 
 - finalizer 模型失败不影响真实验证；退化为当前顺序流程。
-- 验证失败时立即标记候选 discarded，不等待它完成；若客户端支持取消则请求取消，否则忽略迟到结果。
-- 用户取消同时传播给验证进程树和候选请求。
+- 首版会等待已经发出的候选请求返回，以完整记录 provider usage；验证失败后候选仍必定丢弃。后续只有在客户端提供可靠取消与 usage 回传语义时才增加主动取消。
+- 用户取消继续传播给验证进程树；候选请求没有写入、工具或提交能力，即使底层兼容客户端无法中途取消，也不能改变工作区或最终状态。
 - 应用退出时，正在运行的本地命令按现有规则变为 uncertain/interrupted；旁路候选永远不能在恢复后自行提交。
 - 恢复 Session 时所有 `running` speculation 统一迁移为 `aborted`，重新走正常验证。
 
@@ -311,19 +311,17 @@ saved = min(verification_time, finalizer_time)
 
 失败路径会浪费一次短 finalizer 请求。因此启用条件应偏保守，并保存以下指标：
 
-- `speculation_attempts`
-- `speculation_accepted`
-- `speculation_discarded`
-- `speculation_cancelled`
-- `speculative_input_tokens`
-- `speculative_output_tokens`
-- `speculative_cached_tokens`
-- `speculative_reasoning_tokens`
-- `speculative_model_seconds`
-- `verification_seconds`
+- `attempts`
+- `accepted`
+- `discarded`
+- `input_tokens`
+- `output_tokens`
+- `cached_tokens`
+- `reasoning_tokens`
+- `model_seconds`
 - `overlapped_seconds`
 - `critical_path_seconds_saved`
-- `discard_reason`
+- `last_discard_reason`
 
 只有 provider 明确返回的 Token 才作为精确数据；缺失字段保持 unknown。
 
@@ -331,16 +329,13 @@ saved = min(verification_time, finalizer_time)
 
 ```toml
 parallel_read_tools_enabled = true
-max_parallel_read_tools = 2
 
 speculative_finish_enabled = false
 speculative_finish_delay_ms = 800
-speculative_finish_max_output_tokens = 300
 speculative_finish_reasoning_effort = "low"
-speculative_finish_max_attempts_per_turn = 1
 ```
 
-P0 可以默认开启。P1 第一版默认关闭，完成离线与真实 A/B 评估后再决定是否默认开启。
+P0 的并发上限在首版固定为 2。P1 第一版默认关闭；离线 commit/abort 测试已经完成，但必须等兼容 API 恢复稳定后重新进行真实 A/B，再决定是否默认开启。
 
 ### 4.10 P1 验收测试
 
@@ -398,4 +393,3 @@ P0 可以默认开启。P1 第一版默认关闭，完成离线与真实 A/B 评
 可以将这套设计概括为：
 
 > Mini Coder 使用分层的有界并行：本地独立观察在同一轮内并行执行，不增加模型调用；复杂且互不重叠的工作才交给最多两个隔离 Subagent；任务收尾时，最终验证可以与无工具的候选交付说明推测生成重叠。所有写入只有一个提交点，所有推测都必须通过真实验证与工作区 revision 校验后才能提交。
-

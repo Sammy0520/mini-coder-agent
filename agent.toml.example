@@ -6,6 +6,9 @@ model_streaming = true
 prompt_cache_enabled = true
 prompt_cache_key = "mini-coder-agent-v1"
 parallel_read_tools_enabled = true
+speculative_finish_enabled = false
+speculative_finish_delay_ms = 800
+speculative_finish_reasoning_effort = "low"
 
 # Bounded parallel Subagents. Simple tasks should remain on the main Agent path.
 subagents_enabled = true

@@ -93,6 +93,9 @@ class AgentConfig:
     max_response_write_calls: int = 3
     max_response_write_chars: int = 18_000
     parallel_read_tools_enabled: bool = True
+    speculative_finish_enabled: bool = False
+    speculative_finish_delay_ms: int = 800
+    speculative_finish_reasoning_effort: str = "low"
     preserve_project_command_path: bool = False
     auto_approve_unknown_commands: bool = False
     external_evaluation: bool = False
@@ -123,6 +126,7 @@ class AgentConfig:
             "max_response_tool_calls": self.max_response_tool_calls,
             "max_response_write_calls": self.max_response_write_calls,
             "max_response_write_chars": self.max_response_write_chars,
+            "speculative_finish_delay_ms": self.speculative_finish_delay_ms,
             "max_parallel_subagents": self.max_parallel_subagents,
             "max_subagent_batches": self.max_subagent_batches,
             "max_subagent_steps": self.max_subagent_steps,
@@ -157,6 +161,13 @@ class AgentConfig:
             )
         if self.model_verbosity not in {None, "low", "medium", "high"}:
             raise ConfigurationError("model_verbosity must be one of: low, medium, high")
+        if self.speculative_finish_reasoning_effort not in {
+            "none", "low", "medium", "high", "xhigh", "max"
+        }:
+            raise ConfigurationError(
+                "speculative_finish_reasoning_effort must be one of: "
+                "none, low, medium, high, xhigh, max"
+            )
         if self.max_parallel_subagents > 2:
             raise ConfigurationError("max_parallel_subagents must not exceed 2")
         if self.max_subagent_context_tokens > self.max_context_tokens:
@@ -325,6 +336,30 @@ class AgentConfig:
                     "parallel_read_tools_enabled",
                     default=True,
                 ),
+            ),
+            speculative_finish_enabled=_env_bool(
+                "CODING_AGENT_SPECULATIVE_FINISH",
+                _optional_bool(
+                    file_data.get("speculative_finish_enabled"),
+                    "speculative_finish_enabled",
+                    default=False,
+                ),
+            ),
+            speculative_finish_delay_ms=_env_int(
+                "CODING_AGENT_SPECULATIVE_FINISH_DELAY_MS",
+                _optional_int(
+                    file_data.get("speculative_finish_delay_ms"),
+                    "speculative_finish_delay_ms",
+                    default=800,
+                ),
+            ),
+            speculative_finish_reasoning_effort=(
+                os.getenv("CODING_AGENT_SPECULATIVE_FINISH_REASONING_EFFORT")
+                or _optional_string(
+                    file_data.get("speculative_finish_reasoning_effort"),
+                    "speculative_finish_reasoning_effort",
+                )
+                or "low"
             ),
             subagents_enabled=_env_bool(
                 "CODING_AGENT_SUBAGENTS",

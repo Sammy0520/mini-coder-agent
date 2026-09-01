@@ -3,11 +3,12 @@ from __future__ import annotations
 import copy
 import json
 import random
+import re
 import time
 import uuid
 import warnings
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +91,18 @@ class _ParallelToolOutcome:
     duration_seconds: float
 
 
+@dataclass(slots=True)
+class _SpeculativeFinish:
+    speculation_id: str
+    change_revision: int
+    verification_command: str
+    response: ModelResponse | None
+    model_error: str | None
+    model_seconds: float
+    verification_seconds: float
+    wall_seconds: float
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -106,6 +119,7 @@ class AgentRunner:
         session_title: str | None = None,
         skill_registry: SkillRegistry | None = None,
         response_language: str | None = None,
+        speculative_model: ModelClient | None = None,
     ) -> None:
         self.model = model
         self.registry = registry
@@ -119,6 +133,7 @@ class AgentRunner:
         self.session_title = session_title
         self.skill_registry = skill_registry or SkillRegistry.builtins_only()
         self.response_language = self._normalize_response_language(response_language)
+        self.speculative_model = speculative_model
         self.context = ContextManager(
             config.max_context_chars,
             max_tokens=config.max_context_tokens,
@@ -137,6 +152,8 @@ class AgentRunner:
         self._run_total_token_start = 0
         self._completion_reserve_active = False
         self._finish_directive_added = False
+        self._speculative_finish_used = False
+        self._pending_speculative_finish: _SpeculativeFinish | None = None
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
@@ -157,6 +174,8 @@ class AgentRunner:
         self._continuing_turn = False
         self._completion_reserve_active = False
         self._finish_directive_added = False
+        self._speculative_finish_used = False
+        self._pending_speculative_finish = None
         self._run_model_call_start = 0
         self._run_tool_call_start = 0
         self._run_tool_output_start = 0
@@ -800,8 +819,17 @@ class AgentRunner:
                             usage,
                             session,
                             approval_decision=batch_decisions.get(call.id),
+                            allow_speculative_finish=(entry_index == len(tool_entries) - 1),
                         )
                         self._check_cancelled()
+                        speculative_result = self._commit_or_discard_speculative_finish(
+                            step=step,
+                            messages=messages,
+                            usage=usage,
+                            session=session,
+                        )
+                        if speculative_result is not None:
+                            return speculative_result
                     if session is not None:
                         budget_reason = self._budget_reason(session, before_model=False)
                         if budget_reason is not None:
@@ -1517,12 +1545,19 @@ class AgentRunner:
                 )
             )
         provider_items = redact_sensitive_value(response.provider_items, secrets=secrets)
+        provider_metadata = redact_sensitive_value(
+            response.provider_metadata,
+            secrets=secrets,
+        )
         return ModelResponse(
             content=redact_sensitive_text(response.content, secrets=secrets),
             tool_calls=calls,
             finish_reason=response.finish_reason,
             usage=dict(response.usage),
             provider_items=provider_items if isinstance(provider_items, list) else [],
+            provider_metadata=(
+                provider_metadata if isinstance(provider_metadata, dict) else {}
+            ),
         )
 
     def _new_tool_record(
@@ -1566,6 +1601,7 @@ class AgentRunner:
         approval_decision: bool | None = None,
         precomputed_result: ToolResult | None = None,
         parallel_prepared: bool = False,
+        allow_speculative_finish: bool = False,
     ) -> ToolResult:
         command_assessment = (
             assess_command(str(call.arguments.get("command", "")))
@@ -1845,6 +1881,17 @@ class AgentRunner:
                 result = ToolResult(False, str(exc))
         elif precomputed_result is not None:
             result = precomputed_result
+        elif self._can_speculate_final_finish(
+            call,
+            session=session,
+            allow_speculative_finish=allow_speculative_finish,
+        ):
+            result = self._execute_verification_with_speculative_finish(
+                call,
+                session=session,
+                messages=messages,
+                usage=usage,
+            )
         else:
             result = self.registry.execute(call.name, call.arguments, self.tool_context)
         if result.ok and call.name == "delegate_subagents":
@@ -2045,6 +2092,303 @@ class AgentRunner:
             futures = [executor.submit(execute, call) for call in calls]
             outcomes = [future.result() for future in futures]
         return batch_id, outcomes, max(0.0, time.monotonic() - started)
+
+    def _can_speculate_final_finish(
+        self,
+        call: ToolCall,
+        *,
+        session: AgentSession | None,
+        allow_speculative_finish: bool,
+    ) -> bool:
+        if (
+            not allow_speculative_finish
+            or not self.config.speculative_finish_enabled
+            or self.speculative_model is None
+            or self._speculative_finish_used
+            or session is None
+            or call.name != "run_command"
+            or call.arguments is None
+            or not any(item.undo_status == "active" for item in session.changes)
+            or session.verification_status == VerificationStatus.FAILED
+        ):
+            return False
+        arguments = call.arguments
+        if not self.verification_tracker.is_verification_command(arguments):
+            return False
+        if str(arguments.get("verification_mode", "standard")) != "standard":
+            return False
+        if tuple(arguments.get("expected_exit_codes") or [0]) != (0,):
+            return False
+        state = self._turn_state(session)
+        if state.get("unresolved") or state.get("pending_subagent_bundles"):
+            return False
+        return self._budget_reason(session, before_model=True) is None
+
+    def _execute_verification_with_speculative_finish(
+        self,
+        call: ToolCall,
+        *,
+        session: AgentSession,
+        messages: list[dict[str, Any]],
+        usage: dict[str, int],
+    ) -> ToolResult:
+        speculation_id = uuid.uuid4().hex
+        snapshot_revision = session.change_revision
+        command = str((call.arguments or {}).get("command", ""))
+        started = time.monotonic()
+        executor = ThreadPoolExecutor(max_workers=2)
+        verification_future = executor.submit(
+            self.registry.execute,
+            call.name,
+            call.arguments or {},
+            self.tool_context,
+        )
+        delay_seconds = self.config.speculative_finish_delay_ms / 1000.0
+        try:
+            try:
+                result = verification_future.result(timeout=delay_seconds)
+            except FutureTimeoutError:
+                pass
+            else:
+                executor.shutdown(wait=True, cancel_futures=True)
+                self._emit(
+                    "speculative_finish_skipped",
+                    {
+                        "reason": "verification_completed_within_grace_period",
+                        "duration_seconds": time.monotonic() - started,
+                    },
+                )
+                return result
+
+            self._speculative_finish_used = True
+            candidate_messages = self._speculative_finish_messages(session)
+            session.model_call_count += 1
+            self._persist(session, messages, usage)
+            self._emit(
+                "speculative_finish_started",
+                {
+                    "speculation_id": speculation_id,
+                    "session_id": session.session_id,
+                    "change_revision": snapshot_revision,
+                    "verification_command": command,
+                    "delay_ms": self.config.speculative_finish_delay_ms,
+                },
+            )
+
+            def complete_candidate() -> tuple[ModelResponse | None, str | None, float]:
+                model_started = time.monotonic()
+                try:
+                    response = self._redact_model_response(
+                        self.speculative_model.complete(candidate_messages, [])
+                    )
+                    return response, None, time.monotonic() - model_started
+                except Exception as exc:
+                    return (
+                        None,
+                        redact_sensitive_text(
+                            f"{type(exc).__name__}: {exc}",
+                            secrets=(self.config.api_key,),
+                        ),
+                        time.monotonic() - model_started,
+                    )
+
+            candidate_future = executor.submit(complete_candidate)
+            result = verification_future.result()
+            response, model_error, model_seconds = candidate_future.result()
+            wall_seconds = max(0.0, time.monotonic() - started)
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+        if response is not None:
+            self._accumulate_usage(usage, response)
+            if not isinstance(response.usage.get("total_tokens"), int):
+                session.usage_missing_count += 1
+        else:
+            session.usage_missing_count += 1
+        session.model_call_records.append(
+            {
+                "call": session.model_call_count,
+                "turn": session.turn_count,
+                "step": self._current_step,
+                "attempt": 1,
+                "kind": "speculative_finalizer",
+                "history_messages": 0,
+                "sent_messages": len(candidate_messages),
+                "estimated_chars": self.context.estimate_chars(candidate_messages),
+                "estimated_tokens": self.context.estimate_tokens(candidate_messages),
+                "tool_schema_chars": 0,
+                "compacted": True,
+                "turn_context_rebuilt": False,
+                "duration_seconds": model_seconds,
+                "usage": dict(response.usage) if response is not None else {},
+                "cache": self._cache_metrics(response.usage) if response is not None else {},
+                "provider": (
+                    dict(response.provider_metadata) if response is not None else {}
+                ),
+                "error": model_error,
+            }
+        )
+        verification_seconds = float(result.data.get("duration_seconds", 0.0) or 0.0)
+        self._pending_speculative_finish = _SpeculativeFinish(
+            speculation_id=speculation_id,
+            change_revision=snapshot_revision,
+            verification_command=command,
+            response=response,
+            model_error=model_error,
+            model_seconds=model_seconds,
+            verification_seconds=verification_seconds,
+            wall_seconds=wall_seconds,
+        )
+        metrics = self._turn_state(session).setdefault(
+            "speculative_finish_metrics", {}
+        )
+        metrics["attempts"] = int(metrics.get("attempts", 0)) + 1
+        metrics["model_seconds"] = float(metrics.get("model_seconds", 0.0)) + model_seconds
+        for source, target in (
+            ("input_tokens", "input_tokens"),
+            ("output_tokens", "output_tokens"),
+            ("cached_tokens", "cached_tokens"),
+            ("reasoning_tokens", "reasoning_tokens"),
+        ):
+            value = response.usage.get(source) if response is not None else None
+            if isinstance(value, int) and not isinstance(value, bool):
+                metrics[target] = int(metrics.get(target, 0)) + value
+        self._emit(
+            "speculative_finish_completed",
+            {
+                "speculation_id": speculation_id,
+                "model_seconds": model_seconds,
+                "verification_seconds": verification_seconds,
+                "wall_seconds": wall_seconds,
+                "model_error": model_error,
+                "usage": dict(response.usage) if response is not None else {},
+            },
+        )
+        self._persist(session, messages, usage)
+        return result
+
+    def _speculative_finish_messages(self, session: AgentSession) -> list[dict[str, Any]]:
+        state = self._turn_state(session)
+        changed = [
+            {
+                "path": item.path,
+                "additions": item.additions,
+                "deletions": item.deletions,
+            }
+            for item in session.changes
+            if item.undo_status == "active"
+        ][-20:]
+        payload = {
+            "goal": str(state.get("goal") or session.task)[:1_200],
+            "requirements": list(state.get("requirements") or [])[:8],
+            "changed_files": changed,
+            "known_limits": list(state.get("unresolved") or [])[:6],
+        }
+        language = "English" if self.response_language == "en" else "Chinese"
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are a short final-response writer for a coding agent. "
+                    "Return plain user-facing text only. Never call tools."
+                ),
+            },
+            {
+                "role": "developer",
+                "content": (
+                    f"Write in {language}. Summarize the implemented outcome and changed "
+                    "areas concisely. Do not claim that tests, checks, verification, builds, "
+                    "or commands passed or failed; the runtime will append verified evidence."
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
+    def _commit_or_discard_speculative_finish(
+        self,
+        *,
+        step: int,
+        messages: list[dict[str, Any]],
+        usage: dict[str, int],
+        session: AgentSession | None,
+    ) -> AgentRunResult | None:
+        pending = self._pending_speculative_finish
+        if pending is None or session is None:
+            return None
+        self._pending_speculative_finish = None
+        response = pending.response
+        reason: str | None = None
+        if pending.model_error or response is None:
+            reason = "finalizer_model_error"
+        elif session.verification_status != VerificationStatus.PASSED:
+            reason = "verification_not_passed"
+        elif session.change_revision != pending.change_revision:
+            reason = "change_revision_changed"
+        elif self._budget_reason(session, before_model=False) is not None:
+            reason = "run_budget_exceeded"
+        elif self._turn_state(session).get("unresolved"):
+            reason = "unresolved_items"
+        elif response.tool_calls:
+            reason = "candidate_requested_tools"
+        elif not response.content.strip():
+            reason = "empty_candidate"
+        elif re.search(
+            r"(?i)(?:tests?|checks?|verification|build).{0,16}(?:passed|succeeded)|"
+            r"(?:测试|检查|验证|构建).{0,8}(?:通过|成功)",
+            response.content,
+        ):
+            reason = "candidate_claimed_unconfirmed_verification"
+
+        metrics = self._turn_state(session).setdefault(
+            "speculative_finish_metrics", {}
+        )
+        overlap = max(
+            0.0,
+            pending.verification_seconds + pending.model_seconds - pending.wall_seconds,
+        )
+        metrics["overlapped_seconds"] = float(metrics.get("overlapped_seconds", 0.0)) + overlap
+        if reason is not None:
+            metrics["discarded"] = int(metrics.get("discarded", 0)) + 1
+            metrics["last_discard_reason"] = reason
+            self._emit(
+                "speculative_finish_discarded",
+                {
+                    "speculation_id": pending.speculation_id,
+                    "reason": reason,
+                    "overlapped_seconds": overlap,
+                },
+            )
+            self._persist(session, messages, usage)
+            return None
+
+        metrics["accepted"] = int(metrics.get("accepted", 0)) + 1
+        metrics["critical_path_seconds_saved"] = float(
+            metrics.get("critical_path_seconds_saved", 0.0)
+        ) + overlap
+        self._emit(
+            "speculative_finish_committed",
+            {
+                "speculation_id": pending.speculation_id,
+                "change_revision": pending.change_revision,
+                "overlapped_seconds": overlap,
+            },
+        )
+        final = response.content.strip() + (
+            "\n\n本地验证已通过：" if self.response_language != "en" else "\n\nLocal verification passed: "
+        ) + pending.verification_command
+        outcome = self._completion_outcome(session)
+        self._set_phase(session, TaskPhase.FINISH)
+        return self._finish(
+            outcome[0],
+            final,
+            step,
+            messages,
+            usage,
+            session,
+            session_status=outcome[1],
+            stop_reason="speculative_finalizer_committed",
+            last_error=outcome[3],
+        )
 
     def _check_cancelled(self) -> None:
         if self.cancellation_callback is not None and self.cancellation_callback():
