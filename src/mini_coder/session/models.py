@@ -495,6 +495,15 @@ class AgentSession:
         self.last_error = None
         self.previous_call_signature = None
         self.repeated_call_count = 0
+        # Verification proves a particular workspace revision against the
+        # requirements of one user turn.  Keep the records for history, but a
+        # new request must earn fresh acceptance evidence instead of inheriting
+        # the previous turn's green status merely because no file changed yet.
+        VerificationTracker.invalidate(
+            self.verification_records,
+            reason="new_user_turn",
+        )
+        self.refresh_verification_status()
         # A new user turn is an explicit semantic boundary. The context engine
         # may create a fresh checkpoint from the canonical transcript instead
         # of accidentally extending a checkpoint from the previous turn.

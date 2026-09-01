@@ -92,6 +92,10 @@ def create_turn_state(brief: TaskBrief) -> dict[str, Any]:
         "completion_reserve": False,
         "last_outcome": "",
         "session_status": "running",
+        "turn_start_change_revision": 0,
+        "turn_start_verification_count": 0,
+        "requires_new_change": False,
+        "completion_correction_count": 0,
     }
 
 

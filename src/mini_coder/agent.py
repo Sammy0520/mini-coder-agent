@@ -31,6 +31,7 @@ from .redaction import redact_sensitive_text, redact_sensitive_value
 from .skills import Skill, SkillRegistry, render_selected_skill
 from .tasking import (
     TaskBrief,
+    TaskIntent,
     create_turn_state,
     frame_task,
     render_task_brief,
@@ -277,6 +278,7 @@ class AgentRunner:
                 SessionStatus.INTERRUPTED,
             }
             if self._continuing_turn:
+                prior_status = session.status
                 prior_turn_state = copy.deepcopy(
                     turn_state_from_memory(session.working_memory)
                 )
@@ -291,6 +293,23 @@ class AgentRunner:
                     task_brief.intent,
                 )
                 turn_state = create_turn_state(task_brief)
+                turn_state.update(
+                    {
+                        "turn_start_change_revision": session.change_revision,
+                        "turn_start_verification_count": len(
+                            session.verification_records
+                        ),
+                        "requires_new_change": (
+                            prior_status
+                            in {
+                                SessionStatus.COMPLETED_VERIFIED,
+                                SessionStatus.COMPLETED_UNVERIFIED,
+                            }
+                            and task_brief.intent != TaskIntent.EXPLAIN
+                        ),
+                        "completion_correction_count": 0,
+                    }
+                )
                 self._record_selected_skill(turn_state, selected_skill)
                 session.working_memory = {
                     "scope": "this session only",
@@ -703,6 +722,59 @@ class AgentRunner:
                 if not response.tool_calls:
                     final = response.content.strip()
                     if final:
+                        if session is not None and self._turn_requires_new_change(
+                            session
+                        ):
+                            state = self._turn_state(session)
+                            correction_count = int(
+                                state.get("completion_correction_count", 0) or 0
+                            )
+                            if correction_count < 1:
+                                state["completion_correction_count"] = correction_count + 1
+                                messages.append(
+                                    {
+                                        "role": "developer",
+                                        "content": (
+                                            "Runtime completion gate: this follow-up asks for "
+                                            "a code or file change, but the current turn has not "
+                                            "produced any workspace change. Do not finish after "
+                                            "diagnosis. Continue through Implement and Verify now. "
+                                            "If the requested behavior already exists, prove that "
+                                            "with concrete file and verification evidence instead."
+                                        ),
+                                    }
+                                )
+                                self._emit(
+                                    "completion_blocked_no_turn_change",
+                                    {
+                                        "session_id": session.session_id,
+                                        "turn": session.turn_count,
+                                        "step": step,
+                                        "intent": state.get("intent"),
+                                        "turn_start_change_revision": state.get(
+                                            "turn_start_change_revision"
+                                        ),
+                                        "change_revision": session.change_revision,
+                                    },
+                                )
+                                session.current_step = step
+                                self._persist(session, messages, usage)
+                                continue
+                            self._set_phase(session, TaskPhase.FINISH)
+                            return self._finish(
+                                "incomplete",
+                                final,
+                                step,
+                                messages,
+                                usage,
+                                session,
+                                session_status=SessionStatus.FAILED,
+                                stop_reason="mutation_not_implemented",
+                                last_error=(
+                                    "The follow-up required a workspace change, but no "
+                                    "change was produced in the current turn."
+                                ),
+                            )
                         outcome = self._completion_outcome(session)
                         if session is not None:
                             self._set_phase(session, TaskPhase.FINISH)
@@ -3515,6 +3587,18 @@ class AgentRunner:
             "model_completed_unverified",
             None,
         )
+
+    def _turn_requires_new_change(self, session: AgentSession) -> bool:
+        """Reject a false finish for a completed session's mutating follow-up."""
+
+        state = self._turn_state(session)
+        if not bool(state.get("requires_new_change", False)):
+            return False
+        try:
+            start_revision = int(state.get("turn_start_change_revision", 0) or 0)
+        except (TypeError, ValueError):
+            start_revision = 0
+        return session.change_revision <= start_revision
 
     def _set_phase(self, session: AgentSession, phase: TaskPhase) -> None:
         if session.phase == phase:

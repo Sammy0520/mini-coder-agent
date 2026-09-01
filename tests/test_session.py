@@ -95,6 +95,55 @@ def make_session(workspace: Path) -> AgentSession:
     )
 
 
+def make_completed_verified_session(workspace: Path) -> AgentSession:
+    path = workspace / "app.py"
+    path.write_text('message = "before"\n', encoding="utf-8")
+    tracker = ChangeTracker(workspace)
+    change = tracker.apply(
+        tracker.prepare(
+            "edit_file",
+            {
+                "path": "app.py",
+                "old_text": 'message = "before"',
+                "new_text": 'message = "old"',
+            },
+            "execution-initial-change",
+        )
+    )
+    session = AgentSession.create(
+        task="Create the initial app",
+        workspace=workspace,
+        model={"model": "fake"},
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "Create the initial app"},
+            {"role": "assistant", "content": "Created and verified the initial app."},
+        ],
+    )
+    session.changes.append(change)
+    session.change_revision = 1
+    session.verification_records.append(
+        VerificationRecord.create(
+            tool_execution_id="execution-initial-verification",
+            command="python -m py_compile app.py",
+            cwd=".",
+            exit_code=0,
+            duration_seconds=0.1,
+            stdout_summary="",
+            stderr_summary="",
+            change_revision=1,
+            passed=True,
+            timed_out=False,
+            scope_paths=("app.py",),
+            scope_domains=("python",),
+        )
+    )
+    session.refresh_verification_status()
+    session.set_status(SessionStatus.RUNNING)
+    session.set_status(SessionStatus.COMPLETED_VERIFIED)
+    return session
+
+
 class SessionModelTests(unittest.TestCase):
     def test_round_trip_preserves_messages_provider_items_and_tool_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -524,7 +573,9 @@ class SessionRunnerTests(unittest.TestCase):
                 session_store=store,
             )
 
-            result = second_runner.run("Now add a follow-up feature", session=session)
+            result = second_runner.run(
+                "Now explain the previous implementation", session=session
+            )
             restored = store.load(session.session_id)
             rendered_request = str(second_model.requests[0])
 
@@ -536,7 +587,7 @@ class SessionRunnerTests(unittest.TestCase):
                 ["user", "assistant", "user", "assistant"],
             )
             self.assertIn("Previous turn state", rendered_request)
-            self.assertIn("Now add a follow-up feature", rendered_request)
+            self.assertIn("Now explain the previous implementation", rendered_request)
             self.assertNotIn("old output", rendered_request)
             self.assertIn("turn_state", restored.working_memory)
             self.assertNotIn("task_brief", restored.working_memory)
@@ -546,6 +597,162 @@ class SessionRunnerTests(unittest.TestCase):
             self.assertFalse(restored.model_call_records[-1]["compacted"])
             self.assertNotIn("generation", restored.context_state)
             self.assertNotIn("old-turn-checkpoint", str(restored.context_state))
+
+    def test_mutating_follow_up_without_change_is_corrected_then_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            session = make_completed_verified_session(workspace)
+            store.save(session)
+            events: list[tuple[str, dict]] = []
+            model = SequenceModel(
+                [
+                    ModelResponse(content="I found the greeting that needs changing."),
+                    ModelResponse(content="I still did not modify the file."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                event_callback=lambda name, payload: events.append((name, payload)),
+                session_store=store,
+            )
+
+            result = runner.run("Fix the greeting in app.py", session=session)
+
+            restored = store.load(session.session_id)
+            self.assertEqual(result.status, "incomplete")
+            self.assertEqual(restored.status, SessionStatus.FAILED)
+            self.assertEqual(restored.stop_reason, "mutation_not_implemented")
+            self.assertEqual(restored.verification_status, VerificationStatus.STALE)
+            self.assertEqual(len(model.requests), 2)
+            self.assertIn("Runtime completion gate", str(model.requests[1]))
+            self.assertTrue(
+                any(
+                    name == "completion_blocked_no_turn_change"
+                    for name, _ in events
+                )
+            )
+            self.assertEqual(
+                restored.verification_records[0].invalidation_reason,
+                "new_user_turn",
+            )
+
+    def test_mutating_follow_up_change_without_new_check_is_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            session = make_completed_verified_session(workspace)
+            store.save(session)
+            model = SequenceModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-follow-up-edit",
+                                name="edit_file",
+                                arguments={
+                                    "path": "app.py",
+                                    "old_text": 'message = "old"',
+                                    "new_text": 'message = "new"',
+                                },
+                                raw_arguments=(
+                                    '{"path":"app.py","old_text":"message = '
+                                    '\\"old\\"","new_text":"message = '
+                                    '\\"new\\""}'
+                                ),
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Updated the greeting."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Fix the greeting in app.py", session=session)
+
+            restored = store.load(session.session_id)
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(restored.status, SessionStatus.COMPLETED_UNVERIFIED)
+            self.assertEqual(restored.verification_status, VerificationStatus.STALE)
+            self.assertEqual(restored.change_revision, 2)
+            self.assertEqual(
+                (workspace / "app.py").read_text(encoding="utf-8"),
+                'message = "new"\n',
+            )
+
+    def test_mutating_follow_up_change_and_new_check_is_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            session = make_completed_verified_session(workspace)
+            store.save(session)
+            model = SequenceModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-follow-up-edit-verified",
+                                name="edit_file",
+                                arguments={
+                                    "path": "app.py",
+                                    "old_text": 'message = "old"',
+                                    "new_text": 'message = "new"',
+                                },
+                                raw_arguments=(
+                                    '{"path":"app.py","old_text":"message = '
+                                    '\\"old\\"","new_text":"message = '
+                                    '\\"new\\""}'
+                                ),
+                            )
+                        ]
+                    ),
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="call-follow-up-verify",
+                                name="run_command",
+                                arguments={
+                                    "command": "python -m py_compile app.py",
+                                    "cwd": ".",
+                                    "purpose": "verify",
+                                    "verification_paths": ["app.py"],
+                                },
+                                raw_arguments=(
+                                    '{"command":"python -m py_compile app.py",'
+                                    '"cwd":".","purpose":"verify",'
+                                    '"verification_paths":["app.py"]}'
+                                ),
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Updated and verified the greeting."),
+                ]
+            )
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                session_store=store,
+            )
+
+            result = runner.run("Fix the greeting in app.py", session=session)
+
+            restored = store.load(session.session_id)
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(restored.status, SessionStatus.COMPLETED_VERIFIED)
+            self.assertEqual(restored.verification_status, VerificationStatus.PASSED)
+            self.assertEqual(restored.change_revision, 2)
+            self.assertEqual(
+                restored.verification_records[-1].change_revision,
+                restored.change_revision,
+            )
 
     def test_resume_invalidates_verification_after_external_file_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
