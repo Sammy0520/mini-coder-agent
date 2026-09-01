@@ -8,7 +8,7 @@ from mini_coder.agent import AgentRunner
 from mini_coder.config import AgentConfig, ApprovalPolicy
 from mini_coder.messages import ModelResponse, ToolCall
 from mini_coder.model import ModelClient
-from mini_coder.session import SessionStatus, SessionStore
+from mini_coder.session import AgentSession, SessionStatus, SessionStore
 from mini_coder.skills import SkillRegistry
 from mini_coder.verification import TaskPhase, VerificationStatus
 from mini_coder.tools import create_default_registry
@@ -42,6 +42,77 @@ def make_config(workspace: Path, **overrides) -> AgentConfig:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_v2_checkpoint_is_used_and_recorded_by_agent_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            messages: list[dict] = [
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "inspect the project"},
+            ]
+            for index in range(6):
+                call_id = f"old-call-{index}"
+                messages.extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": '{"path":"app.py"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": "source" * 700,
+                        },
+                    ]
+                )
+            session = AgentSession.create(
+                task="inspect the project",
+                workspace=workspace,
+                model={"model": "fake"},
+                messages=messages,
+            )
+            session.set_status(SessionStatus.RUNNING)
+            session.set_status(SessionStatus.INTERRUPTED)
+            events: list[tuple[str, dict]] = []
+            model = FakeModel([ModelResponse(content="Inspection complete.")])
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(
+                    workspace,
+                    context_compression_v2_enabled=True,
+                    max_context_tokens=3_000,
+                    max_subagent_context_tokens=2_000,
+                    max_context_chars=8_000,
+                    context_high_watermark_ratio=0.8,
+                    context_target_ratio=0.6,
+                    context_hot_tool_batches=2,
+                    context_min_checkpoint_batches=3,
+                ),
+                event_callback=lambda name, payload: events.append((name, payload)),
+            )
+
+            result = runner.run("", session=session)
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.context_state["generation"], 1)
+            self.assertTrue(
+                any(name == "context_checkpoint_committed" for name, _ in events)
+            )
+            record = session.model_call_records[-1]
+            self.assertEqual(record["context_checkpoint"]["checkpoint_generation"], 1)
+            self.assertEqual(record["cache_stability"]["checkpoint_generation"], 1)
+            self.assertNotIn("source" * 100, str(model.requests[0][0]))
+
     def test_gui_response_language_is_sent_as_stable_developer_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

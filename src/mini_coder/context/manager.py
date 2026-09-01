@@ -68,6 +68,7 @@ class ContextManager:
         checkpoint_generation: int = 0,
         checkpoint_hash: str | None = None,
         compaction_reason: str = "none",
+        previous_item_hashes: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Return content-free cache diagnostics and remember this exact request."""
         copied = list(messages)
@@ -85,6 +86,10 @@ class ContextManager:
             for item in copied
         ]
         previous = self._previous_request_items
+        current_hashes = [
+            hashlib.sha256(item.encode("utf-8")).hexdigest()
+            for item in current_items
+        ]
         common_items = 0
         common_chars = 0
         if previous is not None:
@@ -95,10 +100,28 @@ class ContextManager:
                     continue
                 common_chars += _common_prefix_chars(before, current)
                 break
+        elif previous_item_hashes is not None:
+            for before_hash, current_hash, current in zip(
+                previous_item_hashes,
+                current_hashes,
+                current_items,
+                strict=False,
+            ):
+                if before_hash != current_hash:
+                    break
+                common_items += 1
+                common_chars += len(current)
         first_changed_index: int | None = None
         first_changed_type: str | None = None
-        if previous is not None and (
-            common_items < len(previous) or common_items < len(current_items)
+        previous_length = (
+            len(previous)
+            if previous is not None
+            else len(previous_item_hashes)
+            if previous_item_hashes is not None
+            else None
+        )
+        if previous_length is not None and (
+            common_items < previous_length or common_items < len(current_items)
         ):
             first_changed_index = common_items
             candidate = (
@@ -127,6 +150,7 @@ class ContextManager:
             "first_changed_input_index": first_changed_index,
             "first_changed_input_type": first_changed_type,
             "compaction_reason": compaction_reason,
+            "request_item_hashes": current_hashes,
         }
 
     def estimate_chars(self, messages: Sequence[dict[str, Any]]) -> int:
@@ -242,6 +266,24 @@ class ContextManager:
         previous_count = int(current_state.get("completed_tool_batches", 0) or 0)
         new_batch_count = max(0, len(batches) - previous_count)
         eligible = new_batch_count >= min_checkpoint_batches
+        if hard_exceeded and not eligible and current_state.get("generation", 0):
+            # Keep the committed checkpoint byte-for-byte stable. A temporarily
+            # oversized hot tail may be trimmed, but it must not force a new
+            # generation before the configured batch interval.
+            checkpoint_index = self._prefix_end(canonical)
+            emergency = self._shrink_v2_contents(
+                assembled,
+                tool_schema_tokens=tool_schema_tokens,
+                protected_message_count=checkpoint_index + 1,
+            )
+            if self._within_v2_budget(emergency, tool_schema_tokens):
+                return self._prepared_v2(
+                    emergency,
+                    current_state,
+                    reason="emergency",
+                    checkpoint_created=False,
+                    tool_schema_tokens=tool_schema_tokens,
+                )
         reason = "high_watermark" if eligible else "emergency" if hard_exceeded else "none"
         if reason == "none":
             return self._prepared_v2(
@@ -265,7 +307,14 @@ class ContextManager:
             protected_tool_call_ids=protected,
         )
         if boundary is None:
-            emergency = self._shrink_contents(assembled) if hard_exceeded else assembled
+            emergency = (
+                self._shrink_v2_contents(
+                    assembled,
+                    tool_schema_tokens=tool_schema_tokens,
+                )
+                if hard_exceeded
+                else assembled
+            )
             return self._prepared_v2(
                 emergency,
                 current_state,
@@ -297,12 +346,19 @@ class ContextManager:
             "through_message_index": boundary[1],
             "completed_tool_batches": len(batches),
             "boundary_reason": reason,
+            "last_request_item_hashes": list(
+                current_state.get("last_request_item_hashes", [])
+            ),
         }
         candidate = self._assemble_v2(canonical, next_state)
         target_tokens = int(self.max_tokens * target_ratio)
         candidate_total = self.estimate_tokens(candidate) + tool_schema_tokens
-        if candidate_total > self.max_tokens:
-            candidate = self._shrink_contents(candidate)
+        if not self._within_v2_budget(candidate, tool_schema_tokens):
+            candidate = self._shrink_v2_contents(
+                candidate,
+                tool_schema_tokens=tool_schema_tokens,
+                protected_message_count=self._prefix_end(canonical) + 1,
+            )
             reason = "emergency"
             next_state["boundary_reason"] = reason
         elif candidate_total > target_tokens:
@@ -316,6 +372,51 @@ class ContextManager:
             checkpoint_created=True,
             tool_schema_tokens=tool_schema_tokens,
         )
+
+    def _within_v2_budget(
+        self,
+        messages: list[dict[str, Any]],
+        tool_schema_tokens: int,
+    ) -> bool:
+        return (
+            self.estimate_chars(messages) + tool_schema_tokens * 4 <= self.max_chars
+            and self.estimate_tokens(messages) + tool_schema_tokens <= self.max_tokens
+        )
+
+    def _shrink_v2_contents(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tool_schema_tokens: int,
+        protected_message_count: int = 0,
+    ) -> list[dict[str, Any]]:
+        result = copy.deepcopy(messages)
+        for message in result[protected_message_count:]:
+            if self._within_v2_budget(result, tool_schema_tokens):
+                break
+            content = message.get("content")
+            if not isinstance(content, str) or len(content) < 200:
+                continue
+            char_overflow = max(
+                0,
+                self.estimate_chars(result)
+                + tool_schema_tokens * 4
+                - self.max_chars,
+            )
+            token_overflow = max(
+                0,
+                self.estimate_tokens(result)
+                + tool_schema_tokens
+                - self.max_tokens,
+            )
+            removable = min(
+                len(content) - 200,
+                max(char_overflow, token_overflow * 3, 100),
+            )
+            message["content"] = (
+                content[: len(content) - removable] + "\n...[context truncated]"
+            )
+        return result
 
     def _prepared_v2(
         self,
@@ -382,10 +483,24 @@ class ContextManager:
             for operation in _durable_batch_summary(calls, results)
         ]
         operations = operations[-60:]
+        last_call_id = next(
+            (
+                str(call.get("id"))
+                for call in reversed(boundary[2])
+                if isinstance(call, dict) and call.get("id")
+            ),
+            None,
+        )
+        execution_ids = durable_state.get("tool_execution_ids_by_call_id")
+        through_execution_id = (
+            execution_ids.get(last_call_id)
+            if isinstance(execution_ids, dict) and last_call_id is not None
+            else None
+        )
         checkpoint = {
             "version": 2,
             "generation": int(current_state.get("generation", 0) or 0) + 1,
-            "through_execution_id": durable_state.get("through_execution_id"),
+            "through_execution_id": through_execution_id,
             "change_revision": int(durable_state.get("change_revision", 0) or 0),
             "goal": str(durable_state.get("goal") or "")[:1_200],
             "requirements": _stable_string_list(

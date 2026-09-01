@@ -472,6 +472,38 @@ class ContextManagerTests(unittest.TestCase):
         self.assertEqual(prepared.compaction_reason, "emergency")
         self.assertLessEqual(manager.estimate_chars(prepared.messages), manager.max_chars)
 
+    def test_v2_emergency_tail_trim_does_not_rewrite_existing_checkpoint(self) -> None:
+        manager = ContextManager(max_chars=8_000, max_tokens=2_500)
+        first = manager.prepare_v2(
+            self._v2_messages(6, output_chars=700),
+            state=None,
+            tool_schema_tokens=100,
+            high_watermark_ratio=0.8,
+            target_ratio=0.6,
+            hot_tool_batches=1,
+            min_checkpoint_batches=3,
+        )
+        self.assertTrue(first.checkpoint_created)
+        frozen = first.state["checkpoint_message"]
+
+        second = manager.prepare_v2(
+            self._v2_messages(7, output_chars=4_000),
+            state=first.state,
+            tool_schema_tokens=100,
+            high_watermark_ratio=0.8,
+            target_ratio=0.6,
+            hot_tool_batches=1,
+            min_checkpoint_batches=3,
+        )
+
+        self.assertFalse(second.checkpoint_created)
+        self.assertEqual(second.compaction_reason, "emergency")
+        self.assertEqual(second.checkpoint_generation, first.checkpoint_generation)
+        self.assertEqual(second.checkpoint_hash, first.checkpoint_hash)
+        self.assertEqual(second.state["checkpoint_message"], frozen)
+        self.assertIn(frozen, second.messages)
+        self.assertLessEqual(second.estimated_total_tokens, manager.max_tokens)
+
 
 if __name__ == "__main__":
     unittest.main()

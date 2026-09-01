@@ -82,6 +82,14 @@ def build_default_coordinator(
                 config.max_context_chars,
                 config.max_subagent_context_tokens * 4,
             ),
+            context_high_watermark_ratio=(
+                config.subagent_context_high_watermark_ratio
+            ),
+            context_target_ratio=config.subagent_context_target_ratio,
+            context_hot_tool_batches=config.subagent_context_hot_tool_batches,
+            context_min_checkpoint_batches=(
+                config.subagent_context_min_checkpoint_batches
+            ),
             prompt_cache_key=prompt_key,
             auto_approve_unknown_commands=False,
             subagents_enabled=False,
@@ -135,6 +143,7 @@ def build_default_coordinator(
                 if session is not None
                 else []
             ),
+            context_metrics=_child_context_metrics(session),
         )
 
     return ParallelSubagentCoordinator(
@@ -147,3 +156,74 @@ def build_default_coordinator(
         max_workspace_files=config.max_subagent_workspace_files,
         max_workspace_bytes=config.max_subagent_workspace_bytes,
     )
+
+
+def _child_context_metrics(session: AgentSession | None) -> dict[str, Any]:
+    """Return an auditable, content-free summary of child context behavior."""
+    if session is None:
+        return {}
+    calls: list[dict[str, Any]] = []
+    for record in session.model_call_records[-8:]:
+        stability = record.get("cache_stability")
+        checkpoint = record.get("context_checkpoint")
+        cache = record.get("cache")
+        usage = record.get("usage")
+        calls.append(
+            {
+                "call": record.get("call"),
+                "step": record.get("step"),
+                "estimated_tokens": record.get("estimated_tokens"),
+                "checkpoint_generation": (
+                    stability.get("checkpoint_generation")
+                    if isinstance(stability, dict)
+                    else None
+                ),
+                "checkpoint_hash": (
+                    stability.get("checkpoint_hash")
+                    if isinstance(stability, dict)
+                    else None
+                ),
+                "compaction_reason": (
+                    stability.get("compaction_reason")
+                    if isinstance(stability, dict)
+                    else None
+                ),
+                "checkpoint_created": (
+                    checkpoint.get("checkpoint_created")
+                    if isinstance(checkpoint, dict)
+                    else None
+                ),
+                "common_prefix_tokens": (
+                    stability.get("estimated_longest_common_prefix_tokens")
+                    if isinstance(stability, dict)
+                    else None
+                ),
+                "cached_tokens": (
+                    usage.get("cached_tokens")
+                    if isinstance(usage, dict)
+                    else None
+                ),
+                "total_tokens": (
+                    usage.get("total_tokens")
+                    if isinstance(usage, dict)
+                    else None
+                ),
+                "cache_reuse_ratio": (
+                    cache.get("cache_reuse_ratio")
+                    if isinstance(cache, dict)
+                    else None
+                ),
+            }
+        )
+    generations = sorted(
+        {
+            int(item["checkpoint_generation"])
+            for item in calls
+            if isinstance(item.get("checkpoint_generation"), int)
+            and int(item["checkpoint_generation"]) > 0
+        }
+    )
+    return {
+        "checkpoint_generations": generations,
+        "model_calls": calls,
+    }

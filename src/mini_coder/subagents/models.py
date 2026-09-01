@@ -190,6 +190,7 @@ class WorkerOutcome:
     model_calls: int = 0
     tool_calls: int = 0
     verification: list[dict[str, Any]] = field(default_factory=list)
+    context_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -202,6 +203,7 @@ class SubagentResult:
     tool_calls: int = 0
     bundle_id: str | None = None
     error: str | None = None
+    context_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -213,4 +215,5 @@ class SubagentResult:
             "tool_calls": self.tool_calls,
             "bundle_id": self.bundle_id,
             "error": self.error[:2_000] if self.error else None,
+            "context_metrics": copy.deepcopy(self.context_metrics),
         }

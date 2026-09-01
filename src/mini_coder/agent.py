@@ -154,6 +154,7 @@ class AgentRunner:
         self._finish_directive_added = False
         self._speculative_finish_revision: int | None = None
         self._pending_speculative_finish: _SpeculativeFinish | None = None
+        self._ephemeral_context_state: dict[str, Any] = {}
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
             command_timeout_seconds=config.command_timeout_seconds,
@@ -176,6 +177,7 @@ class AgentRunner:
         self._finish_directive_added = False
         self._speculative_finish_revision = None
         self._pending_speculative_finish = None
+        self._ephemeral_context_state = {}
         self._run_model_call_start = 0
         self._run_tool_call_start = 0
         self._run_tool_output_start = 0
@@ -459,11 +461,69 @@ class AgentRunner:
                         messages,
                         usage,
                     )
-                prepared = self.context.prepare(
-                    messages,
-                    memory=session.working_memory if session is not None else None,
-                    follow_up=False,
+                tool_definitions = self.registry.definitions()
+                tool_schema_chars = len(
+                    json.dumps(tool_definitions, ensure_ascii=False, default=str)
                 )
+                tool_schema_tokens = max(1, (tool_schema_chars + 3) // 4)
+                context_metadata: dict[str, Any] = {
+                    "checkpoint_generation": 0,
+                    "checkpoint_hash": None,
+                    "compaction_reason": "none",
+                    "checkpoint_created": False,
+                }
+                if self.config.context_compression_v2_enabled:
+                    context_state = (
+                        session.context_state
+                        if session is not None
+                        else self._ephemeral_context_state
+                    )
+                    prepared_context = self.context.prepare_v2(
+                        messages,
+                        state=context_state,
+                        durable_state=(
+                            self._context_durable_state(session)
+                            if session is not None
+                            else {"goal": task}
+                        ),
+                        tool_schema_tokens=tool_schema_tokens,
+                        high_watermark_ratio=(
+                            self.config.context_high_watermark_ratio
+                        ),
+                        target_ratio=self.config.context_target_ratio,
+                        hot_tool_batches=self.config.context_hot_tool_batches,
+                        min_checkpoint_batches=(
+                            self.config.context_min_checkpoint_batches
+                        ),
+                        new_turn=(self._continuing_turn and step == first_step),
+                    )
+                    prepared = prepared_context.messages
+                    if session is not None:
+                        session.context_state = prepared_context.state
+                    else:
+                        self._ephemeral_context_state = prepared_context.state
+                    context_metadata = {
+                        "checkpoint_generation": (
+                            prepared_context.checkpoint_generation
+                        ),
+                        "checkpoint_hash": prepared_context.checkpoint_hash,
+                        "compaction_reason": prepared_context.compaction_reason,
+                        "checkpoint_created": prepared_context.checkpoint_created,
+                        "estimated_message_tokens": (
+                            prepared_context.estimated_message_tokens
+                        ),
+                        "estimated_total_tokens": (
+                            prepared_context.estimated_total_tokens
+                        ),
+                    }
+                else:
+                    prepared = self.context.prepare(
+                        messages,
+                        memory=(
+                            session.working_memory if session is not None else None
+                        ),
+                        follow_up=False,
+                    )
                 context_was_compacted = len(prepared) < len(messages)
                 if context_was_compacted:
                     self._emit(
@@ -475,6 +535,18 @@ class AgentRunner:
                             "estimated_chars": self.context.estimate_chars(prepared),
                             "estimated_tokens": self.context.estimate_tokens(prepared),
                             "turn": session.turn_count if session is not None else 1,
+                            **context_metadata,
+                        },
+                    )
+                if context_metadata["checkpoint_created"]:
+                    self._emit(
+                        "context_checkpoint_committed",
+                        {
+                            "step": step,
+                            "history_messages": len(messages),
+                            "sent_messages": len(prepared),
+                            "turn": session.turn_count if session is not None else 1,
+                            **context_metadata,
                         },
                     )
                 if session is not None:
@@ -486,6 +558,9 @@ class AgentRunner:
                         session=session,
                         messages=messages,
                         usage=usage,
+                        tool_definitions=tool_definitions,
+                        tool_schema_chars=tool_schema_chars,
+                        context_metadata=context_metadata,
                     )
                 except _RunBudgetExceeded as exc:
                     return self._finish_budget(
@@ -1139,6 +1214,12 @@ class AgentRunner:
             "subagent_context_target_ratio": (
                 self.config.subagent_context_target_ratio
             ),
+            "subagent_context_hot_tool_batches": (
+                self.config.subagent_context_hot_tool_batches
+            ),
+            "subagent_context_min_checkpoint_batches": (
+                self.config.subagent_context_min_checkpoint_batches
+            ),
         }
 
     @staticmethod
@@ -1196,20 +1277,50 @@ class AgentRunner:
         session: AgentSession | None,
         messages: list[dict[str, Any]],
         usage: dict[str, int],
+        tool_definitions: list[dict[str, Any]] | None = None,
+        tool_schema_chars: int | None = None,
+        context_metadata: dict[str, Any] | None = None,
     ) -> ModelResponse:
         retry_index = 0
         attempt_messages = prepared
-        tool_definitions = self.registry.definitions()
-        tool_schema_chars = len(
-            json.dumps(tool_definitions, ensure_ascii=False, default=str)
-        )
+        if tool_definitions is None:
+            tool_definitions = self.registry.definitions()
+        if tool_schema_chars is None:
+            tool_schema_chars = len(
+                json.dumps(tool_definitions, ensure_ascii=False, default=str)
+            )
+        context_metadata = dict(context_metadata or {})
         while True:
             self._check_cancelled()
             cache_stability = self.context.diagnose_request(
                 attempt_messages,
                 tool_definitions=tool_definitions,
                 cache_key=self.config.prompt_cache_key,
+                checkpoint_generation=int(
+                    context_metadata.get("checkpoint_generation", 0) or 0
+                ),
+                checkpoint_hash=(
+                    str(context_metadata["checkpoint_hash"])
+                    if context_metadata.get("checkpoint_hash")
+                    else None
+                ),
+                compaction_reason=str(
+                    context_metadata.get("compaction_reason", "none")
+                ),
+                previous_item_hashes=(
+                    session.context_state.get("last_request_item_hashes")
+                    if session is not None
+                    and isinstance(
+                        session.context_state.get("last_request_item_hashes"),
+                        list,
+                    )
+                    else None
+                ),
             )
+            if session is not None:
+                session.context_state["last_request_item_hashes"] = list(
+                    cache_stability.get("request_item_hashes", [])
+                )
             if session is not None:
                 budget_reason = self._budget_reason(session, before_model=True)
                 if budget_reason is not None:
@@ -1251,6 +1362,7 @@ class AgentRunner:
                             "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                             "tool_schema_chars": tool_schema_chars,
                             "cache_stability": cache_stability,
+                            "context_checkpoint": context_metadata,
                             "compacted": len(prepared) < len(messages),
                             "turn_context_rebuilt": (
                                 self._continuing_turn
@@ -1328,6 +1440,7 @@ class AgentRunner:
                         "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                         "tool_schema_chars": tool_schema_chars,
                         "cache_stability": cache_stability,
+                        "context_checkpoint": context_metadata,
                         "compacted": len(prepared) < len(messages),
                         "turn_context_rebuilt": (
                             self._continuing_turn
@@ -1983,6 +2096,25 @@ class AgentRunner:
                             "source": "subagent",
                         },
                     )
+            applied_bundles = self._turn_state(session).setdefault(
+                "applied_subagent_bundles", []
+            )
+            if isinstance(applied_bundles, list):
+                existing = {
+                    str(item.get("bundle_id"))
+                    for item in applied_bundles
+                    if isinstance(item, dict)
+                }
+                for bundle_id in result.data.get("bundle_ids", []):
+                    if not isinstance(bundle_id, str) or bundle_id in existing:
+                        continue
+                    applied_bundles.append(
+                        {
+                            "bundle_id": bundle_id,
+                            "applied_revision": session.change_revision,
+                        }
+                    )
+                del applied_bundles[:-12]
         if (
             result.ok
             and session is not None
@@ -2947,6 +3079,88 @@ class AgentRunner:
         session.working_memory.pop("task_brief", None)
         session.working_memory.pop("task_ledger", None)
         return state
+
+    def _context_durable_state(self, session: AgentSession) -> dict[str, Any]:
+        """Project durable runtime facts into the deterministic checkpoint schema."""
+        state = self._turn_state(session)
+        active_changes = [
+            {
+                "change_id": item.change_id,
+                "path": item.path,
+                "tool_execution_id": item.tool_execution_id,
+                "tool": item.tool_name,
+                "before_hash": item.before_hash,
+                "after_hash": item.after_hash,
+                "additions": item.additions,
+                "deletions": item.deletions,
+                "undo_status": item.undo_status,
+            }
+            for item in session.changes
+            if item.undo_status == "active"
+        ]
+        verification = [
+            {
+                "verification_id": item.verification_id,
+                "tool_execution_id": item.tool_execution_id,
+                "command": item.command[:500],
+                "cwd": item.cwd,
+                "exit_code": item.exit_code,
+                "duration_seconds": round(item.duration_seconds, 3),
+                "change_revision": item.change_revision,
+                "passed": item.passed,
+                "timed_out": item.timed_out,
+                "expected_exit_codes": list(item.expected_exit_codes),
+                "expectation_met": item.expectation_met,
+                "verification_mode": item.verification_mode,
+                "conclusive": item.conclusive,
+                "environment_error": item.environment_error,
+                "scope_paths": list(item.scope_paths),
+                "scope_domains": list(item.scope_domains),
+                "current": item.is_current,
+            }
+            for item in session.verification_records
+        ]
+        current_failed_execution_ids = {
+            item.tool_execution_id
+            for item in session.verification_records
+            if item.is_current and not item.passed
+        }
+        protected_tool_call_ids = [
+            item.tool_call_id
+            for item in session.tool_executions
+            if item.execution_id in current_failed_execution_ids
+        ]
+        blockers = [
+            {
+                "id": str(item.get("id") or "")[:200],
+                "kind": str(item.get("kind") or "unknown")[:80],
+                "tool": str(item.get("tool") or "")[:120],
+                "message": str(item.get("message") or "")[:500],
+                "change_revision": item.get("change_revision"),
+                "blocking": item.get("blocking", True) is not False,
+                "verification_id": item.get("verification_id"),
+            }
+            for item in self._active_blockers(session)
+        ]
+        return {
+            "goal": state.get("goal") or session.task,
+            "requirements": state.get("requirements", []),
+            "decisions": state.get("decisions", []),
+            "relevant_files": state.get("relevant_files", []),
+            "changed_files": state.get("changed_files", []),
+            "changes": active_changes,
+            "change_revision": session.change_revision,
+            "verification": verification,
+            "active_blockers": blockers,
+            "protected_tool_call_ids": protected_tool_call_ids,
+            "applied_subagent_bundles": state.get(
+                "applied_subagent_bundles", []
+            ),
+            "tool_execution_ids_by_call_id": {
+                item.tool_call_id: item.execution_id
+                for item in session.tool_executions
+            },
+        }
 
     @staticmethod
     def _refresh_working_memory(session: AgentSession, turn_reply: str) -> None:

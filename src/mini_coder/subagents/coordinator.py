@@ -182,6 +182,7 @@ class ParallelSubagentCoordinator:
                     usage=outcome.usage,
                     model_calls=outcome.model_calls,
                     tool_calls=outcome.tool_calls,
+                    context_metrics=copy.deepcopy(outcome.context_metrics),
                 )
                 self._emit_result("subagent_cancelled", result)
                 return result
@@ -204,6 +205,7 @@ class ParallelSubagentCoordinator:
                     model_calls=outcome.model_calls,
                     tool_calls=outcome.tool_calls,
                     error=outcome.final_text or f"Subagent ended with {outcome.status}",
+                    context_metrics=copy.deepcopy(outcome.context_metrics),
                 )
                 self._emit_result("subagent_failed", result)
                 return result
@@ -238,6 +240,7 @@ class ParallelSubagentCoordinator:
                 tool_calls=outcome.tool_calls,
                 bundle_id=bundle_id,
                 error=recovered_error,
+                context_metrics=copy.deepcopy(outcome.context_metrics),
             )
             self._emit_result("subagent_completed", result)
             if bundle_id is not None:
@@ -367,15 +370,53 @@ class ParallelSubagentCoordinator:
             "tool_call_requested": ("tool",),
             "tool_call_completed": ("tool", "ok", "duration_seconds"),
             "verification_completed": ("passed", "exit_code", "duration_seconds"),
-            "context_compacted": ("before_tokens", "after_tokens"),
+            "context_compacted": (
+                "history_messages",
+                "sent_messages",
+                "estimated_tokens",
+                "checkpoint_generation",
+                "checkpoint_hash",
+                "compaction_reason",
+                "checkpoint_created",
+                "estimated_total_tokens",
+            ),
+            "context_checkpoint_committed": (
+                "history_messages",
+                "sent_messages",
+                "checkpoint_generation",
+                "checkpoint_hash",
+                "compaction_reason",
+                "checkpoint_created",
+                "estimated_message_tokens",
+                "estimated_total_tokens",
+            ),
             "completion_reserve_started": ("reason",),
         }
         fields = allowed_by_event.get(name, ())
         result: dict[str, Any] = {}
         for field_name in fields:
+            if field_name not in payload:
+                continue
             value = payload.get(field_name)
             if isinstance(value, (str, int, float, bool)) or value is None:
                 result[field_name] = value
+        if name == "model_request_started":
+            stability = payload.get("cache_stability")
+            if isinstance(stability, dict):
+                result["cache_stability"] = {
+                    field_name: stability.get(field_name)
+                    for field_name in (
+                        "checkpoint_generation",
+                        "checkpoint_hash",
+                        "compaction_reason",
+                        "estimated_longest_common_prefix_tokens",
+                        "common_prefix_message_items",
+                    )
+                    if isinstance(
+                        stability.get(field_name),
+                        (str, int, float, bool, type(None)),
+                    )
+                }
         return result
 
     def _emit_result(self, name: str, result: SubagentResult) -> None:

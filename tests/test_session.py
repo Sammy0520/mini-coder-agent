@@ -508,6 +508,11 @@ class SessionRunnerTests(unittest.TestCase):
                 -1,
                 {"role": "tool", "tool_call_id": "old-call", "content": "old output " * 500},
             )
+            session.context_state = {
+                "version": 2,
+                "generation": 9,
+                "checkpoint_hash": "old-turn-checkpoint",
+            }
             store.save(session)
             second_model = SequenceModel(
                 [ModelResponse(content="Second turn complete.", usage={"total_tokens": 12})]
@@ -539,6 +544,8 @@ class SessionRunnerTests(unittest.TestCase):
             self.assertEqual(restored.total_usage["total_tokens"], 22)
             self.assertEqual([item["turn"] for item in restored.model_call_records], [1, 2])
             self.assertFalse(restored.model_call_records[-1]["compacted"])
+            self.assertNotIn("generation", restored.context_state)
+            self.assertNotIn("old-turn-checkpoint", str(restored.context_state))
 
     def test_resume_invalidates_verification_after_external_file_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

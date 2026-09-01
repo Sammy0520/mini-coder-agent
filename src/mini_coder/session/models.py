@@ -57,6 +57,8 @@ _SAFE_MODEL_FIELDS = {
     "max_subagent_context_tokens",
     "subagent_context_high_watermark_ratio",
     "subagent_context_target_ratio",
+    "subagent_context_hot_tool_batches",
+    "subagent_context_min_checkpoint_batches",
 }
 
 

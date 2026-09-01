@@ -253,6 +253,59 @@ class ParallelSubagentTests(unittest.TestCase):
                 {"phase": "locate", "reason": "found entry point"},
             )
 
+    def test_child_checkpoint_metadata_is_forwarded_without_prompt_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+
+            def worker(spec, workspace, event):
+                event(
+                    "context_checkpoint_committed",
+                    {
+                        "checkpoint_generation": 2,
+                        "checkpoint_hash": "safe-hash",
+                        "compaction_reason": "high_watermark",
+                        "checkpoint_created": True,
+                        "estimated_total_tokens": 7_200,
+                        "content": "secret prompt and source",
+                    },
+                )
+                return WorkerOutcome(
+                    status="completed",
+                    final_text="done",
+                    context_metrics={
+                        "checkpoint_generations": [1, 2],
+                        "model_calls": [],
+                    },
+                )
+
+            coordinator = ParallelSubagentCoordinator(
+                workspace=directory,
+                worker=worker,
+                event_callback=lambda name, payload: events.append((name, payload)),
+            )
+            result = coordinator.delegate(
+                [{"agent_id": "worker", "role": "scout", "task": "inspect"}]
+            )
+
+            progress = next(
+                payload for name, payload in events if name == "subagent_progress"
+            )
+            self.assertEqual(
+                progress["child_payload"],
+                {
+                    "checkpoint_generation": 2,
+                    "checkpoint_hash": "safe-hash",
+                    "compaction_reason": "high_watermark",
+                    "checkpoint_created": True,
+                    "estimated_total_tokens": 7_200,
+                },
+            )
+            self.assertNotIn("secret", str(progress))
+            self.assertEqual(
+                result["results"][0]["context_metrics"]["checkpoint_generations"],
+                [1, 2],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
