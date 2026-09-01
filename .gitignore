@@ -12,8 +12,10 @@ dist/
 build/
 agent-events.jsonl
 auth.json
+agent.toml
 tmp/
 .mini-coder/
 eval-results/
 benchmark-results/
+benchmarks/
 examples/order_service/workspace/

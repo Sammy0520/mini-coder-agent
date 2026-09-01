@@ -43,8 +43,8 @@ const state = {
 const elementIds = [
   "newSessionButton", "sessionCount", "sessionList",
   "connectionDot", "connectionLabel", "conversationEyebrow", "conversationTitle",
-  "detailsToggleButton", "stopRunButton", "taskStatusBar", "phaseRail", "completionSummary", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
-  "welcomeState", "messageList", "task", "composerHint", "runButton", "composerShell", "inspector", "closeInspectorButton",
+  "stopRunButton", "taskStatusBar", "phaseRail", "completionSummary", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
+  "welcomeState", "messageList", "task", "composerHint", "runButton", "composerShell", "inspector",
   "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
   "subagentPanel", "subagentEyebrow", "subagentTitle", "subagentCount", "subagentList",
   "denyButton", "undoButton", "changesToggleButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "turnSummary",
@@ -148,7 +148,6 @@ function applyLanguage(language) {
   els.newSessionLabel.textContent = t("newSession");
   els.allSessionsLabel.textContent = t("allSessions");
   els.connectionLabel.textContent = t("ready");
-  els.detailsToggleButton.textContent = t("details");
   els.stopRunButton.textContent = t("stop");
   els.welcomeEyebrow.textContent = t("welcomeEyebrow");
   els.welcomeTitle.textContent = t("welcomeTitle");
@@ -309,8 +308,6 @@ function bindEvents() {
       els.task.focus();
     });
   });
-  els.detailsToggleButton.addEventListener("click", openInspector);
-  els.closeInspectorButton.addEventListener("click", closeInspector);
   els.approveButton.addEventListener("click", () => decideApproval(true));
   els.denyButton.addEventListener("click", () => decideApproval(false));
   els.codeModalClose.addEventListener("click", closeCodeModal);
@@ -604,21 +601,9 @@ async function openConfigFile() {
   }
 }
 
-function openInspector() {
-  els.inspector.classList.add("open");
-  document.body.classList.add("show-draft-inspector");
-}
-
-function closeInspector() {
-  els.inspector.classList.remove("open");
-  document.body.classList.remove("show-draft-inspector");
-}
-
 function setConversationLayout(mode) {
   const draft = mode === "draft";
   document.body.classList.toggle("draft-mode", draft);
-  if (draft) closeInspector();
-  else document.body.classList.remove("show-draft-inspector");
   renderTaskStatus();
 }
 
@@ -1327,6 +1312,9 @@ function handleEvent(envelope) {
 function handleToolRequest(payload, timestamp) {
   const tool = payload.tool || "tool";
   const args = payload.arguments || {};
+  // Subagent lifecycle events immediately provide a concise user-facing plan.
+  // Do not expose delegate_subagents' full task and acceptance JSON here.
+  if (tool === "delegate_subagents") return;
   if (readTools.has(tool)) {
     const detail = args.path || args.query || friendlyToolName(tool);
     if (state.readGroup) {
@@ -1394,8 +1382,8 @@ function handleSubagentEvent(name, payload, timestamp) {
     renderSubagents();
     if (agents.length > 1) {
       addExecution(
-        `并行安排了 ${agents.length} 个子任务`,
-        agents.map((item) => item.label || item.task || item.agent_id).join("\n"),
+        subagentPlanTitle(agents),
+        "",
         timestamp,
         "⇉",
       );
@@ -1426,6 +1414,18 @@ function handleSubagentEvent(name, payload, timestamp) {
       name === "subagent_failed" || name === "subagent_patch_conflict" ? "!" : "⇢",
     );
   }
+}
+
+function subagentPlanTitle(agents) {
+  const labels = agents
+    .map((item) => String(item?.label || item?.task || "").trim().replace(/\s+/g, " "))
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((label) => label.length > 28 ? `${label.slice(0, 27)}…` : label);
+  if (state.language === "en") {
+    return `Running ${agents.length} tasks in parallel${labels.length ? `: ${labels.join(", ")}` : ""}`;
+  }
+  return `并行处理 ${agents.length} 个子任务${labels.length ? `：${labels.join("、")}` : ""}`;
 }
 
 function renderSubagents() {

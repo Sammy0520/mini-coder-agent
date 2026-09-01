@@ -266,6 +266,21 @@ class ContextManager:
         previous_count = int(current_state.get("completed_tool_batches", 0) or 0)
         new_batch_count = max(0, len(batches) - previous_count)
         eligible = new_batch_count >= min_checkpoint_batches
+        if hard_exceeded and not eligible and not current_state.get("generation", 0):
+            # The first checkpoint must not retire fresh evidence before the normal
+            # batch interval. Keep the conversation shape and trim oversized payloads
+            # until enough completed batches exist for a useful durable checkpoint.
+            emergency = self._shrink_v2_contents(
+                assembled,
+                tool_schema_tokens=tool_schema_tokens,
+            )
+            return self._prepared_v2(
+                emergency,
+                current_state,
+                reason="emergency",
+                checkpoint_created=False,
+                tool_schema_tokens=tool_schema_tokens,
+            )
         if hard_exceeded and not eligible and current_state.get("generation", 0):
             # Keep the committed checkpoint byte-for-byte stable. A temporarily
             # oversized hot tail may be trimmed, but it must not force a new
@@ -301,9 +316,10 @@ class ContextManager:
         }
         boundary = _checkpoint_boundary(
             batches,
-            # Crossing the hard limit is the only case allowed to retire the
-            # configured hot tail. Protected failures still cap the boundary.
-            hot_tool_batches=0 if hard_exceeded else hot_tool_batches,
+            # Even an emergency checkpoint must preserve the configured hot tail.
+            # Retiring every recent observation on the first hard-limit crossing
+            # makes the model rediscover the same files after compaction.
+            hot_tool_batches=hot_tool_batches,
             protected_tool_call_ids=protected,
         )
         if boundary is None:
@@ -409,13 +425,12 @@ class ContextManager:
                 + tool_schema_tokens
                 - self.max_tokens,
             )
+            marker = "\n...[context truncated]"
             removable = min(
                 len(content) - 200,
-                max(char_overflow, token_overflow * 3, 100),
+                max(char_overflow + len(marker), token_overflow * 3, 100),
             )
-            message["content"] = (
-                content[: len(content) - removable] + "\n...[context truncated]"
-            )
+            message["content"] = content[: len(content) - removable] + marker
         return result
 
     def _prepared_v2(

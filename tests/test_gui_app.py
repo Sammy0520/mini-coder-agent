@@ -241,6 +241,8 @@ description: 发布前检查版本、变更记录和测试结果
             self.assertIn('class="message-bubble markdown-body"', (Path(__file__).parents[1] / "src" / "mini_coder" / "gui" / "static" / "app.js").read_text(encoding="utf-8"))
             app_script = (Path(__file__).parents[1] / "src" / "mini_coder" / "gui" / "static" / "app.js").read_text(encoding="utf-8")
             self.assertIn('name.startsWith("subagent_")', app_script)
+            self.assertIn('if (tool === "delegate_subagents") return;', app_script)
+            self.assertIn("subagentPlanTitle(agents)", app_script)
             self.assertIn('subagentPatchPending: "等待合并"', app_script)
             self.assertIn('subagentPatchPending: "Ready to merge"', app_script)
             self.assertNotIn('id="conversationProject"', index)

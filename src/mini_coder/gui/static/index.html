@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mini Coder Agent</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260901-4">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260902-1">
 </head>
 <body class="draft-mode">
   <div class="app-layout">
@@ -30,7 +30,7 @@
     <main class="main-pane">
       <header class="conversation-header">
         <div><p class="eyebrow" id="conversationEyebrow">新会话</p><h2 id="conversationTitle">准备开始一个任务</h2></div>
-        <div class="header-actions"><button id="stopRunButton" class="stop-button hidden" type="button">停止任务</button><button id="detailsToggleButton" class="outline-button" type="button">执行详情</button></div>
+        <div class="header-actions"><button id="stopRunButton" class="stop-button hidden" type="button">停止任务</button></div>
       </header>
       <section id="taskStatusBar" class="phase-status" aria-live="polite">
         <div id="phaseRail" class="phase-rail">
@@ -63,7 +63,7 @@
     </main>
 
     <aside id="inspector" class="inspector">
-      <div class="inspector-header"><div><p id="inspectorEyebrow" class="eyebrow">任务详情</p><h2 id="inspectorTitle">执行与变更</h2></div><button id="closeInspectorButton" class="icon-button" type="button" aria-label="关闭详情">×</button></div>
+      <div class="inspector-header"><div><p id="inspectorEyebrow" class="eyebrow">任务详情</p><h2 id="inspectorTitle">执行与变更</h2></div></div>
       <article id="approvalPanel" class="detail-card approval-card hidden">
         <div class="detail-card-header"><div><p class="eyebrow warning">需要你的确认</p><h3 id="approvalHeading">允许这次操作吗？</h3></div><span id="approvalRisk" class="risk-badge">WRITE</span></div>
         <p id="approvalTitle" class="approval-title"></p><details class="technical-details"><summary>查看技术参数</summary><pre id="approvalArguments" class="code-block"></pre></details>
@@ -203,6 +203,6 @@
   </div>
 
   <div id="toast" class="toast" role="status"></div>
-  <script src="/assets/app.js?v=20260901-4" defer></script>
+  <script src="/assets/app.js?v=20260902-2" defer></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 # Cache-Stable Context Compression V2
 
-Status: implemented behind a default-off feature flag; provider validation pending
+Status: implemented and enabled by default; legacy rollback retained
 
 Last updated: 2026-09-01
 
@@ -8,7 +8,7 @@ Last updated: 2026-09-01
 
 Mini Coder needs bounded context without turning every late model request into a new cold prompt. The current implementation preserves append-only history while it is below a soft limit, then derives a compacted view on every later request. That bounds tokens, but recent real runs show that ordinary seven-to-eleven-call coding tasks spend roughly the final 43–45% of their main-agent requests in the compacted path. Cache reuse becomes unstable in the same region.
 
-This document specifies and records the second-generation compression design. The local engine, session persistence, main-agent integration, subagent limits, and content-free diagnostics are implemented behind `context_compression_v2_enabled = false`. The existing ContextManager path remains the default rollback until controlled provider probes justify enabling V2.
+This document specifies and records the second-generation compression design. The local engine, session persistence, main-agent integration, subagent limits, and content-free diagnostics are enabled by default through `context_compression_v2_enabled = true`. The existing ContextManager path remains available for one release cycle as an explicit rollback with `context_compression_v2_enabled = false`.
 
 ### 1.1 Implementation snapshot
 
@@ -299,16 +299,16 @@ Implementation must not be accepted solely on unit tests or a higher cache perce
 
 ## 13. Rollout and rollback
 
-The first implementation should remain behind a configuration flag, with the existing ContextManager path available as a rollback. Suggested rollout:
+The implementation remains behind a configuration flag, with the existing ContextManager path available as a rollback. Rollout history:
 
-1. add diagnostics only;
-2. validate local prefix stability on recorded/deterministic runs;
-3. add frozen checkpoints behind a disabled flag;
-4. run cold/warm provider probes;
-5. run a small fixed task pair;
-6. enable for subagents only if child correctness and cost improve;
-7. enable for the main agent only after verification-state fixes are complete;
-8. keep rollback for at least one release cycle.
+1. diagnostics were added;
+2. local prefix stability was validated on recorded and deterministic runs;
+3. frozen checkpoints were implemented behind a disabled flag;
+4. cold and warm provider probes were run;
+5. fixed multi-turn tasks exposed and led to a verification-state isolation fix;
+6. main-agent and child-agent V2 paths are covered by deterministic tests;
+7. V2 is now enabled by default after the follow-up verification-state fix;
+8. the legacy path remains available for at least one release cycle.
 
 ## 14. Open questions
 
@@ -319,4 +319,4 @@ The first implementation should remain behind a configuration flag, with the exi
 - Is `previous_response_id` sufficiently compatible across supported providers to complement, but not replace, local replay?
 - What high/low watermarks minimize monetary cost rather than raw token count for the selected provider?
 
-Until the provider probes and product-acceptance checks are addressed, the runtime should keep V2 disabled by default and retain the current compression behavior as rollback.
+The runtime now enables V2 by default. Provider-specific monetary cost remains an empirical measurement rather than a correctness assumption, and the legacy compression behavior remains available as an explicit rollback.

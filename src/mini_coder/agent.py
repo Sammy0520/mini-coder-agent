@@ -30,10 +30,13 @@ from .prompts import build_system_prompt
 from .redaction import redact_sensitive_text, redact_sensitive_value
 from .skills import Skill, SkillRegistry, render_selected_skill
 from .tasking import (
+    ParallelOpportunity,
     TaskBrief,
     TaskIntent,
     create_turn_state,
+    detect_parallel_opportunity,
     frame_task,
+    render_parallel_opportunity,
     render_task_brief,
     render_turn_state,
     turn_state_from_memory,
@@ -193,6 +196,7 @@ class AgentRunner:
                 self.tool_context.policy,
             )
             task_brief = frame_task(task, workspace_overview)
+            parallel_opportunity = self._parallel_opportunity(task_brief)
             selected_skill = self.skill_registry.select(task, task_brief.intent)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": self.system_prompt},
@@ -205,6 +209,13 @@ class AgentRunner:
                     "content": render_task_brief(task_brief),
                 },
             ]
+            if parallel_opportunity is not None:
+                messages.append(
+                    {
+                        "role": "developer",
+                        "content": render_parallel_opportunity(parallel_opportunity),
+                    }
+                )
             skill_prompt = render_selected_skill(selected_skill)
             if skill_prompt:
                 messages.append({"role": "developer", "content": skill_prompt})
@@ -225,6 +236,8 @@ class AgentRunner:
                     workspace_baseline=workspace_overview,
                 )
                 turn_state = create_turn_state(task_brief)
+                if parallel_opportunity is not None:
+                    turn_state["parallel_opportunity"] = parallel_opportunity.to_dict()
                 self._record_selected_skill(turn_state, selected_skill)
                 session.working_memory = {
                     "scope": "this session only",
@@ -262,6 +275,11 @@ class AgentRunner:
             if session is not None:
                 self._set_phase(session, TaskPhase.FRAME)
             self._emit("task_framed", task_brief.to_dict())
+            if parallel_opportunity is not None:
+                self._emit(
+                    "parallel_opportunity_detected",
+                    parallel_opportunity.to_dict(),
+                )
             self._emit_selected_skill(selected_skill)
             if session is not None:
                 self._set_phase(session, TaskPhase.LOCATE)
@@ -288,11 +306,17 @@ class AgentRunner:
                     self.tool_context.policy,
                 )
                 task_brief = frame_task(follow_up_task, workspace_overview)
+                parallel_opportunity = self._parallel_opportunity(
+                    task_brief,
+                    prior_turn_state,
+                )
                 selected_skill = self.skill_registry.select(
                     follow_up_task,
                     task_brief.intent,
                 )
                 turn_state = create_turn_state(task_brief)
+                if parallel_opportunity is not None:
+                    turn_state["parallel_opportunity"] = parallel_opportunity.to_dict()
                 turn_state.update(
                     {
                         "turn_start_change_revision": session.change_revision,
@@ -322,6 +346,7 @@ class AgentRunner:
                     task_brief,
                     prior_turn_state,
                     selected_skill,
+                    parallel_opportunity,
                 )
                 self._emit(
                     "workspace_overview_generated",
@@ -340,6 +365,11 @@ class AgentRunner:
                 )
                 self._set_phase(session, TaskPhase.FRAME)
                 self._emit("task_framed", task_brief.to_dict())
+                if parallel_opportunity is not None:
+                    self._emit(
+                        "parallel_opportunity_detected",
+                        parallel_opportunity.to_dict(),
+                    )
                 self._emit_selected_skill(selected_skill)
                 self._set_phase(session, TaskPhase.LOCATE)
             task = session.task
@@ -1085,6 +1115,7 @@ class AgentRunner:
         task_brief: TaskBrief,
         prior_turn_state: dict[str, Any] | None,
         selected_skill: Skill | None,
+        parallel_opportunity: ParallelOpportunity | None = None,
     ) -> list[dict[str, Any]]:
         """Create one stable base for a new turn, without replaying old tool logs."""
         messages: list[dict[str, Any]] = [
@@ -1098,6 +1129,13 @@ class AgentRunner:
         if prior:
             messages.append({"role": "developer", "content": prior})
         messages.append({"role": "developer", "content": render_task_brief(task_brief)})
+        if parallel_opportunity is not None:
+            messages.append(
+                {
+                    "role": "developer",
+                    "content": render_parallel_opportunity(parallel_opportunity),
+                }
+            )
         skill_prompt = render_selected_skill(selected_skill)
         if skill_prompt:
             messages.append({"role": "developer", "content": skill_prompt})
@@ -1106,6 +1144,17 @@ class AgentRunner:
             messages.append({"role": "developer", "content": language_prompt})
         messages.append({"role": "user", "content": task})
         return messages
+
+    def _parallel_opportunity(
+        self,
+        task_brief: TaskBrief,
+        prior_turn_state: dict[str, Any] | None = None,
+    ) -> ParallelOpportunity | None:
+        if not self.config.subagents_enabled:
+            return None
+        if self.registry.get("delegate_subagents") is None:
+            return None
+        return detect_parallel_opportunity(task_brief, prior_turn_state)
 
     @staticmethod
     def _normalize_response_language(value: str | None) -> str | None:

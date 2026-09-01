@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-coder-agent"
-version = "0.1.0"
-description = "A small, inspectable coding agent built without an agent framework."
+version = "1.0.0"
+description = "A lightweight, inspectable local coding agent with evidence-gated delivery."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

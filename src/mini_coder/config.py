@@ -77,11 +77,11 @@ class AgentConfig:
     max_tool_calls: int = 100
     command_timeout_seconds: int = 60
     max_tool_output_chars: int = 12_000
-    max_total_tool_output_chars: int = 200_000
-    max_total_tokens: int = 500_000
-    max_context_chars: int = 80_000
-    max_context_tokens: int = 20_000
-    context_compression_v2_enabled: bool = False
+    max_total_tool_output_chars: int = 300_000
+    max_total_tokens: int = 600_000
+    max_context_chars: int = 120_000
+    max_context_tokens: int = 32_000
+    context_compression_v2_enabled: bool = True
     context_high_watermark_ratio: float = 0.90
     context_target_ratio: float = 0.68
     context_hot_tool_batches: int = 3
@@ -111,8 +111,8 @@ class AgentConfig:
     max_subagent_seconds: int = 300
     max_subagent_model_calls: int = 5
     max_subagent_tool_calls: int = 16
-    max_subagent_total_tokens: int = 40_000
-    max_subagent_context_tokens: int = 8_000
+    max_subagent_total_tokens: int = 60_000
+    max_subagent_context_tokens: int = 12_000
     subagent_context_high_watermark_ratio: float = 0.90
     subagent_context_target_ratio: float = 0.70
     subagent_context_hot_tool_batches: int = 2
@@ -310,24 +310,52 @@ class AgentConfig:
             max_total_tool_output_chars=(
                 max_total_tool_output_chars
                 if max_total_tool_output_chars is not None
-                else _env_int("CODING_AGENT_MAX_TOTAL_TOOL_OUTPUT", 200_000)
+                else _env_int(
+                    "CODING_AGENT_MAX_TOTAL_TOOL_OUTPUT",
+                    _optional_int(
+                        file_data.get("max_total_tool_output_chars"),
+                        "max_total_tool_output_chars",
+                        default=300_000,
+                    ),
+                )
             ),
             max_total_tokens=(
                 max_total_tokens
                 if max_total_tokens is not None
-                else _env_int("CODING_AGENT_MAX_TOTAL_TOKENS", 500_000)
+                else _env_int(
+                    "CODING_AGENT_MAX_TOTAL_TOKENS",
+                    _optional_int(
+                        file_data.get("max_total_tokens"),
+                        "max_total_tokens",
+                        default=600_000,
+                    ),
+                )
             ),
             preserve_project_command_path=preserve_project_command_path,
             auto_approve_unknown_commands=auto_approve_unknown_commands,
             external_evaluation=external_evaluation,
-            max_context_chars=_env_int("CODING_AGENT_CONTEXT_CHARS", 80_000),
-            max_context_tokens=_env_int("CODING_AGENT_CONTEXT_TOKENS", 20_000),
+            max_context_chars=_env_int(
+                "CODING_AGENT_CONTEXT_CHARS",
+                _optional_int(
+                    file_data.get("max_context_chars"),
+                    "max_context_chars",
+                    default=120_000,
+                ),
+            ),
+            max_context_tokens=_env_int(
+                "CODING_AGENT_CONTEXT_TOKENS",
+                _optional_int(
+                    file_data.get("max_context_tokens"),
+                    "max_context_tokens",
+                    default=32_000,
+                ),
+            ),
             context_compression_v2_enabled=_env_bool(
                 "CODING_AGENT_CONTEXT_COMPRESSION_V2",
                 _optional_bool(
                     file_data.get("context_compression_v2_enabled"),
                     "context_compression_v2_enabled",
-                    default=False,
+                    default=True,
                 ),
             ),
             context_high_watermark_ratio=_env_float(
@@ -471,11 +499,11 @@ class AgentConfig:
             ),
             max_subagent_total_tokens=_env_int(
                 "CODING_AGENT_MAX_SUBAGENT_TOTAL_TOKENS",
-                _optional_int(file_data.get("max_subagent_total_tokens"), "max_subagent_total_tokens", default=40_000),
+                _optional_int(file_data.get("max_subagent_total_tokens"), "max_subagent_total_tokens", default=60_000),
             ),
             max_subagent_context_tokens=_env_int(
                 "CODING_AGENT_MAX_SUBAGENT_CONTEXT_TOKENS",
-                _optional_int(file_data.get("max_subagent_context_tokens"), "max_subagent_context_tokens", default=8_000),
+                _optional_int(file_data.get("max_subagent_context_tokens"), "max_subagent_context_tokens", default=12_000),
             ),
             subagent_context_high_watermark_ratio=_env_float(
                 "CODING_AGENT_SUBAGENT_CONTEXT_HIGH_WATERMARK_RATIO",

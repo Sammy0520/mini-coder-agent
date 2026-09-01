@@ -1,10 +1,21 @@
-model_provider = "aicode007"
-model = "gpt-5.6-sol"
-model_reasoning_effort = "xhigh"
+model_provider = "openai"
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
 model_verbosity = "high"
 model_streaming = true
 prompt_cache_enabled = true
 prompt_cache_key = "mini-coder-agent-v1"
+# Frozen, cache-stable checkpoints are the default. Set this to false for the
+# legacy rolling-compaction fallback during one release cycle.
+context_compression_v2_enabled = true
+max_total_tokens = 600000
+max_total_tool_output_chars = 300000
+max_context_chars = 120000
+max_context_tokens = 32000
+context_high_watermark_ratio = 0.90
+context_target_ratio = 0.68
+context_hot_tool_batches = 3
+context_min_checkpoint_batches = 6
 parallel_read_tools_enabled = true
 speculative_finish_enabled = false
 speculative_finish_delay_ms = 800
@@ -18,13 +29,13 @@ max_subagent_steps = 6
 max_subagent_seconds = 300
 max_subagent_model_calls = 5
 max_subagent_tool_calls = 16
-max_subagent_total_tokens = 40000
-max_subagent_context_tokens = 8000
+max_subagent_total_tokens = 60000
+max_subagent_context_tokens = 12000
 max_subagent_workspace_files = 5000
 max_subagent_workspace_bytes = 50000000
 
-[model_providers.aicode007]
-name = "aicode007"
-base_url = "https://api.aicode007.com"
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
 wire_api = "responses"
 requires_openai_auth = true

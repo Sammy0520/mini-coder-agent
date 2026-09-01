@@ -470,6 +470,10 @@ class ContextManagerTests(unittest.TestCase):
         )
 
         self.assertEqual(prepared.compaction_reason, "emergency")
+        self.assertFalse(prepared.checkpoint_created)
+        self.assertEqual(prepared.checkpoint_generation, 0)
+        rendered = str(prepared.messages)
+        self.assertIn("call-3", rendered)
         self.assertLessEqual(manager.estimate_chars(prepared.messages), manager.max_chars)
 
     def test_v2_emergency_tail_trim_does_not_rewrite_existing_checkpoint(self) -> None:

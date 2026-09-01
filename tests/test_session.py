@@ -595,7 +595,10 @@ class SessionRunnerTests(unittest.TestCase):
             self.assertEqual(restored.total_usage["total_tokens"], 22)
             self.assertEqual([item["turn"] for item in restored.model_call_records], [1, 2])
             self.assertFalse(restored.model_call_records[-1]["compacted"])
-            self.assertNotIn("generation", restored.context_state)
+            self.assertEqual(restored.context_state.get("generation"), 0)
+            self.assertEqual(
+                restored.context_state.get("boundary_reason"), "new_turn"
+            )
             self.assertNotIn("old-turn-checkpoint", str(restored.context_state))
 
     def test_mutating_follow_up_without_change_is_corrected_then_fails(self) -> None:

@@ -199,13 +199,17 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.speculative_finish_delay_ms, 25)
             self.assertEqual(config.speculative_finish_reasoning_effort, "medium")
 
-    def test_context_v2_is_opt_in_and_loads_watermarks(self) -> None:
+    def test_context_v2_is_default_on_and_loads_watermarks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "agent.toml"
             config_path.write_text(
                 'model = "test-model"\n'
                 "context_compression_v2_enabled = true\n"
+                "max_total_tokens = 610000\n"
+                "max_total_tool_output_chars = 310000\n"
+                "max_context_chars = 124000\n"
+                "max_context_tokens = 33000\n"
                 "context_high_watermark_ratio = 0.88\n"
                 "context_target_ratio = 0.66\n"
                 "context_hot_tool_batches = 4\n"
@@ -216,10 +220,28 @@ class ConfigTests(unittest.TestCase):
                 config = AgentConfig.from_env(root, config_path=config_path)
 
             self.assertTrue(config.context_compression_v2_enabled)
+            self.assertEqual(config.max_total_tokens, 610_000)
+            self.assertEqual(config.max_total_tool_output_chars, 310_000)
+            self.assertEqual(config.max_context_chars, 124_000)
+            self.assertEqual(config.max_context_tokens, 33_000)
             self.assertEqual(config.context_high_watermark_ratio, 0.88)
             self.assertEqual(config.context_target_ratio, 0.66)
             self.assertEqual(config.context_hot_tool_batches, 4)
             self.assertEqual(config.context_min_checkpoint_batches, 7)
+
+    def test_context_v2_can_be_explicitly_disabled_for_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "agent.toml"
+            config_path.write_text(
+                'model = "test-model"\n'
+                "context_compression_v2_enabled = false\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "test"}, clear=True):
+                config = AgentConfig.from_env(root, config_path=config_path)
+
+            self.assertFalse(config.context_compression_v2_enabled)
 
     def test_context_v2_rejects_inverted_watermarks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

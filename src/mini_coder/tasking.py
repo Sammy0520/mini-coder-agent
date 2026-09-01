@@ -68,6 +68,18 @@ class TaskBrief:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ParallelOpportunity:
+    reason: str
+    slices: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reason": self.reason,
+            "slices": [dict(item) for item in self.slices],
+        }
+
+
 def create_turn_state(brief: TaskBrief) -> dict[str, Any]:
     """Create the single compact durable state for one conversation turn.
 
@@ -161,6 +173,7 @@ _FIX_MARKERS = (
     "报错",
     "错误",
     "修复",
+    "修好",
     "坏了",
     "跑不了",
     "不能运行",
@@ -226,6 +239,44 @@ _TOO_VAGUE = {
     "make something",
 }
 
+_FRONTEND_SIGNALS = (
+    "前端",
+    "网页",
+    "浏览器界面",
+    "frontend",
+    "web page",
+    "web ui",
+)
+_BACKEND_SIGNALS = (
+    "后端",
+    "本地服务",
+    "服务端",
+    "服务器",
+    "backend",
+    "local service",
+    " api",
+    "api ",
+)
+_PLAN_FIRST_SIGNALS = (
+    "先展示",
+    "先给方案",
+    "先说说",
+    "确认后再",
+    "等我确认",
+    "show your plan first",
+    "wait for my confirmation",
+)
+_PROCEED_SIGNALS = (
+    "可以",
+    "就按",
+    "开始做",
+    "开始实现",
+    "按刚刚",
+    "go ahead",
+    "proceed",
+    "approved",
+)
+
 
 def frame_task(task: str, workspace_overview: dict[str, Any]) -> TaskBrief:
     goal = " ".join(task.strip().split())
@@ -277,6 +328,84 @@ def render_task_brief(brief: TaskBrief) -> str:
         "Minimum acceptance checks:\n"
         f"{checks}"
         f"{clarification}"
+    )
+
+
+def detect_parallel_opportunity(
+    brief: TaskBrief,
+    prior_turn_state: dict[str, Any] | None = None,
+) -> ParallelOpportunity | None:
+    """Return a high-confidence, zero-model-call parallel routing hint.
+
+    The detector is deliberately narrow. It recognizes only an explicit frontend plus
+    backend/local-service boundary, and it carries that boundary across a plan-confirm
+    turn only when the current user message is a clear approval to proceed.
+    """
+    if brief.intent not in {TaskIntent.BUILD, TaskIntent.FEATURE}:
+        return None
+    if brief.clarification_needed:
+        return None
+
+    current = brief.goal.casefold()
+    if any(marker in current for marker in _PLAN_FIRST_SIGNALS):
+        return None
+
+    combined = current
+    if any(marker in current for marker in _PROCEED_SIGNALS) and isinstance(
+        prior_turn_state, dict
+    ):
+        prior_goal = str(prior_turn_state.get("goal") or "").casefold()
+        if prior_goal:
+            combined = f"{prior_goal}\n{current}"
+
+    if not any(marker in combined for marker in _FRONTEND_SIGNALS):
+        return None
+    if not any(marker in combined for marker in _BACKEND_SIGNALS):
+        return None
+
+    return ParallelOpportunity(
+        reason=(
+            "The confirmed task contains substantial frontend and backend/local-service "
+            "work with naturally non-overlapping ownership."
+        ),
+        slices=(
+            {
+                "label": "Frontend implementation",
+                "allowed_paths": ["frontend/**"],
+                "acceptance": (
+                    "Implement the user-facing workflow against the agreed local API; "
+                    "keep frontend checks inside frontend/."
+                ),
+            },
+            {
+                "label": "Backend and local persistence",
+                "allowed_paths": ["backend/**", "data/**"],
+                "acceptance": (
+                    "Implement the local API, durable project-directory storage, and "
+                    "focused backend checks without modifying frontend/."
+                ),
+            },
+        ),
+    )
+
+
+def render_parallel_opportunity(opportunity: ParallelOpportunity) -> str:
+    frontend, backend = opportunity.slices
+    return (
+        "Runtime parallel opportunity (high confidence; derived locally without another "
+        "model call):\n"
+        f"- Reason: {opportunity.reason}\n"
+        "- Before directly writing either ownership slice, define a minimal shared API "
+        "and data contract in the two task specifications.\n"
+        "- Prefer one delegate_subagents call with two concurrent Implementers:\n"
+        f"  1. {frontend['label']}; allowed_paths={frontend['allowed_paths']}; "
+        f"acceptance={frontend['acceptance']}\n"
+        f"  2. {backend['label']}; allowed_paths={backend['allowed_paths']}; "
+        f"acceptance={backend['acceptance']}\n"
+        "- Keep root documentation, patch review, bundle application, and the final "
+        "frontend/backend integration verification in the parent Agent.\n"
+        "- If bounded discovery disproves this non-overlapping split, decline delegation "
+        "and continue with the lightweight single-Agent path."
     )
 
 

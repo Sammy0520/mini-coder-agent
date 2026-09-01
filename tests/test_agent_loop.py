@@ -111,7 +111,9 @@ class AgentLoopTests(unittest.TestCase):
             record = session.model_call_records[-1]
             self.assertEqual(record["context_checkpoint"]["checkpoint_generation"], 1)
             self.assertEqual(record["cache_stability"]["checkpoint_generation"], 1)
-            self.assertNotIn("source" * 100, str(model.requests[0][0]))
+            rendered_request = str(model.requests[0][0])
+            self.assertNotIn("old-call-0", rendered_request)
+            self.assertIn("old-call-5", rendered_request)
 
     def test_gui_response_language_is_sent_as_stable_developer_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
