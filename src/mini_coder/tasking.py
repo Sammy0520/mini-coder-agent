@@ -138,6 +138,12 @@ def render_turn_state(state: Any) -> str:
     last_outcome = str(state.get("last_outcome") or "").strip()
     if last_outcome:
         lines.append(f"- Last outcome: {last_outcome[:800]}")
+    active_skill = state.get("active_skill")
+    if isinstance(active_skill, dict) and active_skill.get("name"):
+        lines.append(
+            f"- Previously selected skill: {str(active_skill.get('name'))[:120]} "
+            f"({str(active_skill.get('id') or '')[:80]})"
+        )
     return "\n".join(lines)[:4_000]
 
 

@@ -32,6 +32,7 @@ const state = {
   pendingRenameSession: null,
   sessionMenuSession: null,
   sessionMenuButton: null,
+  skills: [],
 };
 
 const elementIds = [
@@ -54,6 +55,11 @@ const elementIds = [
   "renameSessionModal", "renameSessionClose", "renameSessionCancel", "renameSessionConfirm", "renameSessionInput",
   "sessionInfoModal", "sessionInfoClose", "sessionInfoDone", "sessionInfoWorkspace",
   "sessionInfoCreatedAt", "sessionInfoUpdatedAt", "sessionInfoTurns",
+  "skillsButton", "settingsButton", "skillModal", "skillModalClose", "addSkillButton",
+  "builtinSkillCount", "customSkillCount", "builtinSkillList", "customSkillList",
+  "skillEditorModal", "skillEditorClose", "skillEditorCancel", "skillEditorSave",
+  "skillNameInput", "skillDescriptionInput", "skillInstructionsInput",
+  "settingsModal", "settingsModalClose", "settingsCancel", "settingsSave", "settingsConfigPath",
 ];
 const els = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 const terminalEvents = new Set(["controller_run_finished", "controller_run_failed"]);
@@ -64,6 +70,25 @@ bootstrap();
 
 function bindEvents() {
   els.newSessionButton.addEventListener("click", () => openSessionModal());
+  els.skillsButton.addEventListener("click", openSkillPage);
+  els.skillModalClose.addEventListener("click", closeSkillPage);
+  els.skillModal.addEventListener("click", (event) => {
+    if (event.target === els.skillModal) closeSkillPage();
+  });
+  els.addSkillButton.addEventListener("click", openSkillEditor);
+  els.skillEditorClose.addEventListener("click", closeSkillEditor);
+  els.skillEditorCancel.addEventListener("click", closeSkillEditor);
+  els.skillEditorSave.addEventListener("click", saveCustomSkill);
+  els.skillEditorModal.addEventListener("click", (event) => {
+    if (event.target === els.skillEditorModal) closeSkillEditor();
+  });
+  els.settingsButton.addEventListener("click", openSettings);
+  els.settingsModalClose.addEventListener("click", closeSettings);
+  els.settingsCancel.addEventListener("click", closeSettings);
+  els.settingsSave.addEventListener("click", saveSettings);
+  els.settingsModal.addEventListener("click", (event) => {
+    if (event.target === els.settingsModal) closeSettings();
+  });
   els.sessionModalClose.addEventListener("click", closeSessionModal);
   els.sessionModalCancel.addEventListener("click", closeSessionModal);
   els.sessionModalConfirm.addEventListener("click", confirmSessionSetup);
@@ -155,6 +180,9 @@ function bindEvents() {
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (!els.sessionActionMenu.classList.contains("hidden")) closeSessionActionMenu();
+    else if (!els.skillEditorModal.classList.contains("hidden")) closeSkillEditor();
+    else if (!els.skillModal.classList.contains("hidden")) closeSkillPage();
+    else if (!els.settingsModal.classList.contains("hidden")) closeSettings();
     else if (!els.codeModal.classList.contains("hidden")) closeCodeModal();
     else if (!els.folderModal.classList.contains("hidden")) closeFolderBrowser();
     else if (!els.renameSessionModal.classList.contains("hidden")) closeRenameSessionModal();
@@ -162,6 +190,156 @@ function bindEvents() {
     else if (!els.sessionInfoModal.classList.contains("hidden")) closeSessionInfoModal();
     else if (!els.sessionModal.classList.contains("hidden")) closeSessionModal();
   });
+}
+
+async function openSkillPage() {
+  els.skillModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  await loadSkills();
+}
+
+function closeSkillPage() {
+  els.skillModal.classList.add("hidden");
+  syncModalOpenState();
+}
+
+async function loadSkills() {
+  els.builtinSkillList.innerHTML = '<div class="skill-empty">正在读取 Skills…</div>';
+  els.customSkillList.innerHTML = '<div class="skill-empty">正在读取 Skills…</div>';
+  try {
+    const response = await fetch("/api/skills");
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法读取 Skills");
+    state.skills = Array.isArray(data.skills) ? data.skills : [];
+    renderSkills();
+  } catch (error) {
+    const message = `<div class="skill-empty">${escapeHtml(error.message)}</div>`;
+    els.builtinSkillList.innerHTML = message;
+    els.customSkillList.innerHTML = message;
+  }
+}
+
+function renderSkills() {
+  const builtins = state.skills.filter((skill) => skill.builtin);
+  const custom = state.skills.filter((skill) => !skill.builtin);
+  els.builtinSkillCount.textContent = String(builtins.length);
+  els.customSkillCount.textContent = String(custom.length);
+  renderSkillGroup(els.builtinSkillList, builtins, "内置 Skill 暂时无法读取");
+  renderSkillGroup(els.customSkillList, custom, "还没有自定义 Skill，可以添加你常用的工作方式。");
+}
+
+function renderSkillGroup(target, skills, emptyMessage) {
+  target.replaceChildren();
+  if (!skills.length) {
+    target.innerHTML = `<div class="skill-empty">${escapeHtml(emptyMessage)}</div>`;
+    return;
+  }
+  skills.forEach((skill) => target.appendChild(createSkillCard(skill)));
+}
+
+function createSkillCard(skill) {
+  const card = document.createElement("article");
+  card.className = "skill-card";
+  const main = document.createElement("div");
+  main.className = "skill-card-main";
+  main.innerHTML = `<span class="skill-card-icon">${skill.builtin ? "◇" : "＋"}</span><div><h4>${escapeHtml(skill.name)}</h4><p>${escapeHtml(skill.description)}</p></div><span class="skill-source-badge${skill.builtin ? "" : " custom"}">${skill.builtin ? "内置" : "自定义"}</span>`;
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "查看使用说明";
+  const instructions = document.createElement("div");
+  instructions.className = "skill-card-instructions";
+  instructions.textContent = skill.instructions || "";
+  details.append(summary, instructions);
+  card.append(main, details);
+  if (!skill.builtin) {
+    const footer = document.createElement("div");
+    footer.className = "skill-card-footer";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "skill-delete-button";
+    remove.textContent = "删除";
+    remove.addEventListener("click", () => deleteCustomSkill(skill));
+    footer.appendChild(remove);
+    card.appendChild(footer);
+  }
+  return card;
+}
+
+function openSkillEditor() {
+  els.skillNameInput.value = "";
+  els.skillDescriptionInput.value = "";
+  els.skillInstructionsInput.value = "";
+  els.skillEditorModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => els.skillNameInput.focus(), 0);
+}
+
+function closeSkillEditor() {
+  els.skillEditorModal.classList.add("hidden");
+  syncModalOpenState();
+}
+
+async function saveCustomSkill() {
+  const name = els.skillNameInput.value.trim();
+  const description = els.skillDescriptionInput.value.trim();
+  const instructions = els.skillInstructionsInput.value.trim();
+  if (!name || !description || !instructions) {
+    toast("请把名称、使用场景和做法填写完整。", true);
+    return;
+  }
+  els.skillEditorSave.disabled = true;
+  try {
+    const response = await fetch("/api/skills", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, description, instructions}),
+    });
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法添加 Skill");
+    closeSkillEditor();
+    await loadSkills();
+    toast(`已添加 Skill：${data.name}`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    els.skillEditorSave.disabled = false;
+  }
+}
+
+async function deleteCustomSkill(skill) {
+  if (!window.confirm(`确认删除自定义 Skill“${skill.name}”吗？`)) return;
+  try {
+    const response = await fetch(`/api/skills/${encodeURIComponent(skill.id)}`, {method: "DELETE"});
+    const data = await readJson(response);
+    if (!response.ok) throw new Error(data.detail || "无法删除 Skill");
+    await loadSkills();
+    toast("已删除自定义 Skill");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function openSettings() {
+  els.settingsConfigPath.value = state.configPath || "agent.toml";
+  els.settingsModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function closeSettings() {
+  els.settingsModal.classList.add("hidden");
+  syncModalOpenState();
+}
+
+function saveSettings() {
+  const configPath = els.settingsConfigPath.value.trim();
+  if (!configPath) {
+    toast("请填写模型配置文件路径。", true);
+    return;
+  }
+  state.configPath = configPath;
+  saveProject();
+  closeSettings();
+  toast("设置已保存");
 }
 
 function openInspector() {
@@ -797,6 +975,8 @@ function handleEvent(envelope) {
     state.taskBrief = payload;
     renderTaskBrief();
     addExecution("已经理解你想完成什么", taskBriefDetail(payload), timestamp, "◎");
+  } else if (name === "skill_selected") {
+    addExecution(`已启用「${payload.name || "任务 Skill"}」`, payload.description || "按相关工作方式继续", timestamp, "◇");
   } else if (name === "phase_changed") {
     state.phase = payload.phase || state.phase;
     updatePhaseHeading(state.phase);

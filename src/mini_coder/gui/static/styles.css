@@ -73,7 +73,12 @@ button { color: inherit; }
 .session-item strong { padding-top: 1px; font-size: 11px; }
 .session-item small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 .sidebar-empty { padding: 25px 10px; color: var(--muted); text-align: center; font-size: 10px; }
-.sidebar-footer { display: flex; align-items: center; gap: 8px; padding: 13px 18px; color: var(--muted); border-top: 1px solid var(--border); font-size: 10px; }
+.sidebar-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px 9px 18px; color: var(--muted); border-top: 1px solid var(--border); font-size: 10px; }
+.connection-state, .footer-actions { display: flex; align-items: center; gap: 8px; }
+.footer-actions { gap: 3px; }
+.footer-icon-button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; color: #69758b; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+.footer-icon-button:hover, .footer-icon-button:focus-visible { color: var(--blue); outline: none; background: #edf0fb; }
+.footer-icon-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .connection-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px rgba(24, 132, 91, .35); }
 .connection-dot.busy { background: var(--blue); animation: pulse 1.5s infinite; }
 .connection-dot.error { background: var(--red); }
@@ -229,9 +234,9 @@ button { color: inherit; }
 .execution-details { margin: 0; padding: 0 12px 10px 39px; color: var(--muted); font: 8px/1.55 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: rgba(30, 40, 65, .3); backdrop-filter: blur(5px); }
-.setup-dialog, .folder-dialog, .code-dialog, .delete-dialog, .rename-dialog, .session-info-dialog { width: min(700px, 100%); max-height: calc(100vh - 36px); overflow: hidden; border: 1px solid var(--border); border-radius: 17px; background: #fff; box-shadow: 0 30px 100px rgba(25, 39, 75, .25); }
+.setup-dialog, .folder-dialog, .code-dialog, .delete-dialog, .rename-dialog, .session-info-dialog, .skill-dialog, .skill-editor-dialog, .settings-dialog { width: min(700px, 100%); max-height: calc(100vh - 36px); overflow: hidden; border: 1px solid var(--border); border-radius: 17px; background: #fff; box-shadow: 0 30px 100px rgba(25, 39, 75, .25); }
 .setup-dialog { width: min(620px, 100%); }
-.delete-dialog, .rename-dialog, .session-info-dialog { width: min(480px, 100%); }
+.delete-dialog, .rename-dialog, .session-info-dialog, .skill-editor-dialog, .settings-dialog { width: min(520px, 100%); }
 .delete-dialog-body { padding: 18px; color: var(--muted); font-size: 11px; line-height: 1.65; }
 .delete-dialog-body p { margin: 0; }
 .delete-session-name { margin-bottom: 9px !important; color: var(--text); font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }
@@ -240,6 +245,36 @@ button { color: inherit; }
 .rename-dialog-body input { width: 100%; padding: 11px 12px; color: var(--text); border: 1px solid var(--border); border-radius: 9px; outline: none; background: #fbfcff; font-size: 11px; }
 .rename-dialog-body input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(80, 104, 231, .1); }
 .rename-dialog-body p { margin: 0; color: var(--muted); font-size: 9px; }
+.skill-dialog { width: min(940px, 100%); height: min(760px, calc(100vh - 36px)); display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.skill-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 21px 23px; border-bottom: 1px solid var(--border); background: linear-gradient(145deg, #fbfcff, #f2f7f8); }
+.skill-page-header h2 { margin: 4px 0 5px; font-size: 22px; }
+.skill-page-header p:not(.eyebrow) { max-width: 580px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.skill-page-actions { display: flex; align-items: center; gap: 8px; }
+.skill-page-body { min-height: 0; overflow-y: auto; display: grid; gap: 24px; padding: 22px 23px 30px; }
+.skill-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.skill-section-heading h3 { margin: 0; font-size: 14px; }
+.skill-section-heading p { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
+.count-badge { min-width: 25px; padding: 4px 7px; color: #536078; border-radius: 999px; background: #edf0f6; font-size: 9px; font-weight: 800; text-align: center; }
+.skill-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.skill-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: #fff; box-shadow: 0 7px 22px rgba(36, 52, 88, .04); }
+.skill-card-main { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 13px; }
+.skill-card-icon { width: 34px; height: 34px; display: grid; place-items: center; color: var(--blue); border-radius: 10px; background: #edf0ff; font-size: 15px; font-weight: 850; }
+.skill-card h4 { margin: 1px 0 4px; font-size: 11px; }
+.skill-card p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.skill-source-badge { padding: 3px 6px; color: #507069; border-radius: 999px; background: #eaf7f1; font-size: 7px; font-weight: 850; white-space: nowrap; }
+.skill-source-badge.custom { color: #5c64a7; background: #eef0ff; }
+.skill-card details { border-top: 1px solid #edf0f5; color: #4c5870; font-size: 9px; }
+.skill-card summary { padding: 9px 13px; cursor: pointer; font-weight: 750; }
+.skill-card-instructions { padding: 0 13px 12px; line-height: 1.65; white-space: pre-wrap; }
+.skill-card-footer { display: flex; justify-content: flex-end; padding: 0 10px 10px; }
+.skill-delete-button { padding: 5px 7px; color: #b52f48; border: 0; border-radius: 7px; background: #fff0f3; cursor: pointer; font-size: 8px; font-weight: 800; }
+.skill-empty { grid-column: 1 / -1; padding: 25px; color: var(--muted); border: 1px dashed #d7ddea; border-radius: 13px; text-align: center; font-size: 10px; }
+.skill-editor-body, .settings-body { display: grid; gap: 7px; padding: 18px; }
+.skill-editor-body label, .settings-body label { margin-top: 5px; font-size: 10px; font-weight: 800; }
+.skill-editor-body input, .skill-editor-body textarea, .settings-body input { width: 100%; padding: 10px 11px; color: var(--text); border: 1px solid var(--border); border-radius: 9px; outline: none; background: #fbfcff; font-size: 10px; line-height: 1.55; }
+.skill-editor-body textarea { min-height: 150px; resize: vertical; }
+.skill-editor-body input:focus, .skill-editor-body textarea:focus, .settings-body input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(80, 104, 231, .1); }
+.skill-editor-body p, .settings-body p { margin: 2px 0 0; color: var(--muted); font-size: 9px; }
 .session-info-list { display: grid; margin: 0; padding: 4px 18px; }
 .session-info-list > div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 13px 0; border-bottom: 1px solid #edf0f5; }
 .session-info-list > div:last-child { border-bottom: 0; }
@@ -319,4 +354,7 @@ button { color: inherit; }
   .input-with-action { grid-template-columns: 1fr; }
   .folder-path-row { grid-template-columns: auto minmax(0, 1fr); }
   .folder-path-row input { grid-column: 1 / -1; grid-row: 1; }
+  .skill-grid { grid-template-columns: 1fr; }
+  .skill-page-header { align-items: stretch; flex-direction: column; }
+  .skill-page-actions { justify-content: space-between; }
 }

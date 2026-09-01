@@ -15,6 +15,7 @@ from ..exceptions import MiniCoderError
 from ..model import OpenAICompatibleClient
 from ..redaction import redact_sensitive_text, redact_sensitive_value
 from ..session import SessionStore
+from ..skills import SkillRegistry
 from ..tools import create_default_registry
 from ..tools.base import Tool
 from ..tools.command_risk import assess_command
@@ -565,6 +566,7 @@ class RunController:
             model=model,
             registry=create_default_registry(),
             config=config,
+            skill_registry=SkillRegistry.with_user_skills(),
             approval_callback=approval_callback,
             batch_approval_callback=batch_approval_callback,
             event_callback=event_callback,

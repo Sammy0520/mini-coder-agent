@@ -9,6 +9,7 @@ from mini_coder.config import AgentConfig, ApprovalPolicy
 from mini_coder.messages import ModelResponse, ToolCall
 from mini_coder.model import ModelClient
 from mini_coder.session import SessionStatus, SessionStore
+from mini_coder.skills import SkillRegistry
 from mini_coder.verification import TaskPhase, VerificationStatus
 from mini_coder.tools import create_default_registry
 
@@ -41,6 +42,42 @@ def make_config(workspace: Path, **overrides) -> AgentConfig:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_selected_skill_is_injected_once_and_saved_in_turn_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            events: list[tuple[str, dict]] = []
+            model = FakeModel([ModelResponse(content="I found the cause without changes.")])
+            runner = AgentRunner(
+                model=model,
+                registry=create_default_registry(),
+                config=make_config(workspace),
+                skill_registry=SkillRegistry.builtins_only(),
+                event_callback=lambda name, payload: events.append((name, payload)),
+                session_store=store,
+            )
+
+            result = runner.run("启动时报错，帮我找出原因并修好")
+
+            sent = model.requests[0][0]
+            skill_messages = [
+                item for item in sent
+                if item.get("role") == "developer"
+                and "Selected workflow skill" in str(item.get("content"))
+            ]
+            session = store.load(result.session_id or "")
+            active_skill = session.working_memory["turn_state"]["active_skill"]
+            self.assertEqual(len(skill_messages), 1)
+            self.assertIn("bug-fix", skill_messages[0]["content"])
+            self.assertNotIn("small-app", skill_messages[0]["content"])
+            self.assertEqual(active_skill["id"], "bug-fix")
+            self.assertTrue(
+                any(
+                    name == "skill_selected" and payload["id"] == "bug-fix"
+                    for name, payload in events
+                )
+            )
+
     def test_analysis_only_task_completes_without_meaningless_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

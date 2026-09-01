@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from ..changes import ChangeTracker
 from ..exceptions import ChangeError, SessionError
 from ..session import SessionStatus, SessionStore, TaskPhase
+from ..skills import SkillRegistry, default_user_skill_directory
 from ..tasking import turn_state_from_memory
 from .controller import RunController, RunRequest
 
@@ -37,6 +38,12 @@ class ApprovalBody(BaseModel):
 
 class RenameSessionBody(BaseModel):
     title: str = Field(min_length=1, max_length=120)
+
+
+class AddSkillBody(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    description: str = Field(min_length=4, max_length=240)
+    instructions: str = Field(min_length=10, max_length=8_000)
 
 
 class WorkspaceCatalog:
@@ -189,6 +196,18 @@ def _session_execution_history(session) -> list[dict]:
                 "icon": "◎",
             }
         )
+        active_skill = turn_state.get("active_skill")
+        if isinstance(active_skill, dict) and active_skill.get("name"):
+            history.append(
+                {
+                    "title": f"使用了「{active_skill['name']}」",
+                    "details": [
+                        str(active_skill.get("description") or "按相关工作方式处理任务。")
+                    ],
+                    "time": session.created_at,
+                    "icon": "◇",
+                }
+            )
     if session.workspace_baseline:
         history.append(
             {
@@ -331,10 +350,14 @@ def create_app(
     controller: RunController | None = None,
     *,
     catalog_path: str | Path | None = None,
+    skill_path: str | Path | None = None,
 ) -> FastAPI:
     active_controller = controller or RunController()
     catalog = WorkspaceCatalog(
         catalog_path or (Path.cwd() / ".mini-coder" / "gui-workspaces.json")
+    )
+    skill_registry = SkillRegistry.with_user_skills(
+        skill_path or default_user_skill_directory()
     )
     static_dir = Path(__file__).with_name("static")
     app = FastAPI(
@@ -361,6 +384,37 @@ def create_app(
             "default_workspace": str(workspace),
             "default_config_path": str(workspace / "agent.toml"),
         }
+
+    @app.get("/api/skills")
+    def list_skills() -> dict:
+        skills = skill_registry.list()
+        return {
+            "skills": [skill.to_dict() for skill in skills],
+            "builtin_count": len([skill for skill in skills if skill.builtin]),
+            "custom_count": len([skill for skill in skills if not skill.builtin]),
+        }
+
+    @app.post("/api/skills", status_code=201)
+    def add_skill(body: AddSkillBody) -> dict:
+        try:
+            skill = skill_registry.add_custom(
+                name=body.name,
+                description=body.description,
+                instructions=body.instructions,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return skill.to_dict()
+
+    @app.delete("/api/skills/{skill_id}")
+    def delete_skill(skill_id: str) -> dict:
+        try:
+            deleted = skill_registry.delete_custom(skill_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="找不到可删除的自定义 Skill")
+        return {"deleted": True, "id": skill_id}
 
     @app.get("/api/directories")
     def list_directories(path: str | None = None) -> dict:

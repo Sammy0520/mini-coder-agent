@@ -20,6 +20,7 @@ from .session import (
     TaskPhase,
     ToolExecutionStatus,
 )
+from .skills import SkillRegistry
 from .tools import create_default_registry
 from .tools.base import Tool
 from .tools.command_risk import assess_command
@@ -261,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
             model=model,
             registry=create_default_registry(),
             config=config,
+            skill_registry=SkillRegistry.with_user_skills(),
             approval_callback=_ask_approval,
             event_callback=event_callback,
             session_store=session_store,
@@ -557,6 +559,8 @@ def _event_handler(log_path: Path | None):
             print(f"[undo] restored {safe_payload['path']}")
         elif name == "phase_changed":
             print(f"[phase] {safe_payload['previous']} -> {safe_payload['phase']}")
+        elif name == "skill_selected":
+            print(f"[skill] {safe_payload['name']}")
         elif name == "verification_completed":
             state = "passed" if safe_payload["passed"] else "failed"
             expected = safe_payload.get("expected_exit_codes", [0])

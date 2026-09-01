@@ -72,6 +72,7 @@ class GuiHttpTests(unittest.TestCase):
             create_app(
                 self.controller,
                 catalog_path=Path(self.catalog_directory.name) / "workspaces.json",
+                skill_path=Path(self.catalog_directory.name) / "skills",
             ),
             host="127.0.0.1",
             port=self.port,
@@ -90,6 +91,42 @@ class GuiHttpTests(unittest.TestCase):
         self.server.should_exit = True
         self.thread.join(timeout=5)
         self.catalog_directory.cleanup()
+
+    def test_skill_api_lists_builtins_and_manages_custom_skills(self) -> None:
+        base = f"http://127.0.0.1:{self.port}"
+        with urllib.request.urlopen(f"{base}/api/skills", timeout=3) as response:
+            initial = json.load(response)
+        self.assertEqual(initial["builtin_count"], 3)
+        self.assertEqual(initial["custom_count"], 0)
+
+        body = json.dumps(
+            {
+                "name": "接口文档助手",
+                "description": "根据真实代码整理接口说明和调用示例",
+                "instructions": "先阅读路由和数据模型，再记录真实可用的接口与示例。",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base}/api/skills",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            created = json.load(response)
+        self.assertFalse(created["builtin"])
+
+        with urllib.request.urlopen(f"{base}/api/skills", timeout=3) as response:
+            listing = json.load(response)
+        self.assertEqual(listing["custom_count"], 1)
+
+        delete = urllib.request.Request(
+            f"{base}/api/skills/{created['id']}",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(delete, timeout=3) as response:
+            deleted = json.load(response)
+        self.assertTrue(deleted["deleted"])
 
     def test_static_page_run_api_and_sse_form_one_vertical_slice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -147,6 +184,8 @@ class GuiHttpTests(unittest.TestCase):
             self.assertIn('id="sessionInfoModal"', index)
             self.assertIn('id="taskStatusBar"', index)
             self.assertIn('data-phase="discover"', index)
+            self.assertIn('id="skillModal"', index)
+            self.assertIn('id="settingsButton"', index)
             self.assertIn('class="message-bubble markdown-body"', (Path(__file__).parents[1] / "src" / "mini_coder" / "gui" / "static" / "app.js").read_text(encoding="utf-8"))
             self.assertNotIn('id="conversationProject"', index)
             self.assertNotIn('id="usageSummary"', index)

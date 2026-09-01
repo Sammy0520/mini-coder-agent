@@ -26,6 +26,7 @@ from .messages import ModelResponse, ToolCall
 from .model import ModelClient
 from .prompts import build_system_prompt
 from .redaction import redact_sensitive_text, redact_sensitive_value
+from .skills import Skill, SkillRegistry, render_selected_skill
 from .tasking import (
     TaskBrief,
     create_turn_state,
@@ -96,6 +97,7 @@ class AgentRunner:
         cancellation_callback: CancellationCallback | None = None,
         session_store: SessionStore | None = None,
         session_title: str | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.model = model
         self.registry = registry
@@ -107,6 +109,7 @@ class AgentRunner:
         self.cancellation_callback = cancellation_callback
         self.session_store = session_store
         self.session_title = session_title
+        self.skill_registry = skill_registry or SkillRegistry.builtins_only()
         self.context = ContextManager(
             config.max_context_chars,
             max_tokens=config.max_context_tokens,
@@ -159,6 +162,7 @@ class AgentRunner:
                 self.tool_context.policy,
             )
             task_brief = frame_task(task, workspace_overview)
+            selected_skill = self.skill_registry.select(task, task_brief.intent)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": self.system_prompt},
                 {
@@ -169,8 +173,11 @@ class AgentRunner:
                     "role": "developer",
                     "content": render_task_brief(task_brief),
                 },
-                {"role": "user", "content": task},
             ]
+            skill_prompt = render_selected_skill(selected_skill)
+            if skill_prompt:
+                messages.append({"role": "developer", "content": skill_prompt})
+            messages.append({"role": "user", "content": task})
             usage: dict[str, int] = {}
             previous_signature: str | None = None
             repeated_count = 0
@@ -183,10 +190,12 @@ class AgentRunner:
                     messages=messages,
                     workspace_baseline=workspace_overview,
                 )
+                turn_state = create_turn_state(task_brief)
+                self._record_selected_skill(turn_state, selected_skill)
                 session.working_memory = {
                     "scope": "this session only",
                     "turn": session.turn_count,
-                    "turn_state": create_turn_state(task_brief),
+                    "turn_state": turn_state,
                 }
                 session.set_status(SessionStatus.RUNNING)
                 self._active_session_id = session.session_id
@@ -219,6 +228,7 @@ class AgentRunner:
             if session is not None:
                 self._set_phase(session, TaskPhase.FRAME)
             self._emit("task_framed", task_brief.to_dict())
+            self._emit_selected_skill(selected_skill)
             if session is not None:
                 self._set_phase(session, TaskPhase.LOCATE)
         else:
@@ -243,16 +253,23 @@ class AgentRunner:
                     self.tool_context.policy,
                 )
                 task_brief = frame_task(follow_up_task, workspace_overview)
+                selected_skill = self.skill_registry.select(
+                    follow_up_task,
+                    task_brief.intent,
+                )
+                turn_state = create_turn_state(task_brief)
+                self._record_selected_skill(turn_state, selected_skill)
                 session.working_memory = {
                     "scope": "this session only",
                     "turn": session.turn_count,
-                    "turn_state": create_turn_state(task_brief),
+                    "turn_state": turn_state,
                 }
                 follow_up_messages = self._build_follow_up_messages(
                     follow_up_task,
                     workspace_overview,
                     task_brief,
                     prior_turn_state,
+                    selected_skill,
                 )
                 self._emit(
                     "workspace_overview_generated",
@@ -271,6 +288,7 @@ class AgentRunner:
                 )
                 self._set_phase(session, TaskPhase.FRAME)
                 self._emit("task_framed", task_brief.to_dict())
+                self._emit_selected_skill(selected_skill)
                 self._set_phase(session, TaskPhase.LOCATE)
             task = session.task
             messages = (
@@ -794,6 +812,7 @@ class AgentRunner:
         workspace_overview: dict[str, Any],
         task_brief: TaskBrief,
         prior_turn_state: dict[str, Any] | None,
+        selected_skill: Skill | None,
     ) -> list[dict[str, Any]]:
         """Create one stable base for a new turn, without replaying old tool logs."""
         messages: list[dict[str, Any]] = [
@@ -806,13 +825,25 @@ class AgentRunner:
         prior = render_turn_state(prior_turn_state)
         if prior:
             messages.append({"role": "developer", "content": prior})
-        messages.extend(
-            [
-                {"role": "developer", "content": render_task_brief(task_brief)},
-                {"role": "user", "content": task},
-            ]
-        )
+        messages.append({"role": "developer", "content": render_task_brief(task_brief)})
+        skill_prompt = render_selected_skill(selected_skill)
+        if skill_prompt:
+            messages.append({"role": "developer", "content": skill_prompt})
+        messages.append({"role": "user", "content": task})
         return messages
+
+    @staticmethod
+    def _record_selected_skill(
+        turn_state: dict[str, Any],
+        skill: Skill | None,
+    ) -> None:
+        if skill is not None:
+            turn_state["active_skill"] = skill.to_dict(include_instructions=False)
+
+    def _emit_selected_skill(self, skill: Skill | None) -> None:
+        if skill is None:
+            return
+        self._emit("skill_selected", skill.to_dict(include_instructions=False))
 
     def _validate_resume(self, session: AgentSession, task: str) -> None:
         expected_workspace = Path(session.workspace).expanduser().resolve()
