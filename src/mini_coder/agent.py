@@ -152,7 +152,7 @@ class AgentRunner:
         self._run_total_token_start = 0
         self._completion_reserve_active = False
         self._finish_directive_added = False
-        self._speculative_finish_used = False
+        self._speculative_finish_revision: int | None = None
         self._pending_speculative_finish: _SpeculativeFinish | None = None
         self.tool_context = ToolContext(
             policy=WorkspacePolicy(config.workspace),
@@ -174,7 +174,7 @@ class AgentRunner:
         self._continuing_turn = False
         self._completion_reserve_active = False
         self._finish_directive_added = False
-        self._speculative_finish_used = False
+        self._speculative_finish_revision = None
         self._pending_speculative_finish = None
         self._run_model_call_start = 0
         self._run_tool_call_start = 0
@@ -1052,6 +1052,7 @@ class AgentRunner:
         invalidated = session.invalidate_verification(
             f"workspace changed outside the session: {rendered_paths}"
         )
+        self._retire_invalidated_verification_blockers(session, invalidated)
         self._set_phase(session, TaskPhase.IMPLEMENT)
         messages.append(
             {
@@ -1837,6 +1838,7 @@ class AgentRunner:
                         f"file changed: {change.path}",
                         changed_path=change.path,
                     )
+                    self._retire_invalidated_verification_blockers(session, invalidated)
                     for verification in invalidated:
                         self._emit(
                             "verification_invalidated",
@@ -1929,6 +1931,7 @@ class AgentRunner:
                         f"Subagent patch applied: {change.path}",
                         changed_path=change.path,
                     )
+                    self._retire_invalidated_verification_blockers(session, invalidated)
                     self._ledger_add(
                         self._turn_state(session),
                         "changed_files",
@@ -2104,8 +2107,8 @@ class AgentRunner:
             not allow_speculative_finish
             or not self.config.speculative_finish_enabled
             or self.speculative_model is None
-            or self._speculative_finish_used
             or session is None
+            or self._speculative_finish_revision == session.change_revision
             or call.name != "run_command"
             or call.arguments is None
             or not any(item.undo_status == "active" for item in session.changes)
@@ -2120,7 +2123,7 @@ class AgentRunner:
         if tuple(arguments.get("expected_exit_codes") or [0]) != (0,):
             return False
         state = self._turn_state(session)
-        if state.get("unresolved") or state.get("pending_subagent_bundles"):
+        if self._has_active_blockers(session) or state.get("pending_subagent_bundles"):
             return False
         return self._budget_reason(session, before_model=True) is None
 
@@ -2160,7 +2163,10 @@ class AgentRunner:
                 )
                 return result
 
-            self._speculative_finish_used = True
+            # Limit speculative cost to one attempt for each concrete code revision.
+            # A later edit creates a new revision and may legitimately make the next
+            # slow verification the final one.
+            self._speculative_finish_revision = session.change_revision
             candidate_messages = self._speculative_finish_messages(session)
             session.model_call_count += 1
             self._persist(session, messages, usage)
@@ -2326,7 +2332,7 @@ class AgentRunner:
             reason = "change_revision_changed"
         elif self._budget_reason(session, before_model=False) is not None:
             reason = "run_budget_exceeded"
-        elif self._turn_state(session).get("unresolved"):
+        elif self._has_active_blockers(session):
             reason = "unresolved_items"
         elif response.tool_calls:
             reason = "candidate_requested_tools"
@@ -2583,7 +2589,7 @@ class AgentRunner:
                 )
             if (
                 session.verification_status == VerificationStatus.PASSED
-                and not self._turn_state(session).get("unresolved")
+                and not self._has_active_blockers(session)
             ):
                 self._set_phase(session, TaskPhase.FINISH)
                 if not self._finish_directive_added:
@@ -2909,6 +2915,7 @@ class AgentRunner:
                 "changed_files": [],
                 "verification": [],
                 "unresolved": [],
+                "active_blockers": [],
                 "completion_reserve": False,
                 "last_outcome": "",
                 "session_status": session.status.value,
@@ -2979,6 +2986,146 @@ class AgentRunner:
             items.append(compact)
         del items[:-limit]
 
+    def _active_blockers(self, session: AgentSession) -> list[dict[str, Any]]:
+        """Return structured blockers used by runtime gates, migrating old sessions safely."""
+        state = self._turn_state(session)
+        blockers = state.get("active_blockers")
+        if isinstance(blockers, list):
+            normalized = [item for item in blockers if isinstance(item, dict)]
+            if len(normalized) != len(blockers):
+                state["active_blockers"] = normalized
+            return normalized
+
+        # Old sessions only have the user/model-facing unresolved summary. Preserve
+        # its conservative behavior until a later successful matching operation can
+        # resolve it; never silently make a legacy session less safe.
+        unresolved = state.get("unresolved")
+        migrated = [
+            {
+                "id": f"legacy:{session.change_revision}:{index}",
+                "kind": "legacy",
+                "message": item,
+                "change_revision": session.change_revision,
+            }
+            for index, item in enumerate(unresolved if isinstance(unresolved, list) else [])
+            if isinstance(item, str) and item.strip()
+        ]
+        state["active_blockers"] = migrated
+        return migrated
+
+    def _has_active_blockers(self, session: AgentSession) -> bool:
+        return any(
+            item.get("blocking", True) is not False
+            for item in self._active_blockers(session)
+        )
+
+    def _remove_blocker_messages(
+        self,
+        session: AgentSession,
+        messages: set[str],
+    ) -> None:
+        if not messages:
+            return
+        state = self._turn_state(session)
+        unresolved = state.get("unresolved")
+        if isinstance(unresolved, list):
+            state["unresolved"] = [item for item in unresolved if item not in messages]
+
+    def _retire_invalidated_verification_blockers(
+        self,
+        session: AgentSession,
+        invalidated: list[Any],
+    ) -> None:
+        """Retire failures whose verification evidence became stale after a change."""
+        verification_ids = {
+            item.verification_id
+            for item in invalidated
+            if not item.passed and item.verification_id
+        }
+        if not verification_ids:
+            return
+        blockers = self._active_blockers(session)
+        retired = [
+            item
+            for item in blockers
+            if item.get("kind") == "verification_failure"
+            and item.get("verification_id") in verification_ids
+        ]
+        self._turn_state(session)["active_blockers"] = [
+            item for item in blockers if item not in retired
+        ]
+        self._remove_blocker_messages(
+            session,
+            {
+                str(item.get("message"))
+                for item in retired
+                if isinstance(item.get("message"), str)
+            },
+        )
+
+    def _add_active_blocker(
+        self,
+        session: AgentSession,
+        call: ToolCall,
+        result: ToolResult,
+    ) -> None:
+        signature = self._call_signature(call)
+        verification = None
+        if (
+            call.name == "run_command"
+            and call.arguments is not None
+            and self.verification_tracker.is_verification_command(call.arguments)
+            and session.verification_records
+        ):
+            candidate = session.verification_records[-1]
+            if candidate.change_revision == session.change_revision:
+                verification = candidate
+        tool = self.registry.get(call.name)
+        blocker = {
+            "id": (
+                f"verification:{verification.verification_id}"
+                if verification is not None
+                else f"tool:{session.change_revision}:{signature}"
+            ),
+            "kind": "verification_failure" if verification is not None else "tool_failure",
+            "tool": call.name,
+            "signature": signature,
+            "message": result.message,
+            "change_revision": session.change_revision,
+            # Failed exploratory reads are useful diagnostics, but they should not
+            # permanently disable a draft that is accepted only after authoritative
+            # verification. Mutating/command failures remain hard blockers.
+            "blocking": tool is None or tool.risk != RiskLevel.READ,
+        }
+        if verification is not None:
+            blocker["verification_id"] = verification.verification_id
+        blockers = self._active_blockers(session)
+        blockers = [item for item in blockers if item.get("id") != blocker["id"]]
+        blockers.append(blocker)
+        self._turn_state(session)["active_blockers"] = blockers[-8:]
+
+    def _resolve_matching_active_blockers(
+        self,
+        session: AgentSession,
+        call: ToolCall,
+    ) -> None:
+        signature = self._call_signature(call)
+        blockers = self._active_blockers(session)
+        resolved = [item for item in blockers if item.get("signature") == signature]
+        if not resolved:
+            return
+        self._turn_state(session)["active_blockers"] = [
+            item for item in blockers if item not in resolved
+        ]
+        self._remove_blocker_messages(
+            session,
+            {
+                str(item.get("message"))
+                for item in resolved
+                if isinstance(item.get("message"), str)
+            },
+        )
+
     def _update_turn_state_after_tool(
         self,
         session: AgentSession,
@@ -3013,19 +3160,10 @@ class AgentRunner:
                 12,
             )
         if status == ToolExecutionStatus.FAILED:
+            self._add_active_blocker(session, call, result)
             self._ledger_add(self._turn_state(session), "unresolved", result.message, 8)
         elif result.ok:
-            state = self._turn_state(session)
-            unresolved = state.get("unresolved")
-            if isinstance(unresolved, list) and call.name in {
-                "write_file",
-                "edit_file",
-                "run_command",
-            }:
-                if call.name == "run_command" and result.ok:
-                    state["unresolved"] = []
-                else:
-                    state["unresolved"] = unresolved[-4:]
+            self._resolve_matching_active_blockers(session, call)
 
     @staticmethod
     def _call_signature(call: ToolCall) -> str:

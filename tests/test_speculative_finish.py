@@ -48,6 +48,14 @@ def write_call() -> ToolCall:
     )
 
 
+def write_content_call(call_id: str, content: str) -> ToolCall:
+    return call(
+        call_id,
+        "write_file",
+        {"path": "result.txt", "content": content, "overwrite": True},
+    )
+
+
 def verify_call(*, delay: float, exit_code: int = 0) -> ToolCall:
     code = f"import time; time.sleep({delay}); raise SystemExit({exit_code})"
     return call(
@@ -59,6 +67,10 @@ def verify_call(*, delay: float, exit_code: int = 0) -> ToolCall:
             "verification_paths": ["result.txt"],
         },
     )
+
+
+def missing_read_call() -> ToolCall:
+    return call("missing-read", "read_file", {"path": "missing.txt"})
 
 
 def config(workspace: Path, *, delay_ms: int) -> AgentConfig:
@@ -183,6 +195,126 @@ class SpeculativeFinishTests(unittest.TestCase):
             self.assertEqual(metrics["discarded"], 1)
             self.assertEqual(metrics["last_discard_reason"], "verification_not_passed")
             self.assertNotIn("Candidate summary", result.final_text)
+
+    def test_new_revision_retires_stale_failure_and_speculates_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            main = FakeModel(
+                [
+                    ModelResponse(tool_calls=[write_content_call("bad-write", "broken\n")]),
+                    ModelResponse(tool_calls=[verify_call(delay=0.12, exit_code=3)]),
+                    ModelResponse(tool_calls=[write_content_call("fix-write", "ready\n")]),
+                    ModelResponse(tool_calls=[verify_call(delay=0.12)]),
+                ]
+            )
+            finalizer = FakeModel(
+                [
+                    ModelResponse(content="Candidate for the broken revision."),
+                    ModelResponse(content="Implemented the corrected file."),
+                ],
+                delay=0.04,
+            )
+            result = AgentRunner(
+                model=main,
+                speculative_model=finalizer,
+                registry=create_default_registry(),
+                config=config(workspace, delay_ms=10),
+                approval_callback=lambda tool, arguments: True,
+                session_store=store,
+                response_language="en",
+            ).run("Create result.txt, repair it after a failed check, and verify it")
+
+            session = store.load(result.session_id or "")
+            state = session.working_memory["turn_state"]
+            metrics = state["speculative_finish_metrics"]
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.status, SessionStatus.COMPLETED_VERIFIED)
+            self.assertEqual(session.verification_status, VerificationStatus.PASSED)
+            self.assertEqual(session.stop_reason, "speculative_finalizer_committed")
+            self.assertEqual(len(main.requests), 4)
+            self.assertEqual(len(finalizer.requests), 2)
+            self.assertEqual(metrics["attempts"], 2)
+            self.assertEqual(metrics["discarded"], 1)
+            self.assertEqual(metrics["accepted"], 1)
+            self.assertEqual(state["active_blockers"], [])
+            self.assertEqual(state["unresolved"], [])
+            self.assertIn("Implemented the corrected file", result.final_text)
+
+    def test_exploratory_read_failure_does_not_disable_speculation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore.for_workspace(workspace)
+            main = FakeModel(
+                [
+                    ModelResponse(tool_calls=[missing_read_call()]),
+                    ModelResponse(tool_calls=[write_call()]),
+                    ModelResponse(tool_calls=[verify_call(delay=0.12)]),
+                ]
+            )
+            finalizer = FakeModel([ModelResponse(content="Implemented despite a stale guess.")])
+            result = AgentRunner(
+                model=main,
+                speculative_model=finalizer,
+                registry=create_default_registry(),
+                config=config(workspace, delay_ms=10),
+                approval_callback=lambda tool, arguments: True,
+                session_store=store,
+            ).run("Inspect a missing input, create result.txt, and verify it")
+
+            session = store.load(result.session_id or "")
+            blockers = session.working_memory["turn_state"]["active_blockers"]
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.verification_status, VerificationStatus.PASSED)
+            self.assertEqual(session.stop_reason, "speculative_finalizer_committed")
+            self.assertEqual(len(finalizer.requests), 1)
+            self.assertEqual(len(blockers), 1)
+            self.assertEqual(blockers[0]["kind"], "tool_failure")
+            self.assertEqual(blockers[0]["tool"], "read_file")
+            self.assertFalse(blockers[0]["blocking"])
+            self.assertIn("Implemented despite a stale guess", result.final_text)
+
+    def test_unrelated_mutating_failure_still_prevents_speculation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "blocked.txt").write_text("existing\n", encoding="utf-8")
+            store = SessionStore.for_workspace(workspace)
+            main = FakeModel(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            call(
+                                "blocked-write",
+                                "write_file",
+                                {"path": "blocked.txt", "content": "replacement\n"},
+                            )
+                        ]
+                    ),
+                    ModelResponse(tool_calls=[write_call()]),
+                    ModelResponse(tool_calls=[verify_call(delay=0.12)]),
+                    ModelResponse(content="Safe normal final response."),
+                ]
+            )
+            finalizer = FakeModel([ModelResponse(content="Must remain unused.")])
+            result = AgentRunner(
+                model=main,
+                speculative_model=finalizer,
+                registry=create_default_registry(),
+                config=config(workspace, delay_ms=10),
+                approval_callback=lambda tool, arguments: True,
+                session_store=store,
+            ).run("Avoid overwriting blocked.txt, create result.txt, and verify it")
+
+            session = store.load(result.session_id or "")
+            blockers = session.working_memory["turn_state"]["active_blockers"]
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(session.verification_status, VerificationStatus.PASSED)
+            self.assertEqual(len(finalizer.requests), 0)
+            self.assertEqual(len(blockers), 1)
+            self.assertEqual(blockers[0]["kind"], "tool_failure")
+            self.assertEqual(blockers[0]["tool"], "write_file")
+            self.assertTrue(blockers[0]["blocking"])
+            self.assertIn("Safe normal final response", result.final_text)
 
     def test_candidate_with_tool_call_is_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
