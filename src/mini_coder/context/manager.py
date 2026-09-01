@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -32,6 +33,88 @@ class ContextManager:
         self.soft_limit_ratio = soft_limit_ratio
         self.compaction_chunk_batches = compaction_chunk_batches
         self.hot_tool_batches = hot_tool_batches
+        self._previous_request_items: list[str] | None = None
+
+    @staticmethod
+    def stable_hash(value: Any) -> str:
+        rendered = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+    def diagnose_request(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        tool_definitions: Sequence[dict[str, Any]],
+        cache_key: str,
+        checkpoint_generation: int = 0,
+        checkpoint_hash: str | None = None,
+        compaction_reason: str = "none",
+    ) -> dict[str, Any]:
+        """Return content-free cache diagnostics and remember this exact request."""
+        copied = list(messages)
+        prefix_end = self._prefix_end(copied)
+        stable_prefix = copied[:prefix_end]
+        hot_tail = copied[prefix_end:]
+        current_items = [
+            json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            for item in copied
+        ]
+        previous = self._previous_request_items
+        common_items = 0
+        common_chars = 0
+        if previous is not None:
+            for before, current in zip(previous, current_items, strict=False):
+                if before == current:
+                    common_items += 1
+                    common_chars += len(current)
+                    continue
+                common_chars += _common_prefix_chars(before, current)
+                break
+        first_changed_index: int | None = None
+        first_changed_type: str | None = None
+        if previous is not None and (
+            common_items < len(previous) or common_items < len(current_items)
+        ):
+            first_changed_index = common_items
+            candidate = (
+                copied[first_changed_index]
+                if first_changed_index < len(copied)
+                else None
+            )
+            first_changed_type = (
+                str(candidate.get("role") or candidate.get("type") or "unknown")
+                if isinstance(candidate, dict)
+                else "removed"
+            )
+        self._previous_request_items = current_items
+        return {
+            "stable_prefix_hash": self.stable_hash(stable_prefix),
+            "tool_definitions_hash": self.stable_hash(list(tool_definitions)),
+            "cache_key_hash": self.stable_hash(cache_key),
+            "checkpoint_generation": checkpoint_generation,
+            "checkpoint_hash": checkpoint_hash,
+            "stable_prefix_tokens": self.estimate_tokens(stable_prefix),
+            "hot_tail_tokens": self.estimate_tokens(hot_tail),
+            "estimated_longest_common_prefix_tokens": _estimate_text_tokens(
+                common_chars
+            ),
+            "common_prefix_message_items": common_items,
+            "first_changed_input_index": first_changed_index,
+            "first_changed_input_type": first_changed_type,
+            "compaction_reason": compaction_reason,
+        }
 
     def estimate_chars(self, messages: Sequence[dict[str, Any]]) -> int:
         return len(json.dumps(list(messages), ensure_ascii=False, default=str))
@@ -374,6 +457,18 @@ def _tool_call_name(call: Any) -> str:
     if not isinstance(function, dict):
         return "unknown"
     return str(function.get("name") or "unknown")
+
+
+def _common_prefix_chars(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+def _estimate_text_tokens(char_count: int) -> int:
+    return max(0, (char_count + 3) // 4)
 
 
 def _tool_call_arguments(call: Any) -> dict[str, Any]:

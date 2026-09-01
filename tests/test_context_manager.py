@@ -6,6 +6,36 @@ from mini_coder.context import ContextManager
 
 
 class ContextManagerTests(unittest.TestCase):
+    def test_cache_diagnostics_are_content_free_and_track_append_only_prefix(self) -> None:
+        manager = ContextManager(max_chars=20_000, max_tokens=5_000)
+        messages = [
+            {"role": "system", "content": "stable-secret-looking-prompt"},
+            {"role": "user", "content": "task"},
+        ]
+        tools = [{"type": "function", "name": "read_file"}]
+
+        first = manager.diagnose_request(
+            messages,
+            tool_definitions=tools,
+            cache_key="private-cache-key",
+        )
+        second = manager.diagnose_request(
+            messages + [{"role": "assistant", "content": "next"}],
+            tool_definitions=tools,
+            cache_key="private-cache-key",
+        )
+
+        rendered = str(second)
+        self.assertNotIn("stable-secret-looking-prompt", rendered)
+        self.assertNotIn("private-cache-key", rendered)
+        self.assertEqual(first["stable_prefix_hash"], second["stable_prefix_hash"])
+        self.assertEqual(first["tool_definitions_hash"], second["tool_definitions_hash"])
+        self.assertEqual(first["cache_key_hash"], second["cache_key_hash"])
+        self.assertEqual(second["common_prefix_message_items"], 2)
+        self.assertEqual(second["first_changed_input_index"], 2)
+        self.assertEqual(second["first_changed_input_type"], "assistant")
+        self.assertGreater(second["estimated_longest_common_prefix_tokens"], 0)
+
     def test_compaction_keeps_tool_call_pairs_valid(self) -> None:
         messages = [
             {"role": "system", "content": "system"},

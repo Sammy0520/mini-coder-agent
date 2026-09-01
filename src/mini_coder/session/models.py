@@ -35,6 +35,11 @@ _SAFE_MODEL_FIELDS = {
     "max_total_tool_output_chars",
     "max_total_tokens",
     "max_context_tokens",
+    "context_compression_v2_enabled",
+    "context_high_watermark_ratio",
+    "context_target_ratio",
+    "context_hot_tool_batches",
+    "context_min_checkpoint_batches",
     "model_streaming",
     "prompt_cache_enabled",
     "prompt_cache_key",
@@ -50,6 +55,8 @@ _SAFE_MODEL_FIELDS = {
     "max_subagent_tool_calls",
     "max_subagent_total_tokens",
     "max_subagent_context_tokens",
+    "subagent_context_high_watermark_ratio",
+    "subagent_context_target_ratio",
 }
 
 

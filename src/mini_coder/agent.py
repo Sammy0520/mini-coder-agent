@@ -1109,6 +1109,15 @@ class AgentRunner:
             "max_total_tool_output_chars": self.config.max_total_tool_output_chars,
             "max_total_tokens": self.config.max_total_tokens,
             "max_context_tokens": self.config.max_context_tokens,
+            "context_compression_v2_enabled": (
+                self.config.context_compression_v2_enabled
+            ),
+            "context_high_watermark_ratio": self.config.context_high_watermark_ratio,
+            "context_target_ratio": self.config.context_target_ratio,
+            "context_hot_tool_batches": self.config.context_hot_tool_batches,
+            "context_min_checkpoint_batches": (
+                self.config.context_min_checkpoint_batches
+            ),
             "model_streaming": self.config.model_streaming,
             "prompt_cache_enabled": self.config.prompt_cache_enabled,
             "prompt_cache_key": self.config.prompt_cache_key,
@@ -1124,6 +1133,12 @@ class AgentRunner:
             "max_subagent_tool_calls": self.config.max_subagent_tool_calls,
             "max_subagent_total_tokens": self.config.max_subagent_total_tokens,
             "max_subagent_context_tokens": self.config.max_subagent_context_tokens,
+            "subagent_context_high_watermark_ratio": (
+                self.config.subagent_context_high_watermark_ratio
+            ),
+            "subagent_context_target_ratio": (
+                self.config.subagent_context_target_ratio
+            ),
         }
 
     @staticmethod
@@ -1190,6 +1205,11 @@ class AgentRunner:
         )
         while True:
             self._check_cancelled()
+            cache_stability = self.context.diagnose_request(
+                attempt_messages,
+                tool_definitions=tool_definitions,
+                cache_key=self.config.prompt_cache_key,
+            )
             if session is not None:
                 budget_reason = self._budget_reason(session, before_model=True)
                 if budget_reason is not None:
@@ -1210,6 +1230,7 @@ class AgentRunner:
                     "estimated_chars": self.context.estimate_chars(attempt_messages),
                     "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                     "tool_schema_chars": tool_schema_chars,
+                    "cache_stability": cache_stability,
                 },
             )
             try:
@@ -1229,6 +1250,7 @@ class AgentRunner:
                             "estimated_chars": self.context.estimate_chars(attempt_messages),
                             "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                             "tool_schema_chars": tool_schema_chars,
+                            "cache_stability": cache_stability,
                             "compacted": len(prepared) < len(messages),
                             "turn_context_rebuilt": (
                                 self._continuing_turn
@@ -1305,6 +1327,7 @@ class AgentRunner:
                         "estimated_chars": self.context.estimate_chars(attempt_messages),
                         "estimated_tokens": self.context.estimate_tokens(attempt_messages),
                         "tool_schema_chars": tool_schema_chars,
+                        "cache_stability": cache_stability,
                         "compacted": len(prepared) < len(messages),
                         "turn_context_rebuilt": (
                             self._continuing_turn

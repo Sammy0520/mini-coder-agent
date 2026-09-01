@@ -81,6 +81,11 @@ class AgentConfig:
     max_total_tokens: int = 500_000
     max_context_chars: int = 80_000
     max_context_tokens: int = 20_000
+    context_compression_v2_enabled: bool = False
+    context_high_watermark_ratio: float = 0.90
+    context_target_ratio: float = 0.68
+    context_hot_tool_batches: int = 3
+    context_min_checkpoint_batches: int = 6
     repeated_call_limit: int = 3
     max_model_retries: int = 2
     retry_base_seconds: float = 0.5
@@ -108,6 +113,10 @@ class AgentConfig:
     max_subagent_tool_calls: int = 16
     max_subagent_total_tokens: int = 40_000
     max_subagent_context_tokens: int = 8_000
+    subagent_context_high_watermark_ratio: float = 0.90
+    subagent_context_target_ratio: float = 0.70
+    subagent_context_hot_tool_batches: int = 2
+    subagent_context_min_checkpoint_batches: int = 4
     max_subagent_workspace_files: int = 5_000
     max_subagent_workspace_bytes: int = 50_000_000
 
@@ -123,6 +132,8 @@ class AgentConfig:
             "max_total_tokens": self.max_total_tokens,
             "max_context_chars": self.max_context_chars,
             "max_context_tokens": self.max_context_tokens,
+            "context_hot_tool_batches": self.context_hot_tool_batches,
+            "context_min_checkpoint_batches": self.context_min_checkpoint_batches,
             "max_response_tool_calls": self.max_response_tool_calls,
             "max_response_write_calls": self.max_response_write_calls,
             "max_response_write_chars": self.max_response_write_chars,
@@ -135,6 +146,10 @@ class AgentConfig:
             "max_subagent_tool_calls": self.max_subagent_tool_calls,
             "max_subagent_total_tokens": self.max_subagent_total_tokens,
             "max_subagent_context_tokens": self.max_subagent_context_tokens,
+            "subagent_context_hot_tool_batches": self.subagent_context_hot_tool_batches,
+            "subagent_context_min_checkpoint_batches": (
+                self.subagent_context_min_checkpoint_batches
+            ),
             "max_subagent_workspace_files": self.max_subagent_workspace_files,
             "max_subagent_workspace_bytes": self.max_subagent_workspace_bytes,
         }
@@ -143,6 +158,23 @@ class AgentConfig:
                 raise ConfigurationError(f"{name} must be positive")
         if self.max_context_chars < 2_000:
             raise ConfigurationError("max_context_chars must be at least 2000")
+        for target, high, prefix in (
+            (
+                self.context_target_ratio,
+                self.context_high_watermark_ratio,
+                "context",
+            ),
+            (
+                self.subagent_context_target_ratio,
+                self.subagent_context_high_watermark_ratio,
+                "subagent_context",
+            ),
+        ):
+            if not 0.5 <= target < high < 1.0:
+                raise ConfigurationError(
+                    f"{prefix}_target_ratio and {prefix}_high_watermark_ratio must "
+                    "satisfy 0.5 <= target < high < 1.0"
+                )
         if self.repeated_call_limit < 2:
             raise ConfigurationError("repeated_call_limit must be at least 2")
         if self.max_model_retries < 0:
@@ -290,6 +322,46 @@ class AgentConfig:
             external_evaluation=external_evaluation,
             max_context_chars=_env_int("CODING_AGENT_CONTEXT_CHARS", 80_000),
             max_context_tokens=_env_int("CODING_AGENT_CONTEXT_TOKENS", 20_000),
+            context_compression_v2_enabled=_env_bool(
+                "CODING_AGENT_CONTEXT_COMPRESSION_V2",
+                _optional_bool(
+                    file_data.get("context_compression_v2_enabled"),
+                    "context_compression_v2_enabled",
+                    default=False,
+                ),
+            ),
+            context_high_watermark_ratio=_env_float(
+                "CODING_AGENT_CONTEXT_HIGH_WATERMARK_RATIO",
+                _optional_float(
+                    file_data.get("context_high_watermark_ratio"),
+                    "context_high_watermark_ratio",
+                    default=0.90,
+                ),
+            ),
+            context_target_ratio=_env_float(
+                "CODING_AGENT_CONTEXT_TARGET_RATIO",
+                _optional_float(
+                    file_data.get("context_target_ratio"),
+                    "context_target_ratio",
+                    default=0.68,
+                ),
+            ),
+            context_hot_tool_batches=_env_int(
+                "CODING_AGENT_CONTEXT_HOT_TOOL_BATCHES",
+                _optional_int(
+                    file_data.get("context_hot_tool_batches"),
+                    "context_hot_tool_batches",
+                    default=3,
+                ),
+            ),
+            context_min_checkpoint_batches=_env_int(
+                "CODING_AGENT_CONTEXT_MIN_CHECKPOINT_BATCHES",
+                _optional_int(
+                    file_data.get("context_min_checkpoint_batches"),
+                    "context_min_checkpoint_batches",
+                    default=6,
+                ),
+            ),
             repeated_call_limit=_env_int("CODING_AGENT_REPEATED_CALL_LIMIT", 3, minimum=2),
             max_model_retries=(
                 max_model_retries
@@ -405,6 +477,38 @@ class AgentConfig:
                 "CODING_AGENT_MAX_SUBAGENT_CONTEXT_TOKENS",
                 _optional_int(file_data.get("max_subagent_context_tokens"), "max_subagent_context_tokens", default=8_000),
             ),
+            subagent_context_high_watermark_ratio=_env_float(
+                "CODING_AGENT_SUBAGENT_CONTEXT_HIGH_WATERMARK_RATIO",
+                _optional_float(
+                    file_data.get("subagent_context_high_watermark_ratio"),
+                    "subagent_context_high_watermark_ratio",
+                    default=0.90,
+                ),
+            ),
+            subagent_context_target_ratio=_env_float(
+                "CODING_AGENT_SUBAGENT_CONTEXT_TARGET_RATIO",
+                _optional_float(
+                    file_data.get("subagent_context_target_ratio"),
+                    "subagent_context_target_ratio",
+                    default=0.70,
+                ),
+            ),
+            subagent_context_hot_tool_batches=_env_int(
+                "CODING_AGENT_SUBAGENT_CONTEXT_HOT_TOOL_BATCHES",
+                _optional_int(
+                    file_data.get("subagent_context_hot_tool_batches"),
+                    "subagent_context_hot_tool_batches",
+                    default=2,
+                ),
+            ),
+            subagent_context_min_checkpoint_batches=_env_int(
+                "CODING_AGENT_SUBAGENT_CONTEXT_MIN_CHECKPOINT_BATCHES",
+                _optional_int(
+                    file_data.get("subagent_context_min_checkpoint_batches"),
+                    "subagent_context_min_checkpoint_batches",
+                    default=4,
+                ),
+            ),
             max_subagent_workspace_files=_env_int(
                 "CODING_AGENT_MAX_SUBAGENT_WORKSPACE_FILES",
                 _optional_int(file_data.get("max_subagent_workspace_files"), "max_subagent_workspace_files", default=5_000),
@@ -517,3 +621,11 @@ def _optional_int(value: Any, name: str, *, default: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ConfigurationError(f"{name} must be a positive integer")
     return value
+
+
+def _optional_float(value: Any, name: str, *, default: float) -> float:
+    if value is None:
+        return default
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigurationError(f"{name} must be a number")
+    return float(value)
