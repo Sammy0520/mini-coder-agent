@@ -18,7 +18,7 @@ from ..verification import (
     VerificationTracker,
 )
 
-CURRENT_SESSION_SCHEMA = 9
+CURRENT_SESSION_SCHEMA = 10
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SAFE_MODEL_FIELDS = {
     "provider",
@@ -363,6 +363,7 @@ class AgentSession:
     turn_count: int = 1
     conversation: list[dict[str, Any]] = field(default_factory=list)
     working_memory: dict[str, Any] = field(default_factory=dict)
+    context_state: dict[str, Any] = field(default_factory=dict)
     model_call_records: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -420,6 +421,8 @@ class AgentSession:
         _validate_conversation(self.conversation)
         if not isinstance(self.working_memory, dict):
             raise SessionError("session working_memory must be an object")
+        if not isinstance(self.context_state, dict):
+            raise SessionError("session context_state must be an object")
         if not isinstance(self.model_call_records, list) or not all(
             isinstance(item, dict) for item in self.model_call_records
         ):
@@ -490,6 +493,10 @@ class AgentSession:
         self.last_error = None
         self.previous_call_signature = None
         self.repeated_call_count = 0
+        # A new user turn is an explicit semantic boundary. The context engine
+        # may create a fresh checkpoint from the canonical transcript instead
+        # of accidentally extending a checkpoint from the previous turn.
+        self.context_state = {}
         self.conversation.append({"role": "user", "content": follow_up})
         self.messages.append({"role": "user", "content": follow_up})
         self.set_status(SessionStatus.RUNNING)
@@ -609,6 +616,7 @@ class AgentSession:
             "turn_count": self.turn_count,
             "conversation": copy.deepcopy(self.conversation),
             "working_memory": copy.deepcopy(self.working_memory),
+            "context_state": copy.deepcopy(self.context_state),
             "model_call_records": copy.deepcopy(self.model_call_records),
         }
 
@@ -656,6 +664,9 @@ class AgentSession:
         working_memory = data.get("working_memory")
         if not isinstance(working_memory, dict):
             raise SessionError("session working_memory must be an object")
+        context_state = data.get("context_state")
+        if not isinstance(context_state, dict):
+            raise SessionError("session context_state must be an object")
         model_call_records = data.get("model_call_records")
         if not isinstance(model_call_records, list) or not all(
             isinstance(item, dict) for item in model_call_records
@@ -735,6 +746,7 @@ class AgentSession:
             turn_count=_required_int(data, "turn_count", minimum=1),
             conversation=copy.deepcopy(conversation),
             working_memory=copy.deepcopy(working_memory),
+            context_state=copy.deepcopy(context_state),
             model_call_records=copy.deepcopy(model_call_records),
         )
         derived_verification = VerificationTracker.evaluate(
@@ -758,7 +770,7 @@ class AgentSession:
 
 def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
     version = data.get("schema_version")
-    if version not in {1, 2, 3, 4, 5, 6, 7, 8}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
         return data
     migrated = copy.deepcopy(data)
     if version == 1:
@@ -861,6 +873,10 @@ def _migrate_session_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("parallel_tool_calls", 0)
         migrated.setdefault("parallel_tool_overlap_seconds", 0.0)
         migrated.setdefault("parallel_tool_peak_concurrency", 0)
+        version = 9
+    if version == 9:
+        migrated["schema_version"] = 10
+        migrated.setdefault("context_state", {})
     return migrated
 
 

@@ -1,4 +1,3 @@
-from .manager import ContextManager
+from .manager import ContextManager, PreparedContext
 
-__all__ = ["ContextManager"]
-
+__all__ = ["ContextManager", "PreparedContext"]

@@ -4,7 +4,20 @@ import copy
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(slots=True)
+class PreparedContext:
+    messages: list[dict[str, Any]]
+    state: dict[str, Any]
+    checkpoint_generation: int
+    checkpoint_hash: str | None
+    compaction_reason: str
+    checkpoint_created: bool
+    estimated_message_tokens: int
+    estimated_total_tokens: int
 
 
 class ContextManager:
@@ -177,6 +190,227 @@ class ContextManager:
         if not self._within_budget(result):
             result = self._shrink_contents(result)
         return result
+
+    def prepare_v2(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        state: dict[str, Any] | None,
+        durable_state: dict[str, Any] | None = None,
+        tool_schema_tokens: int = 0,
+        high_watermark_ratio: float = 0.90,
+        target_ratio: float = 0.68,
+        hot_tool_batches: int = 3,
+        min_checkpoint_batches: int = 6,
+        new_turn: bool = False,
+    ) -> PreparedContext:
+        """Build a cache-stable checkpoint + append-only tail request.
+
+        The returned state is JSON-compatible and can be persisted by AgentSession.
+        Existing checkpoint bytes are reused exactly until a new generation commits.
+        """
+        if not 0.5 <= target_ratio < high_watermark_ratio < 1.0:
+            raise ValueError("context watermarks must satisfy 0.5 <= target < high < 1")
+        if hot_tool_batches < 1 or min_checkpoint_batches < 1:
+            raise ValueError("checkpoint batch settings must be positive")
+        if tool_schema_tokens < 0:
+            raise ValueError("tool_schema_tokens must not be negative")
+
+        canonical = copy.deepcopy(list(messages))
+        current_state = _normalize_context_state(state)
+        if new_turn:
+            current_state = _empty_context_state(boundary_reason="new_turn")
+        assembled = self._assemble_v2(canonical, current_state)
+        message_tokens = self.estimate_tokens(assembled)
+        total_tokens = message_tokens + tool_schema_tokens
+        estimated_chars = self.estimate_chars(assembled) + tool_schema_tokens * 4
+        high_tokens = int(self.max_tokens * high_watermark_ratio)
+        high_chars = int(self.max_chars * high_watermark_ratio)
+        hard_exceeded = total_tokens >= self.max_tokens or estimated_chars >= self.max_chars
+        reaches_high = total_tokens >= high_tokens or estimated_chars >= high_chars
+        if not reaches_high:
+            reason = "new_turn" if new_turn else "none"
+            return self._prepared_v2(
+                assembled,
+                current_state,
+                reason=reason,
+                checkpoint_created=False,
+                tool_schema_tokens=tool_schema_tokens,
+            )
+
+        batches = _completed_tool_batches(canonical, start=self._prefix_end(canonical))
+        previous_count = int(current_state.get("completed_tool_batches", 0) or 0)
+        new_batch_count = max(0, len(batches) - previous_count)
+        eligible = new_batch_count >= min_checkpoint_batches
+        reason = "high_watermark" if eligible else "emergency" if hard_exceeded else "none"
+        if reason == "none":
+            return self._prepared_v2(
+                assembled,
+                current_state,
+                reason="none",
+                checkpoint_created=False,
+                tool_schema_tokens=tool_schema_tokens,
+            )
+
+        protected = {
+            str(item)
+            for item in (durable_state or {}).get("protected_tool_call_ids", [])
+            if item
+        }
+        boundary = _checkpoint_boundary(
+            batches,
+            # Crossing the hard limit is the only case allowed to retire the
+            # configured hot tail. Protected failures still cap the boundary.
+            hot_tool_batches=0 if hard_exceeded else hot_tool_batches,
+            protected_tool_call_ids=protected,
+        )
+        if boundary is None:
+            emergency = self._shrink_contents(assembled) if hard_exceeded else assembled
+            return self._prepared_v2(
+                emergency,
+                current_state,
+                reason="emergency" if hard_exceeded else "none",
+                checkpoint_created=False,
+                tool_schema_tokens=tool_schema_tokens,
+            )
+
+        checkpoint = self._build_checkpoint(
+            canonical,
+            current_state=current_state,
+            durable_state=durable_state or {},
+            boundary=boundary,
+        )
+        serialized = _stable_json(checkpoint)
+        next_state = {
+            "version": 2,
+            "generation": checkpoint["generation"],
+            "checkpoint": checkpoint,
+            "checkpoint_message": {
+                "role": "developer",
+                "content": (
+                    "Local deterministic context checkpoint v2. Earlier operations "
+                    "already ran; use these durable facts and the exact hot tail below.\n"
+                    + serialized
+                ),
+            },
+            "checkpoint_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            "through_message_index": boundary[1],
+            "completed_tool_batches": len(batches),
+            "boundary_reason": reason,
+        }
+        candidate = self._assemble_v2(canonical, next_state)
+        target_tokens = int(self.max_tokens * target_ratio)
+        candidate_total = self.estimate_tokens(candidate) + tool_schema_tokens
+        if candidate_total > self.max_tokens:
+            candidate = self._shrink_contents(candidate)
+            reason = "emergency"
+            next_state["boundary_reason"] = reason
+        elif candidate_total > target_tokens:
+            # Retaining the configured hot batches is more important than forcing
+            # an exact target. The high/low gap still prevents immediate rewrites.
+            next_state["target_exceeded"] = True
+        return self._prepared_v2(
+            candidate,
+            next_state,
+            reason=reason,
+            checkpoint_created=True,
+            tool_schema_tokens=tool_schema_tokens,
+        )
+
+    def _prepared_v2(
+        self,
+        messages: list[dict[str, Any]],
+        state: dict[str, Any],
+        *,
+        reason: str,
+        checkpoint_created: bool,
+        tool_schema_tokens: int,
+    ) -> PreparedContext:
+        message_tokens = self.estimate_tokens(messages)
+        return PreparedContext(
+            messages=messages,
+            state=copy.deepcopy(state),
+            checkpoint_generation=int(state.get("generation", 0) or 0),
+            checkpoint_hash=(
+                str(state.get("checkpoint_hash"))
+                if state.get("checkpoint_hash")
+                else None
+            ),
+            compaction_reason=reason,
+            checkpoint_created=checkpoint_created,
+            estimated_message_tokens=message_tokens,
+            estimated_total_tokens=message_tokens + tool_schema_tokens,
+        )
+
+    def _assemble_v2(
+        self,
+        messages: list[dict[str, Any]],
+        state: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        checkpoint_message = state.get("checkpoint_message")
+        through = state.get("through_message_index")
+        if not isinstance(checkpoint_message, dict) or not isinstance(through, int):
+            return copy.deepcopy(messages)
+        prefix_end = self._prefix_end(messages)
+        if through < prefix_end or through >= len(messages):
+            return copy.deepcopy(messages)
+        return (
+            copy.deepcopy(messages[:prefix_end])
+            + [copy.deepcopy(checkpoint_message)]
+            + copy.deepcopy(messages[through + 1 :])
+        )
+
+    def _build_checkpoint(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        current_state: dict[str, Any],
+        durable_state: dict[str, Any],
+        boundary: tuple[int, int, list[dict[str, Any]], list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        _, end, _, _ = boundary
+        previous = current_state.get("checkpoint")
+        previous_operations = (
+            list(previous.get("operations", [])) if isinstance(previous, dict) else []
+        )
+        old_through = int(current_state.get("through_message_index", -1) or -1)
+        retired = _completed_tool_batches(messages, start=max(0, old_through + 1))
+        operations = previous_operations + [
+            operation
+            for batch_start, batch_end, calls, results in retired
+            if batch_start > old_through and batch_end <= end
+            for operation in _durable_batch_summary(calls, results)
+        ]
+        operations = operations[-60:]
+        checkpoint = {
+            "version": 2,
+            "generation": int(current_state.get("generation", 0) or 0) + 1,
+            "through_execution_id": durable_state.get("through_execution_id"),
+            "change_revision": int(durable_state.get("change_revision", 0) or 0),
+            "goal": str(durable_state.get("goal") or "")[:1_200],
+            "requirements": _stable_string_list(
+                durable_state.get("requirements"), limit=12
+            ),
+            "decisions": _stable_string_list(durable_state.get("decisions"), limit=20),
+            "relevant_files": _stable_string_list(
+                durable_state.get("relevant_files"), limit=40
+            ),
+            "changed_files": _stable_string_list(
+                durable_state.get("changed_files"), limit=40
+            ),
+            "changes": _stable_object_list(durable_state.get("changes"), limit=40),
+            "verification": _stable_object_list(
+                durable_state.get("verification"), limit=20
+            ),
+            "active_blockers": _stable_object_list(
+                durable_state.get("active_blockers"), limit=12
+            ),
+            "applied_subagent_bundles": _stable_object_list(
+                durable_state.get("applied_subagent_bundles"), limit=12
+            ),
+            "operations": operations,
+        }
+        return checkpoint
 
     def _stable_compaction_count(self, messages: list[dict[str, Any]]) -> int:
         """Compact old batches in chunks so the boundary moves infrequently."""
@@ -469,6 +703,184 @@ def _common_prefix_chars(left: str, right: str) -> int:
 
 def _estimate_text_tokens(char_count: int) -> int:
     return max(0, (char_count + 3) // 4)
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _empty_context_state(*, boundary_reason: str = "none") -> dict[str, Any]:
+    return {
+        "version": 2,
+        "generation": 0,
+        "checkpoint": None,
+        "checkpoint_message": None,
+        "checkpoint_hash": None,
+        "through_message_index": None,
+        "completed_tool_batches": 0,
+        "boundary_reason": boundary_reason,
+    }
+
+
+def _normalize_context_state(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("version") != 2:
+        return _empty_context_state()
+    generation = value.get("generation")
+    through = value.get("through_message_index")
+    batches = value.get("completed_tool_batches")
+    if not isinstance(generation, int) or generation < 0:
+        return _empty_context_state()
+    if through is not None and (not isinstance(through, int) or through < 0):
+        return _empty_context_state()
+    if not isinstance(batches, int) or batches < 0:
+        return _empty_context_state()
+    return copy.deepcopy(value)
+
+
+def _completed_tool_batches(
+    messages: list[dict[str, Any]],
+    *,
+    start: int,
+) -> list[tuple[int, int, list[dict[str, Any]], list[dict[str, Any]]]]:
+    batches: list[tuple[int, int, list[dict[str, Any]], list[dict[str, Any]]]] = []
+    index = max(0, start)
+    while index < len(messages):
+        message = messages[index]
+        calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if not isinstance(calls, list) or not calls:
+            index += 1
+            continue
+        call_ids = {
+            str(call.get("id"))
+            for call in calls
+            if isinstance(call, dict) and call.get("id")
+        }
+        if not call_ids:
+            index += 1
+            continue
+        results: list[dict[str, Any]] = []
+        end = index + 1
+        while end < len(messages) and messages[end].get("role") == "tool":
+            candidate = messages[end]
+            if str(candidate.get("tool_call_id")) not in call_ids:
+                break
+            results.append(candidate)
+            end += 1
+        returned = {str(item.get("tool_call_id")) for item in results}
+        if returned == call_ids:
+            batches.append((index, end - 1, calls, results))
+            index = end
+            continue
+        index += 1
+    return batches
+
+
+def _checkpoint_boundary(
+    batches: list[tuple[int, int, list[dict[str, Any]], list[dict[str, Any]]]],
+    *,
+    hot_tool_batches: int,
+    protected_tool_call_ids: set[str],
+) -> tuple[int, int, list[dict[str, Any]], list[dict[str, Any]]] | None:
+    eligible_count = len(batches) - hot_tool_batches
+    if eligible_count <= 0:
+        return None
+    protected_batch_indexes = [
+        index
+        for index, (_, _, calls, _) in enumerate(batches)
+        if any(
+            str(call.get("id")) in protected_tool_call_ids
+            for call in calls
+            if isinstance(call, dict)
+        )
+    ]
+    if protected_batch_indexes:
+        eligible_count = min(eligible_count, min(protected_batch_indexes))
+    if eligible_count <= 0:
+        return None
+    return batches[eligible_count - 1]
+
+
+def _stable_string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = " ".join(str(item).strip().split())[:500]
+        if text and text not in result:
+            result.append(text)
+    return result[-limit:]
+
+
+def _stable_object_list(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        normalized = json.loads(_stable_json(item))
+        fingerprint = _stable_json(normalized)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        result.append(normalized)
+    return result[-limit:]
+
+
+def _durable_batch_summary(
+    calls: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    results_by_id = {str(item.get("tool_call_id")): item for item in results}
+    operations: list[dict[str, Any]] = []
+    for call in calls:
+        call_id = str(call.get("id") or "")
+        name = _tool_call_name(call)
+        arguments = _tool_call_arguments(call)
+        raw = str(results_by_id.get(call_id, {}).get("content") or "")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {}
+        operation: dict[str, Any] = {
+            "tool": name,
+            "target": arguments.get("path") or arguments.get("directory"),
+            "ok": parsed.get("ok") is True if isinstance(parsed, dict) else False,
+        }
+        if isinstance(parsed, dict):
+            for key in (
+                "start_line",
+                "end_line",
+                "total_lines",
+                "content_hash",
+                "additions",
+                "deletions",
+                "exit_code",
+                "expected_exit_codes",
+                "expectation_met",
+                "verification_mode",
+                "environment_error",
+                "duration_seconds",
+                "timed_out",
+                "output_truncated",
+            ):
+                if key in parsed:
+                    operation[key] = parsed[key]
+            entries = parsed.get("entries")
+            matches = parsed.get("matches")
+            if isinstance(entries, list):
+                operation["entry_count"] = len(entries)
+            if isinstance(matches, list):
+                operation["match_count"] = len(matches)
+        operations.append(operation)
+    return operations
 
 
 def _tool_call_arguments(call: Any) -> dict[str, Any]:

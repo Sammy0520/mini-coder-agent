@@ -114,6 +114,11 @@ class SessionModelTests(unittest.TestCase):
             session.tool_executions.append(execution)
             session.current_step = 1
             session.total_usage = {"input_tokens": 20, "output_tokens": 5}
+            session.context_state = {
+                "version": 2,
+                "generation": 1,
+                "checkpoint_hash": "abc123",
+            }
             session.set_status(SessionStatus.RUNNING)
             session.set_status(SessionStatus.INTERRUPTED, stop_reason="keyboard_interrupt")
 
@@ -129,6 +134,7 @@ class SessionModelTests(unittest.TestCase):
             )
             self.assertEqual(restored.tool_executions[0].status, ToolExecutionStatus.RUNNING)
             self.assertEqual(restored.total_usage["input_tokens"], 20)
+            self.assertEqual(restored.context_state, session.context_state)
 
     def test_model_summary_rejects_api_key_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -266,6 +272,17 @@ class SessionModelTests(unittest.TestCase):
             self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
             self.assertEqual(restored.parallel_tool_batches, 0)
             self.assertEqual(restored.parallel_tool_overlap_seconds, 0.0)
+
+    def test_migrates_schema_v9_session_to_empty_context_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = make_session(Path(directory)).to_dict()
+            data["schema_version"] = 9
+            data.pop("context_state")
+
+            restored = AgentSession.from_dict(data)
+
+            self.assertEqual(restored.schema_version, CURRENT_SESSION_SCHEMA)
+            self.assertEqual(restored.context_state, {})
 
     def test_explicit_session_title_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

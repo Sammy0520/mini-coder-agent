@@ -6,6 +6,46 @@ from mini_coder.context import ContextManager
 
 
 class ContextManagerTests(unittest.TestCase):
+    @staticmethod
+    def _v2_messages(batch_count: int, *, output_chars: int = 700) -> list[dict]:
+        messages: list[dict] = [
+            {"role": "system", "content": "stable system"},
+            {"role": "developer", "content": "stable workspace"},
+            {"role": "user", "content": "build the feature"},
+        ]
+        for index in range(batch_count):
+            call_id = f"call-{index}"
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"app.py"}',
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": (
+                            '{"ok":true,"content":"'
+                            + (chr(65 + index % 26) * output_chars)
+                            + '","content_hash":"hash-'
+                            + str(index)
+                            + '"}'
+                        ),
+                    },
+                ]
+            )
+        return messages
+
     def test_cache_diagnostics_are_content_free_and_track_append_only_prefix(self) -> None:
         manager = ContextManager(max_chars=20_000, max_tokens=5_000)
         messages = [
@@ -300,6 +340,137 @@ class ContextManagerTests(unittest.TestCase):
             prepared_at_eight[: len(prepared_at_seven)],
             prepared_at_seven,
         )
+
+    def test_v2_stays_append_only_below_high_watermark(self) -> None:
+        manager = ContextManager(max_chars=20_000, max_tokens=5_000)
+        messages = self._v2_messages(2, output_chars=100)
+
+        prepared = manager.prepare_v2(
+            messages,
+            state=None,
+            tool_schema_tokens=100,
+            high_watermark_ratio=0.9,
+            target_ratio=0.68,
+            hot_tool_batches=2,
+            min_checkpoint_batches=3,
+        )
+
+        self.assertFalse(prepared.checkpoint_created)
+        self.assertEqual(prepared.messages, messages)
+        self.assertEqual(prepared.estimated_total_tokens, prepared.estimated_message_tokens + 100)
+
+    def test_v2_checkpoint_bytes_freeze_until_next_eligible_generation(self) -> None:
+        manager = ContextManager(max_chars=6_000, max_tokens=2_000)
+        messages = self._v2_messages(8)
+        first = manager.prepare_v2(
+            messages,
+            state=None,
+            high_watermark_ratio=0.7,
+            target_ratio=0.55,
+            hot_tool_batches=2,
+            min_checkpoint_batches=3,
+        )
+        self.assertTrue(first.checkpoint_created)
+        self.assertEqual(first.checkpoint_generation, 1)
+        frozen = first.state["checkpoint_message"]
+
+        appended = self._v2_messages(9)
+        second = manager.prepare_v2(
+            appended,
+            state=first.state,
+            high_watermark_ratio=0.7,
+            target_ratio=0.55,
+            hot_tool_batches=2,
+            min_checkpoint_batches=3,
+        )
+
+        self.assertFalse(second.checkpoint_created)
+        self.assertEqual(second.checkpoint_generation, 1)
+        self.assertEqual(second.state["checkpoint_message"], frozen)
+        self.assertEqual(second.checkpoint_hash, first.checkpoint_hash)
+
+        later = self._v2_messages(12, output_chars=900)
+        third = manager.prepare_v2(
+            later,
+            state=second.state,
+            high_watermark_ratio=0.7,
+            target_ratio=0.55,
+            hot_tool_batches=2,
+            min_checkpoint_batches=3,
+        )
+        self.assertTrue(third.checkpoint_created)
+        self.assertEqual(third.checkpoint_generation, 2)
+        self.assertNotEqual(third.checkpoint_hash, first.checkpoint_hash)
+
+    def test_v2_checkpoint_is_deterministic_and_protocol_valid(self) -> None:
+        messages = self._v2_messages(8)
+        durable = {
+            "goal": "finish feature",
+            "requirements": ["works offline", "has tests"],
+            "changed_files": ["app.py"],
+            "change_revision": 2,
+        }
+        kwargs = {
+            "state": None,
+            "durable_state": durable,
+            "high_watermark_ratio": 0.7,
+            "target_ratio": 0.55,
+            "hot_tool_batches": 2,
+            "min_checkpoint_batches": 3,
+        }
+
+        left = ContextManager(max_chars=6_000, max_tokens=2_000).prepare_v2(
+            messages, **kwargs
+        )
+        right = ContextManager(max_chars=6_000, max_tokens=2_000).prepare_v2(
+            messages, **kwargs
+        )
+
+        self.assertEqual(left.state["checkpoint_message"], right.state["checkpoint_message"])
+        self.assertEqual(left.checkpoint_hash, right.checkpoint_hash)
+        included_ids = {
+            str(call.get("id"))
+            for message in left.messages
+            for call in message.get("tool_calls", [])
+        }
+        for message in left.messages:
+            if message.get("role") == "tool":
+                self.assertIn(str(message.get("tool_call_id")), included_ids)
+
+    def test_v2_keeps_protected_failed_batch_in_hot_tail(self) -> None:
+        messages = self._v2_messages(10)
+        prepared = ContextManager(max_chars=6_000, max_tokens=2_000).prepare_v2(
+            messages,
+            state=None,
+            durable_state={"protected_tool_call_ids": ["call-5"]},
+            high_watermark_ratio=0.7,
+            target_ratio=0.55,
+            hot_tool_batches=2,
+            min_checkpoint_batches=3,
+        )
+
+        hot_ids = {
+            str(call.get("id"))
+            for message in prepared.messages
+            for call in message.get("tool_calls", [])
+        }
+        self.assertIn("call-5", hot_ids)
+        self.assertNotIn("call-4", hot_ids)
+
+    def test_v2_marks_emergency_when_hard_limit_precedes_interval(self) -> None:
+        manager = ContextManager(max_chars=2_000, max_tokens=1_000)
+        messages = self._v2_messages(4, output_chars=1_200)
+        prepared = manager.prepare_v2(
+            messages,
+            state=None,
+            high_watermark_ratio=0.9,
+            target_ratio=0.68,
+            hot_tool_batches=2,
+            min_checkpoint_batches=20,
+        )
+
+        self.assertEqual(prepared.compaction_reason, "emergency")
+        self.assertLessEqual(manager.estimate_chars(prepared.messages), manager.max_chars)
 
 
 if __name__ == "__main__":
