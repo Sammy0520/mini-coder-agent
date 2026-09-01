@@ -6,6 +6,19 @@ model_streaming = true
 prompt_cache_enabled = true
 prompt_cache_key = "mini-coder-agent-v1"
 
+# Bounded parallel Subagents. Simple tasks should remain on the main Agent path.
+subagents_enabled = true
+max_parallel_subagents = 2
+max_subagent_batches = 2
+max_subagent_steps = 6
+max_subagent_seconds = 300
+max_subagent_model_calls = 5
+max_subagent_tool_calls = 16
+max_subagent_total_tokens = 40000
+max_subagent_context_tokens = 8000
+max_subagent_workspace_files = 5000
+max_subagent_workspace_bytes = 50000000
+
 [model_providers.aicode007]
 name = "aicode007"
 base_url = "https://api.aicode007.com"

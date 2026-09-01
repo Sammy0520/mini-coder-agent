@@ -41,6 +41,15 @@ _SAFE_MODEL_FIELDS = {
     "max_response_tool_calls",
     "max_response_write_calls",
     "max_response_write_chars",
+    "subagents_enabled",
+    "max_parallel_subagents",
+    "max_subagent_batches",
+    "max_subagent_steps",
+    "max_subagent_seconds",
+    "max_subagent_model_calls",
+    "max_subagent_tool_calls",
+    "max_subagent_total_tokens",
+    "max_subagent_context_tokens",
 }
 
 

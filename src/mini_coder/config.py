@@ -95,6 +95,17 @@ class AgentConfig:
     preserve_project_command_path: bool = False
     auto_approve_unknown_commands: bool = False
     external_evaluation: bool = False
+    subagents_enabled: bool = True
+    max_parallel_subagents: int = 2
+    max_subagent_batches: int = 2
+    max_subagent_steps: int = 6
+    max_subagent_seconds: int = 300
+    max_subagent_model_calls: int = 5
+    max_subagent_tool_calls: int = 16
+    max_subagent_total_tokens: int = 40_000
+    max_subagent_context_tokens: int = 8_000
+    max_subagent_workspace_files: int = 5_000
+    max_subagent_workspace_bytes: int = 50_000_000
 
     def __post_init__(self) -> None:
         positive_fields = {
@@ -111,6 +122,16 @@ class AgentConfig:
             "max_response_tool_calls": self.max_response_tool_calls,
             "max_response_write_calls": self.max_response_write_calls,
             "max_response_write_chars": self.max_response_write_chars,
+            "max_parallel_subagents": self.max_parallel_subagents,
+            "max_subagent_batches": self.max_subagent_batches,
+            "max_subagent_steps": self.max_subagent_steps,
+            "max_subagent_seconds": self.max_subagent_seconds,
+            "max_subagent_model_calls": self.max_subagent_model_calls,
+            "max_subagent_tool_calls": self.max_subagent_tool_calls,
+            "max_subagent_total_tokens": self.max_subagent_total_tokens,
+            "max_subagent_context_tokens": self.max_subagent_context_tokens,
+            "max_subagent_workspace_files": self.max_subagent_workspace_files,
+            "max_subagent_workspace_bytes": self.max_subagent_workspace_bytes,
         }
         for name, value in positive_fields.items():
             if value < 1:
@@ -135,6 +156,12 @@ class AgentConfig:
             )
         if self.model_verbosity not in {None, "low", "medium", "high"}:
             raise ConfigurationError("model_verbosity must be one of: low, medium, high")
+        if self.max_parallel_subagents > 2:
+            raise ConfigurationError("max_parallel_subagents must not exceed 2")
+        if self.max_subagent_context_tokens > self.max_context_tokens:
+            raise ConfigurationError(
+                "max_subagent_context_tokens must not exceed max_context_tokens"
+            )
         if self.base_url and (self.base_url.startswith("[") or "](" in self.base_url):
             raise ConfigurationError(
                 "base_url must be a plain URL, not Markdown link syntax"
@@ -290,6 +317,58 @@ class AgentConfig:
             max_response_write_chars=_env_int(
                 "CODING_AGENT_MAX_RESPONSE_WRITE_CHARS", 18_000
             ),
+            subagents_enabled=_env_bool(
+                "CODING_AGENT_SUBAGENTS",
+                _optional_bool(
+                    file_data.get("subagents_enabled"),
+                    "subagents_enabled",
+                    default=True,
+                ),
+            ),
+            max_parallel_subagents=_env_int(
+                "CODING_AGENT_MAX_PARALLEL_SUBAGENTS",
+                _optional_int(
+                    file_data.get("max_parallel_subagents"),
+                    "max_parallel_subagents",
+                    default=2,
+                ),
+            ),
+            max_subagent_batches=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_BATCHES",
+                _optional_int(file_data.get("max_subagent_batches"), "max_subagent_batches", default=2),
+            ),
+            max_subagent_steps=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_STEPS",
+                _optional_int(file_data.get("max_subagent_steps"), "max_subagent_steps", default=6),
+            ),
+            max_subagent_seconds=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_SECONDS",
+                _optional_int(file_data.get("max_subagent_seconds"), "max_subagent_seconds", default=300),
+            ),
+            max_subagent_model_calls=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_MODEL_CALLS",
+                _optional_int(file_data.get("max_subagent_model_calls"), "max_subagent_model_calls", default=5),
+            ),
+            max_subagent_tool_calls=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_TOOL_CALLS",
+                _optional_int(file_data.get("max_subagent_tool_calls"), "max_subagent_tool_calls", default=16),
+            ),
+            max_subagent_total_tokens=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_TOTAL_TOKENS",
+                _optional_int(file_data.get("max_subagent_total_tokens"), "max_subagent_total_tokens", default=40_000),
+            ),
+            max_subagent_context_tokens=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_CONTEXT_TOKENS",
+                _optional_int(file_data.get("max_subagent_context_tokens"), "max_subagent_context_tokens", default=8_000),
+            ),
+            max_subagent_workspace_files=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_WORKSPACE_FILES",
+                _optional_int(file_data.get("max_subagent_workspace_files"), "max_subagent_workspace_files", default=5_000),
+            ),
+            max_subagent_workspace_bytes=_env_int(
+                "CODING_AGENT_MAX_SUBAGENT_WORKSPACE_BYTES",
+                _optional_int(file_data.get("max_subagent_workspace_bytes"), "max_subagent_workspace_bytes", default=50_000_000),
+            ),
         )
 
     def validate_for_model(self) -> None:
@@ -385,4 +464,12 @@ def _optional_bool(value: Any, name: str, *, default: bool) -> bool:
         return default
     if not isinstance(value, bool):
         raise ConfigurationError(f"{name} must be true or false")
+    return value
+
+
+def _optional_int(value: Any, name: str, *, default: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigurationError(f"{name} must be a positive integer")
     return value

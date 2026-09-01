@@ -101,6 +101,37 @@ class BatchApprovalRunner:
         )
 
 
+class SubagentEventRunner:
+    def __init__(self, event_callback) -> None:
+        self.event_callback = event_callback
+
+    def run(self, task: str) -> AgentRunResult:
+        self.event_callback(
+            "subagent_started",
+            {
+                "agent_id": "backend",
+                "label": "Backend",
+                "role": "implementer",
+                "task": "Implement API",
+            },
+        )
+        self.event_callback(
+            "subagent_patch_ready",
+            {
+                "agent_id": "backend",
+                "summary": "API ready",
+                "patch": {
+                    "bundle_id": "bundle-1",
+                    "file_count": 2,
+                    "additions": 20,
+                    "deletions": 2,
+                    "files": [{"path": "secret-should-not-enter-snapshot"}],
+                },
+            },
+        )
+        return AgentRunResult("completed", "done", 1)
+
+
 def wait_until(predicate, timeout: float = 2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -112,6 +143,30 @@ def wait_until(predicate, timeout: float = 2.0):
 
 
 class RunControllerTests(unittest.TestCase):
+    def test_subagent_events_update_public_run_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = RunController(
+                runner_factory=lambda request, event, approval: SubagentEventRunner(event)
+            )
+            started = controller.start(
+                RunRequest(task="Parallel task", workspace=directory)
+            )
+            finished = wait_until(
+                lambda: (
+                    snapshot
+                    if (snapshot := controller.snapshot(started["run_id"]))["status"]
+                    == "completed"
+                    else None
+                )
+            )
+
+            self.assertEqual(len(finished["subagents"]), 1)
+            subagent = finished["subagents"][0]
+            self.assertEqual(subagent["agent_id"], "backend")
+            self.assertEqual(subagent["status"], "patch_pending")
+            self.assertEqual(subagent["patch"]["file_count"], 2)
+            self.assertNotIn("files", subagent["patch"])
+
     def test_batch_approval_is_exposed_as_one_active_run_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             def factory(request, event, approval, batch_approval, cancelled):

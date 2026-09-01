@@ -225,6 +225,73 @@ class VerificationTrackerTests(unittest.TestCase):
             [record],
         )
 
+    def test_corrected_scoped_verifier_supersedes_inline_harness_syntax_error(self) -> None:
+        arguments = {
+            "command": 'python -c "def broken():\\n pass"',
+            "purpose": "verify",
+            "verification_paths": ["backend/server.py", "frontend/app.js"],
+            "verification_domains": ["python", "web"],
+        }
+        failed = VerificationTracker.record(
+            tool_execution_id="broken-harness",
+            arguments=arguments,
+            result_data={
+                "exit_code": 1,
+                "duration_seconds": 0.1,
+                "stderr": '  File "<string>", line 1\nSyntaxError: invalid syntax',
+            },
+            result_ok=False,
+            change_revision=4,
+        )
+        passed = VerificationTracker.record(
+            tool_execution_id="corrected-harness",
+            arguments={**arguments, "command": 'python -c "print(\'integration ok\')"'},
+            result_data={"exit_code": 0, "duration_seconds": 0.1},
+            result_ok=True,
+            change_revision=4,
+        )
+
+        self.assertTrue(failed.environment_error)
+        self.assertEqual(
+            VerificationTracker.evaluate(
+                [failed, passed], change_revision=4, had_file_modification=True
+            ),
+            VerificationStatus.PASSED,
+        )
+
+    def test_real_failure_is_not_hidden_by_different_successful_check(self) -> None:
+        common = {
+            "purpose": "verify",
+            "verification_paths": ["src/app.py"],
+            "verification_domains": ["python"],
+        }
+        failed = VerificationTracker.record(
+            tool_execution_id="real-failure",
+            arguments={**common, "command": "python -m unittest"},
+            result_data={
+                "exit_code": 1,
+                "duration_seconds": 0.1,
+                "stderr": "FAILED (failures=1)",
+            },
+            result_ok=False,
+            change_revision=2,
+        )
+        passed = VerificationTracker.record(
+            tool_execution_id="smoke-pass",
+            arguments={**common, "command": 'python -c "print(\'ok\')"'},
+            result_data={"exit_code": 0, "duration_seconds": 0.1},
+            result_ok=True,
+            change_revision=2,
+        )
+
+        self.assertFalse(failed.environment_error)
+        self.assertEqual(
+            VerificationTracker.evaluate(
+                [failed, passed], change_revision=2, had_file_modification=True
+            ),
+            VerificationStatus.FAILED,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

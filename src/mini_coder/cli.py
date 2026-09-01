@@ -258,11 +258,29 @@ def main(argv: list[str] | None = None) -> int:
                 session_store,
                 event_callback,
             )
+        registry = create_default_registry()
+        skills = SkillRegistry.with_user_skills()
+        if config.subagents_enabled:
+            from .subagents import (
+                ApplySubagentPatchesTool,
+                DelegateSubagentsTool,
+                build_default_coordinator,
+            )
+
+            coordinator = build_default_coordinator(
+                config=config,
+                skill_registry=skills,
+                event_callback=event_callback,
+                cancellation_callback=None,
+                response_language=None,
+            )
+            registry.register(DelegateSubagentsTool(coordinator))
+            registry.register(ApplySubagentPatchesTool(coordinator))
         runner = AgentRunner(
             model=model,
-            registry=create_default_registry(),
+            registry=registry,
             config=config,
-            skill_registry=SkillRegistry.with_user_skills(),
+            skill_registry=skills,
             approval_callback=_ask_approval,
             event_callback=event_callback,
             session_store=session_store,

@@ -69,6 +69,10 @@
         <p id="approvalTitle" class="approval-title"></p><details class="technical-details"><summary>查看技术参数</summary><pre id="approvalArguments" class="code-block"></pre></details>
         <div class="approval-actions"><button id="denyButton" class="secondary-button" type="button">拒绝</button><button id="approveButton" class="primary-button" type="button">允许操作</button></div>
       </article>
+      <article id="subagentPanel" class="detail-card subagent-card hidden" aria-live="polite">
+        <div class="detail-card-header"><div><p id="subagentEyebrow" class="eyebrow">并行协作</p><h3 id="subagentTitle">Subagents</h3></div><span id="subagentCount" class="panel-count">0 项</span></div>
+        <div id="subagentList" class="subagent-list"></div>
+      </article>
       <article class="detail-card"><div class="detail-card-header"><div><p id="changesEyebrow" class="eyebrow">代码变更</p><h3 id="changesTitle">修改的文件</h3></div><div class="change-actions"><button id="undoButton" class="undo-button hidden" type="button">撤销上次修改</button><span id="diffStats" class="diff-stats">暂无修改</span></div></div><button id="changesToggleButton" class="changes-toggle" type="button" aria-expanded="false">展开 0 个文件</button><div id="changeList" class="change-list hidden"></div></article>
       <article class="detail-card"><div class="detail-card-header"><div><p id="verificationEyebrow" class="eyebrow">本地验证</p><h3 id="verificationTitle">任务验收</h3></div><span id="verificationBadge" class="verification-badge neutral">未运行</span></div><p id="verificationMessage" class="verification-message">完成修改后，Agent 会运行项目内的检查命令。</p></article>
       <article class="detail-card execution-card"><div class="detail-card-header"><div><p id="executionEyebrow" class="eyebrow">执行过程</p><h3 id="executionTitle">Agent 做了什么</h3><small id="turnSummary" class="turn-summary">第 1 轮 · 尚未开始</small></div><span id="eventCount" class="panel-count">0 项</span></div><div id="executionList" class="execution-list"><div class="detail-empty">执行步骤会以简明方式显示</div></div></article>

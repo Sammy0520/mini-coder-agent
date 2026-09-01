@@ -106,7 +106,10 @@ class VerificationTracker:
         )
         if verification_mode not in {"standard", "expected_rejection"}:
             verification_mode = "standard"
-        environment_error = bool(result_data.get("environment_error", False))
+        environment_error = bool(result_data.get("environment_error", False)) or _is_harness_error(
+            command=str(arguments.get("command", "")),
+            stderr=str(result_data.get("stderr", "")),
+        )
         conclusive = verification_mode == "standard" and expected_exit_codes == (0,)
         return VerificationRecord.create(
             tool_execution_id=tool_execution_id,
@@ -165,6 +168,14 @@ class VerificationTracker:
                 )
                 latest_by_check[key] = record
             effective = list(latest_by_check.values())
+            effective = [
+                record
+                for index, record in enumerate(effective)
+                if not (
+                    record.environment_error
+                    and _later_success_covers_harness_error(record, effective[index + 1 :])
+                )
+            ]
             if any(not record.passed or record.environment_error for record in effective):
                 return VerificationStatus.FAILED
             # A deliberate invalid-input rejection is useful supporting evidence,
@@ -188,6 +199,38 @@ def _summary(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 18)] + "...[truncated]"
+
+
+def _is_harness_error(*, command: str, stderr: str) -> bool:
+    """Recognize a malformed inline verifier without hiding target-code failures."""
+
+    normalized_command = command.strip().casefold()
+    normalized_stderr = stderr.casefold()
+    return (
+        bool(re.match(r"^(?:python(?:\.exe)?|py)\s+-c(?:\s|$)", normalized_command))
+        and 'file "<string>"' in normalized_stderr
+        and "syntaxerror: invalid syntax" in normalized_stderr
+    )
+
+
+def _later_success_covers_harness_error(
+    failed: VerificationRecord,
+    later: list[VerificationRecord],
+) -> bool:
+    """Allow a corrected verifier to replace only an explicit, identical scope."""
+
+    if not failed.scope_paths:
+        return False
+    return any(
+        record.passed
+        and record.conclusive
+        and not record.environment_error
+        and record.change_revision == failed.change_revision
+        and record.cwd == failed.cwd
+        and record.scope_paths == failed.scope_paths
+        and record.scope_domains == failed.scope_domains
+        for record in later
+    )
 
 
 def _expected_exit_codes(value: Any) -> tuple[int, ...]:

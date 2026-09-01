@@ -50,6 +50,40 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.max_response_tool_calls, 6)
         self.assertEqual(config.max_response_write_calls, 2)
         self.assertEqual(config.max_response_write_chars, 9000)
+
+    def test_loads_subagent_limits_from_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "agent.toml"
+            config_path.write_text(
+                "subagents_enabled = true\n"
+                "max_parallel_subagents = 2\n"
+                "max_subagent_batches = 1\n"
+                "max_subagent_steps = 4\n"
+                "max_subagent_seconds = 90\n"
+                "max_subagent_model_calls = 3\n"
+                "max_subagent_tool_calls = 8\n"
+                "max_subagent_total_tokens = 12000\n"
+                "max_subagent_context_tokens = 4000\n"
+                "max_subagent_workspace_files = 700\n"
+                "max_subagent_workspace_bytes = 9000000\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                config = AgentConfig.from_env(root, config_path=config_path)
+
+            self.assertTrue(config.subagents_enabled)
+            self.assertEqual(config.max_parallel_subagents, 2)
+            self.assertEqual(config.max_subagent_batches, 1)
+            self.assertEqual(config.max_subagent_steps, 4)
+            self.assertEqual(config.max_subagent_seconds, 90)
+            self.assertEqual(config.max_subagent_model_calls, 3)
+            self.assertEqual(config.max_subagent_tool_calls, 8)
+            self.assertEqual(config.max_subagent_total_tokens, 12000)
+            self.assertEqual(config.max_subagent_context_tokens, 4000)
+            self.assertEqual(config.max_subagent_workspace_files, 700)
+            self.assertEqual(config.max_subagent_workspace_bytes, 9000000)
+
     def test_loads_provider_toml_and_keeps_key_in_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

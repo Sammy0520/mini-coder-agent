@@ -106,6 +106,31 @@ class ChangeTrackerTests(unittest.TestCase):
 
         self.assertEqual(path.read_text(encoding="utf-8"), "user change\n")
 
+    def test_apply_many_preflights_every_file_before_writing(self) -> None:
+        one = self.workspace / "one.txt"
+        two = self.workspace / "two.txt"
+        one.write_text("one\n", encoding="utf-8")
+        two.write_text("two\n", encoding="utf-8")
+        prepared = [
+            self.tracker.prepare(
+                "write_file",
+                {"path": "one.txt", "content": "changed one\n", "overwrite": True},
+                "batch-one",
+            ),
+            self.tracker.prepare(
+                "write_file",
+                {"path": "two.txt", "content": "changed two\n", "overwrite": True},
+                "batch-two",
+            ),
+        ]
+        two.write_text("user changed two\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ChangeConflictError, "changed after approval"):
+            self.tracker.apply_many(prepared)
+
+        self.assertEqual(one.read_text(encoding="utf-8"), "one\n")
+        self.assertEqual(two.read_text(encoding="utf-8"), "user changed two\n")
+
     def test_atomic_replace_failure_preserves_original(self) -> None:
         path = self.workspace / "atomic.txt"
         path.write_text("original\n", encoding="utf-8")

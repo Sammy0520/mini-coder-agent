@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .changes import ChangeTracker, PreparedChange
+from .changes import ChangeRecord, ChangeTracker, PreparedChange
 from .config import AgentConfig, ApprovalPolicy
 from .context import ContextManager
 from .exceptions import (
@@ -515,7 +515,7 @@ class AgentRunner:
                     and session.verification_status == VerificationStatus.PASSED
                     and response.tool_calls
                     and not any(
-                        call.name in {"write_file", "edit_file"}
+                        call.name in {"write_file", "edit_file", "apply_subagent_patches"}
                         for call in response.tool_calls
                     )
                 ):
@@ -994,6 +994,15 @@ class AgentRunner:
             "max_response_tool_calls": self.config.max_response_tool_calls,
             "max_response_write_calls": self.config.max_response_write_calls,
             "max_response_write_chars": self.config.max_response_write_chars,
+            "subagents_enabled": self.config.subagents_enabled,
+            "max_parallel_subagents": self.config.max_parallel_subagents,
+            "max_subagent_batches": self.config.max_subagent_batches,
+            "max_subagent_steps": self.config.max_subagent_steps,
+            "max_subagent_seconds": self.config.max_subagent_seconds,
+            "max_subagent_model_calls": self.config.max_subagent_model_calls,
+            "max_subagent_tool_calls": self.config.max_subagent_tool_calls,
+            "max_subagent_total_tokens": self.config.max_subagent_total_tokens,
+            "max_subagent_context_tokens": self.config.max_subagent_context_tokens,
         }
 
     @staticmethod
@@ -1227,13 +1236,18 @@ class AgentRunner:
     ) -> str | None:
         if self._elapsed_total(session) >= self.config.max_seconds:
             return "max_seconds"
-        if (
-            before_model
-            and session.model_call_count - self._run_model_call_start
-            >= self.config.max_model_calls
-        ):
+        state = self._turn_state(session)
+        child_model_calls = int(state.get("subagent_model_calls", 0) or 0)
+        child_tool_calls = int(state.get("subagent_tool_calls", 0) or 0)
+        model_calls = (
+            session.model_call_count - self._run_model_call_start + child_model_calls
+        )
+        tool_calls = (
+            len(session.tool_executions) - self._run_tool_call_start + child_tool_calls
+        )
+        if before_model and model_calls >= self.config.max_model_calls:
             return "max_model_calls"
-        if len(session.tool_executions) - self._run_tool_call_start > self.config.max_tool_calls:
+        if tool_calls > self.config.max_tool_calls:
             return "max_tool_calls"
         if (
             session.tool_output_chars - self._run_tool_output_start
@@ -1258,8 +1272,17 @@ class AgentRunner:
         """Reserve the final part of a run for edit, verification, and an answer."""
         if self._completion_reserve_active:
             return False
-        model_calls = session.model_call_count - self._run_model_call_start
-        tool_calls = len(session.tool_executions) - self._run_tool_call_start
+        state = self._turn_state(session)
+        model_calls = (
+            session.model_call_count
+            - self._run_model_call_start
+            + int(state.get("subagent_model_calls", 0) or 0)
+        )
+        tool_calls = (
+            len(session.tool_executions)
+            - self._run_tool_call_start
+            + int(state.get("subagent_tool_calls", 0) or 0)
+        )
         reported_tokens = int(session.total_usage.get("total_tokens", 0))
         used_tokens = max(0, reported_tokens - self._run_total_token_start)
         elapsed = self._elapsed_total(session)
@@ -1272,7 +1295,6 @@ class AgentRunner:
         }
         remaining_steps = self.config.max_steps - step + 1
         remaining_model_calls = self.config.max_model_calls - model_calls
-        state = self._turn_state(session)
         intent = str(state.get("intent") or "feature")
         soft_target = {
             "explain": 3,
@@ -1722,6 +1744,69 @@ class AgentRunner:
                 result = ToolResult(False, str(exc))
         else:
             result = self.registry.execute(call.name, call.arguments, self.tool_context)
+        if result.ok and call.name == "delegate_subagents":
+            subagent_usage = result.data.get("subagent_usage")
+            if isinstance(subagent_usage, dict):
+                for name, value in subagent_usage.items():
+                    if isinstance(name, str) and isinstance(value, int) and value >= 0:
+                        usage[name] = usage.get(name, 0) + value
+            if session is not None:
+                state = self._turn_state(session)
+                runs = state.setdefault("subagents", [])
+                if isinstance(runs, list):
+                    for item in result.data.get("results", []):
+                        if isinstance(item, dict):
+                            runs.append(copy.deepcopy(item))
+                    del runs[:-8]
+                state["subagent_model_calls"] = int(
+                    state.get("subagent_model_calls", 0)
+                ) + int(result.data.get("subagent_model_calls", 0) or 0)
+                state["subagent_tool_calls"] = int(
+                    state.get("subagent_tool_calls", 0)
+                ) + int(result.data.get("subagent_tool_calls", 0) or 0)
+        if result.ok and call.name == "apply_subagent_patches" and session is not None:
+            tracked = result.data.get("tracked_changes")
+            if isinstance(tracked, list):
+                for raw_change in tracked:
+                    try:
+                        change = ChangeRecord.from_dict(raw_change)
+                    except (ChangeError, TypeError, ValueError):
+                        continue
+                    session.changes.append(change)
+                    self.tool_context.invalidate_observations()
+                    self._set_phase(session, TaskPhase.IMPLEMENT)
+                    invalidated = session.invalidate_verification(
+                        f"Subagent patch applied: {change.path}",
+                        changed_path=change.path,
+                    )
+                    self._ledger_add(
+                        self._turn_state(session),
+                        "changed_files",
+                        change.path,
+                        30,
+                    )
+                    for verification in invalidated:
+                        self._emit(
+                            "verification_invalidated",
+                            {
+                                "session_id": session.session_id,
+                                "verification_id": verification.verification_id,
+                                "reason": verification.invalidation_reason,
+                                "change_revision": session.change_revision,
+                            },
+                        )
+                    self._emit(
+                        "change_applied",
+                        {
+                            "session_id": session.session_id,
+                            "change_id": change.change_id,
+                            "tool_execution_id": change.tool_execution_id,
+                            "path": change.path,
+                            "additions": change.additions,
+                            "deletions": change.deletions,
+                            "source": "subagent",
+                        },
+                    )
         if (
             result.ok
             and session is not None
@@ -1934,7 +2019,7 @@ class AgentRunner:
             if (
                 self._finish_directive_added
                 and result.ok
-                and call.name in {"write_file", "edit_file"}
+                and call.name in {"write_file", "edit_file", "apply_subagent_patches"}
             ):
                 self._finish_directive_added = False
                 self._set_phase(session, TaskPhase.IMPLEMENT)

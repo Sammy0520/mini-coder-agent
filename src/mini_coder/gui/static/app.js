@@ -14,6 +14,7 @@ const state = {
   usedSessionMemory: false,
   eventCount: 0,
   executionGroups: [],
+  subagents: new Map(),
   readGroup: null,
   changes: new Map(),
   pendingApproval: null,
@@ -45,6 +46,7 @@ const elementIds = [
   "detailsToggleButton", "stopRunButton", "taskStatusBar", "phaseRail", "completionSummary", "runStatus", "sessionName", "verificationStatus", "changeCount", "conversation",
   "welcomeState", "messageList", "task", "composerHint", "runButton", "composerShell", "inspector", "closeInspectorButton",
   "approvalPanel", "approvalHeading", "approvalRisk", "approvalTitle", "approvalArguments", "approveButton",
+  "subagentPanel", "subagentEyebrow", "subagentTitle", "subagentCount", "subagentList",
   "denyButton", "undoButton", "changesToggleButton", "diffStats", "changeList", "verificationBadge", "verificationMessage", "eventCount", "turnSummary",
   "executionList", "sessionModal", "sessionModalClose", "sessionModalCancel", "sessionModalConfirm",
   "sessionDialogEyebrow", "sessionDialogTitle", "sessionTitleField", "sessionTitleInput", "workspace",
@@ -93,6 +95,7 @@ const uiCopy = {
     saved: "设置已保存", openConfig: "已请求本机打开配置文件",
     inspectorEyebrow: "任务详情", inspectorTitle: "执行与变更", changesEyebrow: "代码变更", changesTitle: "修改的文件",
     verificationEyebrow: "本地验证", verificationTitle: "任务验收", executionEyebrow: "执行过程", executionTitle: "Agent 做了什么",
+    subagentEyebrow: "并行协作", subagentTitle: "Subagents", subagentItems: "{count} 项",
     addSkill: "＋ 添加 Skill", skillEditorEyebrow: "自定义能力", skillEditorTitle: "添加 Skill",
     manualSkill: "手动创建", githubSkill: "GitHub 地址", markdownSkill: "导入 Markdown",
     settings: "设置", language: "语言 / Language", config: "公共模型配置文件", open: "打开", cancel: "取消", save: "保存",
@@ -101,6 +104,9 @@ const uiCopy = {
     githubPublic: "公开 GitHub 地址", chooseMarkdown: "选择本地 Markdown 文件",
     chooseMarkdownHelp: "支持 SKILL.md 或其他 .md / .markdown 文档，最多 64,000 个字符。",
     noFile: "尚未选择文件",
+    subagentScout: "只读侦察", subagentImplementer: "隔离实现",
+    subagentRunning: "执行中", subagentCompleted: "已完成", subagentFailed: "失败",
+    subagentCancelled: "已取消", subagentPatchPending: "等待合并", subagentPatchApplied: "已合并", subagentConflicted: "需要主 Agent 处理冲突",
   },
   en: {
     newSession: "New session", allSessions: "All sessions", ready: "Ready",
@@ -116,6 +122,7 @@ const uiCopy = {
     saved: "Settings saved", openConfig: "Asked your computer to open the configuration file",
     inspectorEyebrow: "Task details", inspectorTitle: "Run and changes", changesEyebrow: "Code changes", changesTitle: "Changed files",
     verificationEyebrow: "Local checks", verificationTitle: "Task verification", executionEyebrow: "Run progress", executionTitle: "What the Agent did",
+    subagentEyebrow: "Parallel work", subagentTitle: "Subagents", subagentItems: "{count}",
     addSkill: "＋ Add Skill", skillEditorEyebrow: "Custom capability", skillEditorTitle: "Add Skill",
     manualSkill: "Create manually", githubSkill: "GitHub URL", markdownSkill: "Import Markdown",
     settings: "Settings", language: "Language", config: "Shared model configuration", open: "Open", cancel: "Cancel", save: "Save",
@@ -124,6 +131,9 @@ const uiCopy = {
     githubPublic: "Public GitHub URL", chooseMarkdown: "Choose a local Markdown file",
     chooseMarkdownHelp: "Supports SKILL.md and other .md / .markdown documents up to 64,000 characters.",
     noFile: "No file selected",
+    subagentScout: "Read-only scout", subagentImplementer: "Isolated implementer",
+    subagentRunning: "Running", subagentCompleted: "Completed", subagentFailed: "Failed",
+    subagentCancelled: "Cancelled", subagentPatchPending: "Ready to merge", subagentPatchApplied: "Merged", subagentConflicted: "Needs parent integration",
   },
 };
 
@@ -161,6 +171,8 @@ function applyLanguage(language) {
   els.verificationTitle.textContent = t("verificationTitle");
   els.executionEyebrow.textContent = t("executionEyebrow");
   els.executionTitle.textContent = t("executionTitle");
+  els.subagentEyebrow.textContent = t("subagentEyebrow");
+  els.subagentTitle.textContent = t("subagentTitle");
   els.addSkillButton.textContent = t("addSkill");
   els.skillEditorEyebrow.textContent = t("skillEditorEyebrow");
   els.skillEditorTitle.textContent = t("skillEditorTitle");
@@ -187,6 +199,7 @@ function applyLanguage(language) {
   }
   setRunButton(state.runActive ? "running" : (state.sessionId ? "continue" : "start"));
   if (state.skills.length) renderSkills();
+  renderSubagents();
   updateProjectDisplay();
 }
 
@@ -967,6 +980,9 @@ async function loadSession(sessionId) {
       icon: item.icon || "✓",
       count: 1,
     }));
+    state.subagents = new Map(
+      (activeRun?.subagents || []).map((item) => [item.agent_id, {...item}]),
+    );
     state.readGroup = null;
     state.taskBrief =
       data.working_memory?.turn_state || data.working_memory?.task_brief || null;
@@ -987,6 +1003,7 @@ async function loadSession(sessionId) {
     setVerificationFromSession(data.verification_status, data.verifications || []);
     renderChanges();
     renderExecutionGroups("这个会话没有保存可展示的执行过程。 ");
+    renderSubagents();
     renderTurnSummary("已完成");
     els.task.value = "";
     els.task.disabled = Boolean(activeRun);
@@ -1033,6 +1050,7 @@ function resetDraft(options = {}) {
   state.usedSessionMemory = false;
   state.eventCount = 0;
   state.executionGroups = [];
+  state.subagents = new Map();
   state.readGroup = null;
   state.taskBrief = null;
   state.phase = "discover";
@@ -1056,6 +1074,7 @@ function resetDraft(options = {}) {
   renderChanges();
   setVerification("neutral", "未运行", "完成修改后，Agent 会运行项目内的检查命令。");
   renderExecutionGroups();
+  renderSubagents();
   renderTurnSummary("尚未开始");
   updateProjectDisplay();
   setConnection("已就绪");
@@ -1148,6 +1167,7 @@ function prepareRunningView(task) {
   state.usedSessionMemory = continuing;
   state.eventCount = 0;
   state.executionGroups = [];
+  state.subagents = new Map();
   state.readGroup = null;
   state.taskBrief = null;
   state.phase = "discover";
@@ -1172,6 +1192,7 @@ function prepareRunningView(task) {
   renderChanges();
   setVerification("neutral", "等待运行", "Agent 完成修改后会运行本地检查。");
   renderExecutionGroups();
+  renderSubagents();
   renderTurnSummary("执行中");
   setConnection("正在启动", "busy");
 }
@@ -1230,6 +1251,8 @@ function handleEvent(envelope) {
     addExecution("已经理解你想完成什么", taskBriefDetail(payload), timestamp, "◎");
   } else if (name === "skill_selected") {
     addExecution(`已启用「${payload.name || "任务 Skill"}」`, payload.description || "按相关工作方式继续", timestamp, "◇");
+  } else if (name.startsWith("subagent_")) {
+    handleSubagentEvent(name, payload, timestamp);
   } else if (name === "phase_changed") {
     state.phase = payload.phase || state.phase;
     updatePhaseHeading(state.phase);
@@ -1360,6 +1383,95 @@ function renderExecutionGroups(emptyMessage = "执行步骤会以简明方式显
     els.executionList.appendChild(details);
   });
   els.executionList.scrollTop = els.executionList.scrollHeight;
+}
+
+function handleSubagentEvent(name, payload, timestamp) {
+  if (name === "subagents_planned") {
+    const agents = Array.isArray(payload.agents) ? payload.agents : [];
+    agents.forEach((item) => {
+      if (item?.agent_id) state.subagents.set(item.agent_id, {...item, status: "planned"});
+    });
+    renderSubagents();
+    if (agents.length > 1) {
+      addExecution(
+        `并行安排了 ${agents.length} 个子任务`,
+        agents.map((item) => item.label || item.task || item.agent_id).join("\n"),
+        timestamp,
+        "⇉",
+      );
+    }
+    return;
+  }
+  const agentId = payload.agent_id;
+  if (!agentId) return;
+  const statusByEvent = {
+    subagent_started: "running",
+    subagent_completed: payload.status || "completed",
+    subagent_failed: "failed",
+    subagent_cancelled: "cancelled",
+    subagent_patch_ready: "patch_pending",
+    subagent_patch_applied: "patch_applied",
+    subagent_patch_conflict: "conflicted",
+  };
+  const existing = state.subagents.get(agentId) || {agent_id: agentId};
+  const next = {...existing, ...payload, status: statusByEvent[name] || existing.status};
+  state.subagents.set(agentId, next);
+  renderSubagents();
+  if (["subagent_failed", "subagent_cancelled", "subagent_patch_ready", "subagent_patch_applied", "subagent_patch_conflict"].includes(name)) {
+    const title = next.label || next.task || agentId;
+    addExecution(
+      `${title}：${subagentStatusLabel(next.status)}`,
+      next.error || next.summary || subagentPatchSummary(next.patch),
+      timestamp,
+      name === "subagent_failed" || name === "subagent_patch_conflict" ? "!" : "⇢",
+    );
+  }
+}
+
+function renderSubagents() {
+  const items = [...state.subagents.values()];
+  els.subagentPanel.classList.toggle("hidden", items.length === 0);
+  els.subagentCount.textContent = t("subagentItems", {count: items.length});
+  els.subagentList.replaceChildren();
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    const status = item.status || "planned";
+    row.className = `subagent-item status-${escapeClassName(status)}`;
+    const role = item.role === "implementer" ? t("subagentImplementer") : t("subagentScout");
+    const label = item.label || item.task || item.agent_id || t("subagentTitle");
+    const patch = subagentPatchSummary(item.patch);
+    row.innerHTML = `
+      <span class="subagent-status-dot" aria-hidden="true"></span>
+      <div class="subagent-item-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(role)}${patch ? ` · ${escapeHtml(patch)}` : ""}</small></div>
+      <span class="subagent-status-label">${escapeHtml(subagentStatusLabel(status))}</span>`;
+    els.subagentList.appendChild(row);
+  });
+}
+
+function subagentStatusLabel(status) {
+  const keyByStatus = {
+    planned: "subagentRunning",
+    running: "subagentRunning",
+    completed: "subagentCompleted",
+    failed: "subagentFailed",
+    scope_violation: "subagentFailed",
+    cancelled: "subagentCancelled",
+    patch_pending: "subagentPatchPending",
+    patch_applied: "subagentPatchApplied",
+    conflicted: "subagentConflicted",
+  };
+  return t(keyByStatus[status] || "subagentRunning");
+}
+
+function subagentPatchSummary(patch) {
+  if (!patch || typeof patch !== "object") return "";
+  const count = Number(patch.file_count || 0);
+  if (!count) return "";
+  return state.language === "en" ? `${count} changed file${count === 1 ? "" : "s"}` : `${count} 个文件`;
+}
+
+function escapeClassName(value) {
+  return String(value || "unknown").replace(/[^a-z0-9_-]/gi, "-");
 }
 
 function addProgressMessage() {

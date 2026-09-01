@@ -98,6 +98,7 @@ class RunRecord:
     result: AgentRunResult | None = None
     error: str | None = None
     session_id: str | None = None
+    subagents: dict[str, dict[str, Any]] = field(default_factory=dict)
     cancellation_requested: threading.Event = field(
         default_factory=threading.Event,
         repr=False,
@@ -282,6 +283,7 @@ class RunController:
                 emitted_session_id = safe_payload.get("session_id")
                 if isinstance(emitted_session_id, str) and emitted_session_id:
                     active.session_id = emitted_session_id
+                self._update_subagent_locked(active, name, safe_payload)
                 self._append_event_locked(active, name, safe_payload)
 
         def approval_callback(tool: Tool, arguments: dict[str, Any]) -> bool:
@@ -453,6 +455,7 @@ class RunController:
             "created_at": record.created_at,
             "updated_at": record.updated_at,
             "latest_sequence": record.next_sequence - 1,
+            "subagents": [dict(item) for item in record.subagents.values()],
             "pending_approval": (
                 record.pending_approval.public_dict()
                 if record.pending_approval is not None
@@ -471,6 +474,42 @@ class RunController:
             ),
             "error": record.error,
         }
+
+    @staticmethod
+    def _update_subagent_locked(
+        record: RunRecord,
+        name: str,
+        payload: dict[str, Any],
+    ) -> None:
+        status_by_event = {
+            "subagent_started": "running",
+            "subagent_completed": "completed",
+            "subagent_failed": "failed",
+            "subagent_cancelled": "cancelled",
+            "subagent_patch_ready": "patch_pending",
+            "subagent_patch_applied": "patch_applied",
+            "subagent_patch_conflict": "conflicted",
+        }
+        status = status_by_event.get(name)
+        agent_id = payload.get("agent_id")
+        if status is None or not isinstance(agent_id, str) or not agent_id:
+            return
+        existing = record.subagents.get(agent_id, {"agent_id": agent_id})
+        for field_name in ("label", "role", "task", "summary", "error", "bundle_id"):
+            value = payload.get(field_name)
+            if isinstance(value, str) and value:
+                existing[field_name] = value[:2_000]
+        patch = payload.get("patch")
+        if isinstance(patch, dict):
+            existing["patch"] = {
+                key: patch.get(key)
+                for key in ("bundle_id", "file_count", "additions", "deletions")
+                if isinstance(patch.get(key), (str, int))
+            }
+        existing["status"] = status
+        existing["updated_at"] = _utc_now()
+        existing.setdefault("started_at", existing["updated_at"])
+        record.subagents[agent_id] = existing
 
     def _require_run_locked(self, run_id: str) -> RunRecord:
         try:
@@ -491,6 +530,10 @@ class RunController:
             purpose = safe_arguments.get("purpose")
             prefix = "运行项目检查" if purpose == "verify" else "运行本地命令"
             description = f"{prefix}：{safe_arguments.get('command', '')}"
+        elif tool.name == "apply_subagent_patches":
+            bundle_ids = safe_arguments.get("bundle_ids")
+            count = len(bundle_ids) if isinstance(bundle_ids, list) else 1
+            description = f"合并 {count} 组并行子任务修改"
         else:
             description = f"执行 {tool.name}"
         return {
@@ -516,7 +559,10 @@ class RunController:
 
     @staticmethod
     def _batch_summary(items: list[dict[str, Any]]) -> str:
-        writes = sum(item.get("tool") in {"write_file", "edit_file"} for item in items)
+        writes = sum(
+            item.get("tool") in {"write_file", "edit_file", "apply_subagent_patches"}
+            for item in items
+        )
         commands = sum(item.get("tool") == "run_command" for item in items)
         parts = []
         if writes:
@@ -567,11 +613,29 @@ class RunController:
             prompt_cache_enabled=config.prompt_cache_enabled,
             prompt_cache_key=config.prompt_cache_key,
         )
+        registry = create_default_registry()
+        skills = SkillRegistry.with_user_skills()
+        if config.subagents_enabled:
+            from ..subagents import (
+                ApplySubagentPatchesTool,
+                DelegateSubagentsTool,
+                build_default_coordinator,
+            )
+
+            coordinator = build_default_coordinator(
+                config=config,
+                skill_registry=skills,
+                event_callback=event_callback,
+                cancellation_callback=cancellation_callback,
+                response_language=request.language,
+            )
+            registry.register(DelegateSubagentsTool(coordinator))
+            registry.register(ApplySubagentPatchesTool(coordinator))
         runner = AgentRunner(
             model=model,
-            registry=create_default_registry(),
+            registry=registry,
             config=config,
-            skill_registry=SkillRegistry.with_user_skills(),
+            skill_registry=skills,
             approval_callback=approval_callback,
             batch_approval_callback=batch_approval_callback,
             event_callback=event_callback,

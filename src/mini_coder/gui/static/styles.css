@@ -188,6 +188,20 @@ button { color: inherit; }
 .detail-card-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 14px; border-bottom: 1px solid var(--border); }
 .detail-card-header h3 { margin: 3px 0 0; font-size: 12px; }
 .detail-empty { padding: 24px 13px; color: var(--muted); text-align: center; font-size: 10px; }
+.subagent-card { border-color: #d9def8; background: linear-gradient(180deg, #fff, #fbfcff); }
+.subagent-list { display: grid; }
+.subagent-item { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 11px 14px; border-bottom: 1px solid #edf0f7; }
+.subagent-item:last-child { border-bottom: 0; }
+.subagent-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #a8b0c0; }
+.subagent-item-copy { min-width: 0; }
+.subagent-item-copy strong, .subagent-item-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-item-copy strong { font-size: 10px; }
+.subagent-item-copy small { margin-top: 3px; color: var(--muted); font-size: 8px; }
+.subagent-status-label { color: var(--muted); font-size: 8px; font-weight: 800; white-space: nowrap; }
+.subagent-item.status-running .subagent-status-dot, .subagent-item.status-planned .subagent-status-dot { background: var(--blue); animation: pulse 1.3s ease-in-out infinite; }
+.subagent-item.status-completed .subagent-status-dot, .subagent-item.status-patch_applied .subagent-status-dot { background: var(--green); }
+.subagent-item.status-patch_pending .subagent-status-dot { background: var(--yellow); }
+.subagent-item.status-failed .subagent-status-dot, .subagent-item.status-scope_violation .subagent-status-dot, .subagent-item.status-conflicted .subagent-status-dot { background: var(--red); }
 .approval-card { border-color: #ead5a9; box-shadow: 0 12px 35px rgba(129, 87, 19, .1); }
 .approval-title { margin: 13px 14px 8px; font-size: 11px; line-height: 1.55; }
 .risk-badge, .verification-badge { padding: 4px 7px; border-radius: 999px; font-size: 8px; font-weight: 850; text-transform: uppercase; }

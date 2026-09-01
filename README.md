@@ -16,7 +16,7 @@
 
 | 证据 | 结果 |
 |---|---:|
-| 离线单元测试 | 177/177 通过 |
+| 离线单元测试 | 195/195 通过 |
 | 确定性端到端 Eval | 10/10 通过 |
 | 真实 Responses Eval | 1/1 `completed_verified` |
 | 两分钟多文件演示 | 5/5 测试通过，未修改测试 |
@@ -37,6 +37,7 @@
 - ChangeTracker：写入前生成 unified diff 和 hash 检查，成功修改保存快照与有序历史；支持冲突安全的 Session 级 Undo。
 - 任务成形：运行时识别构建、修复、加功能、改进和解释类意图，按 `discover → frame → locate → implement → verify → finish` 推进；TaskLedger 在同一会话内保留目标、假设、相关文件、修改、证据和未解决项。
 - 轻量 Skills：内置修复问题、从零构建小项目、完善现有功能和整理项目文档四种工作方式；运行时只按任务意图加载相关的一项，也支持用户手动创建、从本地 Markdown 或公开 GitHub 地址导入自己的 Skill，不把全部说明重复塞进模型上下文。
+- 有界并行 Subagents：只有存在两个真正独立的调查方向或实现切片时才委派，最多并行两个、最多两批；Scout 只能读取，Implementer 只在隔离副本中修改授权路径，补丁经主 Agent 一次确认和冲突检查后才原子写回真实工作区。
 - 验证闭环：Session 记录真实验证命令、覆盖路径/技术区域、退出码、耗时和输出摘要；正常验收必须成功退出，负向输入检查只能作为补充证据，依赖或运行环境错误不能伪装成通过。
 - 项目理解：启动时注入有界工作区概览，识别清单、入口、测试、验证命令、项目说明和 Git 起始状态，并跳过依赖、缓存与构建目录。
 - 工具体验：文件列表和搜索支持分页，读取支持明确的继续行号，搜索返回过滤原因；失败结果包含稳定错误码和下一步建议。
@@ -57,6 +58,7 @@ Interfaces
           ├─ WorkspaceInspector  清单、入口、测试、说明与 Git 基线
           ├─ TaskFramer/Ledger   模糊意图、默认假设、阶段与收敛状态
           ├─ SkillRegistry       确定性选择并按需注入一个相关 Skill
+          ├─ SubagentCoordinator 有界并行、只读侦察与隔离补丁
           ├─ ContextManager      本地限制发送给模型的上下文
           ├─ ChangeTracker       Diff、hash、原子写入、冲突检测与 Undo
           ├─ VerificationTracker 验证命令、修改版本、失效规则与完成判定
@@ -182,6 +184,28 @@ mini-coder-gui
 左下角的拼图按钮会打开 Skill 页面。四个内置 Skill 以 2×2 展示且不可删除；用户可以手动填写名称、适用场景和做法，也可以导入最多 64,000 字符的本地 Markdown，或从公开 GitHub 仓库、目录和 Markdown 文件地址读取 `SKILL.md`。自定义内容保存在当前用户的 `~/.mini-coder/skills/` 下，GUI 与 CLI 共用；也可以通过 `MINI_CODER_SKILLS_DIR` 指向其他本地目录。Skill 列表会随内容滚动，不会把“我的 Skills”固定在大段空白之后。
 
 Skill 选择发生在本地，不额外调用一次模型。每轮最多选择一个：明确提到名称时优先使用对应 Skill，其次根据文档关键词、自定义 Skill 名称/简介以及构建或修复意图选择。只有选中的说明会追加到本轮提示词；系统规则、工具定义和安全边界保持稳定并始终拥有更高优先级。
+
+### Subagents
+
+Subagent 不是默认步骤，也不是把主任务机械拆成更多模型请求。主 Agent 只有在工作可以明确分成互不重叠的两部分时才会调用它，例如同时调查前端和后端，或在两个不同目录中实现彼此独立的改动。简单修改仍由主 Agent 直接完成。
+
+- `scout` 使用独立模型会话，但工具注册表只含文件列表、读取和搜索，不能写文件或运行命令。
+- `implementer` 获得工作区的有界隔离副本和显式 `allowed_paths`；它可以修改和验证副本，但无法直接触碰真实项目。
+- 两个 Implementer 的授权路径必须由主 Agent 设计为不重叠；返回的补丁如果互相重叠，或真实工作区在执行期间发生变化，会拒绝自动合并。
+- 所有子任务的模型、工具和 Token usage 都计入父任务总预算；原始提示、生成代码和完整子事件不会转发到 GUI 或父上下文。
+- 写回通过 `apply_subagent_patches` 一次批量审批和原子应用；随后由主 Agent 在真实工作区运行一次集成验证并决定是否完成。
+
+默认上限可在 `agent.toml` 中调整，保持关闭也只需设置 `subagents_enabled = false`：
+
+```toml
+subagents_enabled = true
+max_parallel_subagents = 2
+max_subagent_batches = 2
+max_subagent_model_calls = 5
+max_subagent_tool_calls = 16
+max_subagent_total_tokens = 40000
+max_subagent_context_tokens = 8000
+```
 
 可通过 `--log agent-events.jsonl` 保存可选的本地 JSONL 事件日志。每项事件包含 schema 版本、UTC 时间、run/session ID、step 和运行时长。日志写入失败只产生可见警告，不会中断主任务。事件内容会经过统一凭据脱敏，但仍可能含有代码或命令输出，因此默认关闭，也不应提交。
 
@@ -335,7 +359,7 @@ Undo 只保证撤销由 ChangeTracker 管理的 `write_file` 和 `edit_file` 修
 
 ## 测试
 
-核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 166 项：
+核心测试使用标准库的 `unittest` 和假模型，不需要 API key，也不会产生模型费用；当前完整套件为 195 项：
 
 ```powershell
 $env:PYTHONPATH = "src"

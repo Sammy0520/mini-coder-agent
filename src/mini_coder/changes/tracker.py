@@ -135,6 +135,74 @@ class ChangeTracker:
         _atomic_write_bytes(path, after_bytes)
         return ChangeRecord.from_prepared(prepared)
 
+    def preflight_many(self, prepared_changes: list[PreparedChange]) -> None:
+        """Validate an entire change batch before any workspace file is written."""
+        seen: set[str] = set()
+        for prepared in prepared_changes:
+            if prepared.path in seen:
+                raise ChangeError(
+                    f"A change batch cannot modify the same path twice: {prepared.path}"
+                )
+            seen.add(prepared.path)
+            self._reject_symlinks(prepared.path)
+            path = self._resolve_record_path(prepared.path)
+            if path.exists() and not path.is_file():
+                raise ChangeConflictError(
+                    f"File changed after approval: {prepared.path} is no longer a regular file"
+                )
+            current_bytes = path.read_bytes() if path.exists() else None
+            current_hash = _hash_bytes(current_bytes) if current_bytes is not None else None
+            if current_hash != prepared.before_hash:
+                raise ChangeConflictError(
+                    f"File changed after approval: {prepared.path}; expected "
+                    f"{prepared.before_hash or '<missing>'}, found "
+                    f"{current_hash or '<missing>'}"
+                )
+            after_bytes = _encode(prepared.after_snapshot, prepared.encoding)
+            if _hash_bytes(after_bytes) != prepared.after_hash:
+                raise ChangeError(
+                    f"Prepared change after_hash does not match its snapshot: {prepared.path}"
+                )
+
+    def apply_many(self, prepared_changes: list[PreparedChange]) -> list[ChangeRecord]:
+        """Apply a preflighted batch and roll back earlier files on an I/O failure.
+
+        Hash conflicts are detected for every target before the first write. The
+        rollback path is intentionally local and snapshot-based so a multi-file
+        Subagent patch never leaves a known partial application behind.
+        """
+        if not prepared_changes:
+            return []
+        self.preflight_many(prepared_changes)
+        applied: list[PreparedChange] = []
+        try:
+            for prepared in prepared_changes:
+                path = self._resolve_record_path(prepared.path)
+                _atomic_write_bytes(
+                    path,
+                    _encode(prepared.after_snapshot, prepared.encoding),
+                )
+                applied.append(prepared)
+        except (OSError, ChangeError) as exc:
+            rollback_errors: list[str] = []
+            for item in reversed(applied):
+                path = self._resolve_record_path(item.path)
+                try:
+                    if item.before_hash is None:
+                        path.unlink(missing_ok=True)
+                    elif item.before_snapshot is not None:
+                        _atomic_write_bytes(
+                            path,
+                            _encode(item.before_snapshot, item.encoding),
+                        )
+                except (OSError, ChangeError) as rollback_exc:
+                    rollback_errors.append(f"{item.path}: {rollback_exc}")
+            detail = f"Atomic change batch failed: {exc}"
+            if rollback_errors:
+                detail += "; rollback also failed for " + ", ".join(rollback_errors)
+            raise ChangeError(detail) from exc
+        return [ChangeRecord.from_prepared(item) for item in prepared_changes]
+
     def current_hash(self, relative: str) -> str | None:
         path = self._resolve_record_path(relative)
         self._reject_symlinks(relative)
