@@ -38,4 +38,4 @@ Linux/macOS 将 `.venv\Scripts` 换为 `.venv/bin`。可在 `agent.toml` 中配�
 .\.venv\Scripts\python.exe scripts\run-unit-tests.py
 ```
 
-Mini Coder 适合受信任的本地工作区，不提供操作系统级沙箱，也不以替代 Codex 等通用商业 Agent 为目标。设计取舍、对比边界与答辩问题见 [设计决策与答辩](docs/design-decisions-and-defense.md)，实现细节见 [Memory V2](docs/architecture/cache-stable-context-compression-v2.md) 与 [工具—模型重叠](docs/architecture/tool-model-overlap.md)。
+Mini Coder 适合受信任的本地工作区，不提供操作系统级沙箱，也不以替代 Codex 等通用商业 Agent 为目标。
